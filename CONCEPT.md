@@ -369,7 +369,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.23 Reports (M9)
 
-- [ ] Saved parameterized SQL reports
+- [x] Saved parameterized SQL reports
 - [x] Built-in reports (invalid objects, object sizes, grants, ...)
 - [x] Export report to HTML/XLSX (through the result grid's export)
 - [x] Simple charts for query results (bar/line) – optional

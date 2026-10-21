@@ -184,6 +184,46 @@ select owner, job_name, enabled, state, job_type, repeat_interval,
     },
 ];
 
+/// A report saved by the user; binds and `&substitution` variables are its
+/// parameters (prompted when it runs).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UserReport {
+    pub name: String,
+    #[serde(default)]
+    pub category: String,
+    pub sql: String,
+}
+
+/// The `reports.toml` file.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct UserReports {
+    #[serde(default, rename = "report")]
+    pub reports: Vec<UserReport>,
+}
+
+impl UserReports {
+    /// Adds or replaces (same name and category) a report.
+    pub fn save(&mut self, report: UserReport) {
+        self.reports
+            .retain(|r| !(r.name == report.name && r.category == report.category));
+        self.reports.push(report);
+        self.reports
+            .sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
+    }
+
+    /// Categories in order, "" (uncategorized) last.
+    pub fn categories(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for r in &self.reports {
+            if !out.contains(&r.category.as_str()) {
+                out.push(&r.category);
+            }
+        }
+        out.sort_by_key(|c| (c.is_empty(), *c));
+        out
+    }
+}
+
 /// Categories in display order.
 pub fn categories() -> Vec<&'static str> {
     let mut out: Vec<&str> = Vec::new();
@@ -206,6 +246,32 @@ mod tests {
             assert_eq!(statements.len(), 1, "{}", r.name);
         }
         assert!(categories().len() >= 5);
+    }
+
+    #[test]
+    fn user_reports_round_trip() {
+        let mut reports = UserReports::default();
+        reports.save(UserReport {
+            name: "Orders by day".into(),
+            category: "Sales".into(),
+            sql: "select trunc(ordered_at), count(*) from orders where customer = :customer group by trunc(ordered_at)".into(),
+        });
+        reports.save(UserReport {
+            name: "Misc".into(),
+            category: String::new(),
+            sql: "select 1 from dual".into(),
+        });
+        reports.save(UserReport {
+            name: "Orders by day".into(),
+            category: "Sales".into(),
+            sql: "select 2 from dual".into(),
+        });
+        assert_eq!(reports.reports.len(), 2);
+        assert_eq!(reports.categories(), ["Sales", ""]);
+        let text = toml::to_string(&reports).unwrap();
+        let back: UserReports = toml::from_str(&text).unwrap();
+        assert_eq!(back.reports, reports.reports);
+        assert!(text.contains("[[report]]"), "{text}");
     }
 
     #[test]

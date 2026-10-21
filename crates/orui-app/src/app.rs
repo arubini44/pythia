@@ -85,6 +85,9 @@ pub struct OruiApp {
     connecting: Option<String>,
 
     history: History,
+    user_reports: crate::reports::UserReports,
+    /// "Save as report" dialog: name, category, SQL.
+    save_report: Option<(String, String, String)>,
     debug: orui_debugger::ui::DebugSession,
     /// The running debug call: (document, task request id).
     debug_run: Option<(DocId, u64)>,
@@ -130,6 +133,10 @@ impl OruiApp {
             .as_ref()
             .map(|p| load_or_default(&history_file(p)))
             .unwrap_or_default();
+        let user_reports: crate::reports::UserReports = paths
+            .as_ref()
+            .map(|p| load_or_default(&reports_file(p)))
+            .unwrap_or_default();
         let workspace: Option<Workspace> =
             cc.storage.and_then(|s| eframe::get_value(s, WORKSPACE_KEY));
 
@@ -151,6 +158,8 @@ impl OruiApp {
             last_profile: None,
             connecting: None,
             history,
+            user_reports,
+            save_report: None,
             debug: Default::default(),
             debug_run: None,
             catalogs: HashMap::new(),
@@ -243,6 +252,89 @@ impl OruiApp {
             ThemeChoice::Light => egui::ThemePreference::Light,
         });
         ctx.set_zoom_factor(self.settings.ui_scale);
+    }
+
+    fn save_user_reports(&self) {
+        if let Some(paths) = &self.paths
+            && let Err(e) = save_toml(&reports_file(paths), &self.user_reports)
+        {
+            error!("saving reports: {e:#}");
+        }
+    }
+
+    /// The "Save as report" dialog.
+    fn save_report_ui(&mut self, ctx: &egui::Context) {
+        let Some((name, category, sql)) = &mut self.save_report else {
+            return;
+        };
+        let mut open = true;
+        let mut save = false;
+        egui::Window::new("Save as report")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                egui::Grid::new("save_report")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Name");
+                        let r = ui.add(egui::TextEdit::singleline(name).desired_width(280.0));
+                        if name.is_empty() && ui.memory(|m| m.focused().is_none()) {
+                            r.request_focus();
+                        }
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            save = true;
+                        }
+                        ui.end_row();
+                        ui.label("Category");
+                        ui.add(
+                            egui::TextEdit::singleline(category)
+                                .hint_text("optional, e.g. Sales")
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+                    });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Bind variables (:name) and &substitutions become parameters, \
+                         asked for when the report runs.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(4.0);
+                let first = sql
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or_default();
+                ui.label(RichText::new(first).monospace().weak());
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!name.trim().is_empty(), egui::Button::new("Save"))
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                });
+            });
+        if save && !name.trim().is_empty() {
+            let report = crate::reports::UserReport {
+                name: name.trim().to_owned(),
+                category: category.trim().to_owned(),
+                sql: sql.clone(),
+            };
+            self.log(format!("Saved report {}", report.name));
+            self.user_reports.save(report);
+            self.save_user_reports();
+            self.save_report = None;
+        } else if !open {
+            self.save_report = None;
+        }
     }
 
     fn save_settings(&self) {
@@ -1016,6 +1108,25 @@ impl OruiApp {
                 }
             }
             Command::History => self.history_dialog.toggle(),
+            Command::SaveAsReport => {
+                let text = self
+                    .focused
+                    .and_then(|id| self.docs.get_mut(&id))
+                    .and_then(Document::sql_window)
+                    .map(|w| {
+                        w.statements(true)
+                            .into_iter()
+                            .next()
+                            .map(|s| s.sql)
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                if text.trim().is_empty() {
+                    self.log("Put the cursor on a query to save it as a report");
+                } else {
+                    self.save_report = Some((String::new(), String::new(), text));
+                }
+            }
             Command::RenameSymbol => {
                 let editor = match self
                     .focused
@@ -1468,9 +1579,11 @@ impl OruiApp {
         &mut self,
         ui: &mut Ui,
         commands: &mut Vec<Command>,
-        open_report: &mut Option<&'static crate::reports::Report>,
+        open_report: &mut Option<(String, String)>,
     ) {
         let keymap = &self.keymap;
+        let user_reports = &self.user_reports;
+        let mut delete = None;
         let ctx = ui.ctx().clone();
         let mut item = |ui: &mut Ui, command: Command| {
             let button = egui::Button::new(command.short_label())
@@ -1550,12 +1663,42 @@ impl OruiApp {
                             .filter(|r| r.category == category)
                         {
                             if ui.button(report.name).clicked() {
-                                *open_report = Some(report);
+                                *open_report = Some((report.name.into(), report.sql.into()));
                                 ui.close();
                             }
                         }
                     });
                 }
+                if !user_reports.reports.is_empty() {
+                    ui.separator();
+                    for category in user_reports.categories() {
+                        let label = if category.is_empty() {
+                            "My reports"
+                        } else {
+                            category
+                        };
+                        ui.menu_button(label, |ui| {
+                            for (i, report) in user_reports.reports.iter().enumerate() {
+                                if report.category != category {
+                                    continue;
+                                }
+                                let r = ui.button(&report.name);
+                                if r.clicked() {
+                                    *open_report = Some((report.name.clone(), report.sql.clone()));
+                                    ui.close();
+                                }
+                                r.context_menu(|ui| {
+                                    if ui.button("Delete report").clicked() {
+                                        delete = Some(i);
+                                        ui.close();
+                                    }
+                                });
+                            }
+                        });
+                    }
+                }
+                ui.separator();
+                item(ui, Command::SaveAsReport);
             });
             ui.menu_button("Monitor", |ui| {
                 item(ui, Command::MonitorDashboard);
@@ -1582,6 +1725,11 @@ impl OruiApp {
             });
             ui.menu_button("Help", |ui| item(ui, Command::About));
         });
+        if let Some(i) = delete {
+            let report = self.user_reports.reports.remove(i);
+            self.log(format!("Deleted report {}", report.name));
+            self.save_user_reports();
+        }
     }
 
     fn toolbar(&self, ui: &mut Ui, commands: &mut Vec<Command>) {
@@ -1882,6 +2030,7 @@ impl OruiApp {
             }
             None => {}
         }
+        self.save_report_ui(ctx);
         match self.settings_dialog.ui(ctx, &mut self.settings) {
             crate::settings_dialog::SettingsResult::Changed => {
                 self.keymap =
@@ -1987,7 +2136,8 @@ impl eframe::App for OruiApp {
             || self.palette.open
             || self.finder.open
             || self.history_dialog.open
-            || self.settings_dialog.is_recording();
+            || self.settings_dialog.is_recording()
+            || self.save_report.is_some();
         if self.debug.is_active() && !modal_open {
             self.debug.handle_keys(&ctx);
         }
@@ -2006,10 +2156,7 @@ impl eframe::App for OruiApp {
                 Some(connection) => {
                     let id = self.add_doc(
                         Some(connection),
-                        DocKind::Sql(SqlWindow::new(
-                            report.name.to_owned(),
-                            report.sql.to_owned(),
-                        )),
+                        DocKind::Sql(SqlWindow::new(report.0, report.1)),
                     );
                     self.execute(id, false);
                 }
@@ -2576,6 +2723,10 @@ fn format_editor(
         line.min(new_line_count),
     );
     "Formatted".into()
+}
+
+fn reports_file(paths: &Paths) -> std::path::PathBuf {
+    paths.config_dir.join("reports.toml")
 }
 
 fn history_file(paths: &Paths) -> std::path::PathBuf {

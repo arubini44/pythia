@@ -18,6 +18,8 @@ struct Palette {
     surface: Color32,
     /// Floating windows, menus, popups.
     raised: Color32,
+    /// Text fields; must stand out from `raised` (dialogs) and `panel`.
+    field: Color32,
     border: Color32,
     text: Color32,
     text_weak: Color32,
@@ -35,6 +37,7 @@ const DARK: Palette = Palette {
     panel: Color32::from_rgb(0x1e, 0x1f, 0x23),
     surface: Color32::from_rgb(0x1a, 0x1b, 0x1e),
     raised: Color32::from_rgb(0x27, 0x29, 0x2e),
+    field: Color32::from_rgb(0x1a, 0x1b, 0x1e),
     border: Color32::from_rgb(0x32, 0x35, 0x3b),
     text: Color32::from_rgb(0xdc, 0xde, 0xe3),
     text_weak: Color32::from_rgb(0x8b, 0x90, 0x9a),
@@ -52,6 +55,7 @@ const LIGHT: Palette = Palette {
     panel: Color32::from_rgb(0xf4, 0xf5, 0xf7),
     surface: Color32::from_rgb(0xff, 0xff, 0xff),
     raised: Color32::from_rgb(0xff, 0xff, 0xff),
+    field: Color32::from_rgb(0xec, 0xee, 0xf2),
     border: Color32::from_rgb(0xd9, 0xdc, 0xe1),
     text: Color32::from_rgb(0x1f, 0x23, 0x28),
     text_weak: Color32::from_rgb(0x6a, 0x71, 0x7c),
@@ -107,6 +111,7 @@ fn apply(style: &mut Style, p: &Palette) {
     v.panel_fill = p.panel;
     v.window_fill = p.raised;
     v.extreme_bg_color = p.surface;
+    v.text_edit_bg_color = Some(p.field);
     v.code_bg_color = p.surface;
     v.faint_bg_color = p.stripe;
     v.window_stroke = Stroke::new(1.0, p.border);

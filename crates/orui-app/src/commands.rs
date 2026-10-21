@@ -54,6 +54,7 @@ commands! {
     ExecuteWithStatistics => "Session: Run with Statistics (actual plan)",
     ExecuteToFile => "Session: Execute Query to File…",
     Profile => "Session: Profile PL/SQL (DBMS_HPROF)",
+    SaveAsReport => "Reports: Save Query as Report…",
     Cancel => "Session: Break (cancel execution)",
     Commit => "Session: Commit",
     Rollback => "Session: Rollback",

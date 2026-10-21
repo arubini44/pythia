@@ -1283,3 +1283,22 @@ end orui_prof_pkg;
     });
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }
+
+/// "Save as report" takes the query at the cursor.
+#[test]
+fn save_as_report() {
+    if out_dir().is_none() {
+        return;
+    }
+    let mut h = harness(false);
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "none".into(),
+        text: "select trunc(ordered_at) as day, count(*) as orders\n  from orders\n where customer = :customer\n group by trunc(ordered_at)".into(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::SaveAsReport);
+    h.run_steps(3);
+    save(&mut h, "save-as-report");
+}

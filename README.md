@@ -78,6 +78,12 @@ for Linux, Windows and macOS.
 - Import CSV/Excel: drop a file, check inferred types (decimal commas,
   date formats), import into a new or existing table with array DML.
 
+**Reports**
+- Built-in reports (invalid objects, unindexed foreign keys, largest
+  segments, top SQL, locks, jobs, …) open as editable queries.
+- Save any query as your own report; bind and substitution variables are
+  asked for when it runs.
+
 **Scheduler jobs**
 - All DBMS_SCHEDULER jobs with state, schedule, last and next run; run now,
   stop, enable, disable, drop; recent runs with errors.
