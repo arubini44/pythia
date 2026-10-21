@@ -44,6 +44,8 @@ pub struct ConnectionProfile {
     pub read_only: bool,
     /// Optional RGB accent shown in tabs and the status bar.
     pub color: Option<[u8; 3]>,
+    /// The password is stored in the OS keychain.
+    pub save_password: bool,
 }
 
 impl ConnectionProfile {

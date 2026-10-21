@@ -3,76 +3,78 @@ use std::collections::{BTreeMap, HashMap};
 use egui::{Color32, RichText, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle, TabViewer};
 use orui_config::{
-    ConnectionProfile, Connections, Paths, Settings, ThemeChoice, load_toml, save_toml,
+    ConnectionProfile, Connections as SavedConnections, Paths, Settings, ThemeChoice, load_toml,
+    save_toml,
 };
-use orui_db::{ConnectParams, DbEvent, DbRequest, ServerInfo, Session};
-use orui_plsql::StatementKind;
+use orui_db::{DbEvent, DbRequest, MetaQuery, MetaResult};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
+use crate::browser::Browser;
 use crate::commands::{Command, Keymap};
-use crate::dialogs::{CommandPalette, Confirm, ConfirmAction, ConnectDialog, confirm_ui};
-use crate::sql_window::{Next, SqlWindow, WindowId};
+use crate::connections::{Connections, Notify, SessionKey};
+use crate::dialogs::{
+    CommandPalette, Confirm, ConfirmAction, ConnectDialog, FinderAction, HistoryDialog,
+    ObjectFinder, confirm_ui, opens_as_program,
+};
+use crate::documents::{
+    DocContext, DocId, DocKind, Document, Effects, ObjectRef, OpenRequest, Target, request_id,
+};
+use crate::history::History;
+use crate::object_view::ObjectView;
+use crate::program_window::ProgramWindow;
+use crate::sql_window::SqlWindow;
+use crate::{secrets, theme};
+use orui_ui::icons::{Icon, icon_label};
 
-const WORKSPACE_KEY: &str = "orui-workspace";
+const WORKSPACE_KEY: &str = "orui-workspace-v2";
 const MISSING_CLIENT_HINT: &str = "Oracle Instant Client could not be loaded. Install it from \
      oracle.com and put its directory on LD_LIBRARY_PATH (Linux), PATH (Windows) or \
      DYLD_LIBRARY_PATH (macOS).";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tab {
-    ObjectBrowser,
+    Browser,
     Log,
-    Sql(WindowId),
+    Doc(DocId),
 }
 
-/// Layout and editor contents, restored on the next start.
+/// Layout and documents, restored on the next start.
 #[derive(Serialize, Deserialize)]
 struct Workspace {
     dock: DockState<Tab>,
-    windows: BTreeMap<WindowId, SqlWindow>,
-    next_window: u64,
+    docs: BTreeMap<DocId, Document>,
+    next_doc: u64,
     last_profile: Option<ConnectionProfile>,
-}
-
-enum ConnStatus {
-    Connecting,
-    Connected(ServerInfo),
-}
-
-struct ActiveConnection {
-    profile: ConnectionProfile,
-    session: Session,
-    status: ConnStatus,
-    pending_tx: bool,
-    autocommit: bool,
 }
 
 pub struct OruiApp {
     paths: Option<Paths>,
     settings: Settings,
-    saved: Connections,
+    saved: SavedConnections,
     keymap: Keymap,
+    notify: Notify,
 
     dock: DockState<Tab>,
-    windows: BTreeMap<WindowId, SqlWindow>,
-    next_window: u64,
-    /// The SQL window commands act on: the focused one, or the last focused.
-    focused: Option<WindowId>,
+    docs: BTreeMap<DocId, Document>,
+    next_doc: u64,
+    /// The document commands act on: the focused one, or the last focused.
+    focused: Option<DocId>,
 
-    // Single connection for now; multiple connections and session modes
-    // (multi/dual/single) follow in M1 (CONCEPT.md §5.2).
-    conn: Option<ActiveConnection>,
+    conns: Connections,
+    browser: Browser,
+    /// Main-session requests issued by documents, routed back by id.
+    routes: HashMap<u64, DocId>,
     last_profile: Option<ConnectionProfile>,
-    next_request: u64,
-    /// Which window a request belongs to.
-    requests: HashMap<u64, WindowId>,
-    /// Window that ran the last statement; gets DBMS_OUTPUT and notices.
-    last_window: Option<WindowId>,
+    /// Connection the connect dialog is currently opening.
+    connecting: Option<String>,
 
+    history: History,
     log: Vec<String>,
     connect_dialog: ConnectDialog,
     palette: CommandPalette,
+    finder: ObjectFinder,
+    history_dialog: HistoryDialog,
     confirm: Option<Confirm>,
     about_open: bool,
     /// Exit was confirmed; don't ask again on the next close request.
@@ -85,9 +87,13 @@ impl OruiApp {
             .as_ref()
             .map(|p| load_or_default(&p.settings_file()))
             .unwrap_or_default();
-        let saved: Connections = paths
+        let saved: SavedConnections = paths
             .as_ref()
             .map(|p| load_or_default(&p.connections_file()))
+            .unwrap_or_default();
+        let history: History = paths
+            .as_ref()
+            .map(|p| load_or_default(&history_file(p)))
             .unwrap_or_default();
         let workspace: Option<Workspace> =
             cc.storage.and_then(|s| eframe::get_value(s, WORKSPACE_KEY));
@@ -97,58 +103,68 @@ impl OruiApp {
             keymap: Keymap::new(settings.keymap),
             settings,
             saved,
+            notify: Notify(cc.egui_ctx.clone()),
             dock: DockState::new(vec![]),
-            windows: BTreeMap::new(),
-            next_window: 1,
+            docs: BTreeMap::new(),
+            next_doc: 1,
             focused: None,
-            conn: None,
+            conns: Connections::default(),
+            browser: Browser::default(),
+            routes: HashMap::new(),
             last_profile: None,
-            next_request: 1,
-            requests: HashMap::new(),
-            last_window: None,
+            connecting: None,
+            history,
             log: Vec::new(),
             connect_dialog: ConnectDialog::default(),
             palette: CommandPalette::default(),
+            finder: ObjectFinder::default(),
+            history_dialog: HistoryDialog::default(),
             confirm: None,
             about_open: false,
             quit_confirmed: false,
         };
         match workspace {
-            Some(ws) if !ws.windows.is_empty() => {
+            Some(ws) if !ws.docs.is_empty() => {
                 app.dock = ws.dock;
-                app.windows = ws.windows;
-                app.next_window = ws.next_window;
+                app.docs = ws.docs;
+                app.next_doc = ws.next_doc;
                 app.last_profile = ws.last_profile;
-                // Drop tabs whose window data went missing.
-                let windows = &app.windows;
+                let docs = &app.docs;
                 app.dock
-                    .retain_tabs(|tab| !matches!(tab, Tab::Sql(id) if !windows.contains_key(id)));
+                    .retain_tabs(|tab| !matches!(tab, Tab::Doc(id) if !docs.contains_key(id)));
             }
             _ => app.reset_layout(),
         }
-        app.focused = app.windows.keys().next().copied();
+        app.focused = app.docs.keys().next().copied();
 
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        theme::install(&cc.egui_ctx);
         app.apply_settings(&cc.egui_ctx);
         app.log("orui started");
         app
     }
 
     fn reset_layout(&mut self) {
-        let id = self.new_window_id();
-        self.windows
-            .entry(id)
-            .or_insert_with(|| SqlWindow::new(format!("SQL Window {}", id.0)));
-        let sql_tabs: Vec<Tab> = self.windows.keys().map(|id| Tab::Sql(*id)).collect();
-        let mut dock = DockState::new(sql_tabs);
+        if self.docs.is_empty() {
+            let id = self.new_doc_id();
+            self.docs.insert(
+                id,
+                Document {
+                    connection: None,
+                    kind: DocKind::Sql(SqlWindow::new("SQL 1".into(), String::new())),
+                },
+            );
+        }
+        let tabs: Vec<Tab> = self.docs.keys().map(|id| Tab::Doc(*id)).collect();
+        let mut dock = DockState::new(tabs);
         let surface = dock.main_surface_mut();
-        let [_, _browser] = surface.split_left(NodeIndex::root(), 0.22, vec![Tab::ObjectBrowser]);
+        surface.split_left(NodeIndex::root(), 0.24, vec![Tab::Browser]);
         self.dock = dock;
     }
 
-    fn new_window_id(&mut self) -> WindowId {
-        let id = WindowId(self.next_window);
-        self.next_window += 1;
+    fn new_doc_id(&mut self) -> DocId {
+        let id = DocId(self.next_doc);
+        self.next_doc += 1;
         id
     }
 
@@ -169,10 +185,263 @@ impl OruiApp {
         }
     }
 
+    fn save_history(&mut self) {
+        if !self.history.dirty {
+            return;
+        }
+        if let Some(paths) = &self.paths {
+            match save_toml(&history_file(paths), &self.history) {
+                Ok(()) => self.history.dirty = false,
+                Err(e) => error!("saving history: {e:#}"),
+            }
+        }
+    }
+
     fn log(&mut self, line: impl Into<String>) {
         let line = line.into();
         info!("{line}");
         self.log.push(line);
+    }
+
+    /// The connection new documents and commands use when nothing is focused.
+    fn current_connection(&self) -> Option<String> {
+        self.focused
+            .and_then(|id| self.docs.get(&id))
+            .and_then(|d| d.connection.clone())
+            .filter(|c| self.conns.get(c).is_some())
+            .or_else(|| self.browser.connection.clone())
+            .or_else(|| self.conns.open.keys().next().cloned())
+    }
+
+    fn doc_context(&self, id: DocId) -> DocContext<'_> {
+        let connected = self
+            .docs
+            .get(&id)
+            .and_then(|d| d.connection.as_deref())
+            .and_then(|c| self.conns.get(c))
+            .is_some_and(|c| c.is_connected());
+        DocContext {
+            id,
+            settings: &self.settings,
+            connected,
+            fetch_size: self.settings.fetch_size,
+        }
+    }
+
+    // ----- documents ------------------------------------------------------
+
+    fn add_doc(&mut self, connection: Option<String>, kind: DocKind) -> DocId {
+        let id = self.new_doc_id();
+        let mut doc = Document { connection, kind };
+        let effects = doc.on_attach();
+        self.docs.insert(id, doc);
+        self.open_tab(Tab::Doc(id));
+        self.focused = Some(id);
+        self.apply(Some(id), effects);
+        id
+    }
+
+    fn new_sql_title(&self) -> String {
+        let n = self
+            .docs
+            .values()
+            .filter(|d| matches!(d.kind, DocKind::Sql(_)))
+            .count()
+            + 1;
+        format!("SQL {n}")
+    }
+
+    fn open(&mut self, request: OpenRequest) {
+        match request {
+            OpenRequest::Sql {
+                connection,
+                text,
+                run,
+            } => {
+                let title = self.new_sql_title();
+                let id = self.add_doc(Some(connection), DocKind::Sql(SqlWindow::new(title, text)));
+                if run {
+                    self.execute(id, false);
+                }
+            }
+            OpenRequest::Program { connection, object } => {
+                if !self.focus_existing(&connection, &object, true) {
+                    self.add_doc(
+                        Some(connection),
+                        DocKind::Program(ProgramWindow::new(object)),
+                    );
+                }
+            }
+            OpenRequest::Object { connection, object } => {
+                if !self.focus_existing(&connection, &object, false) {
+                    self.add_doc(Some(connection), DocKind::Object(ObjectView::new(object)));
+                }
+            }
+            OpenRequest::Browse { connection } => {
+                let schema = self
+                    .conns
+                    .get(&connection)
+                    .map(|c| c.current_schema())
+                    .unwrap_or_default();
+                let effects = self.browser.attach(connection.clone(), schema);
+                self.apply_browser(effects);
+            }
+        }
+    }
+
+    /// Focuses an open program window / object view for the object, if any.
+    fn focus_existing(&mut self, connection: &str, object: &ObjectRef, program: bool) -> bool {
+        let found = self.docs.iter().find_map(|(id, d)| {
+            let same = match &d.kind {
+                DocKind::Program(w) if program => {
+                    w.object.owner == object.owner
+                        && w.object.name == object.name
+                        && w.parts.iter().any(|p| p.object_type == object.object_type)
+                }
+                DocKind::Object(v) if !program => v.object == *object,
+                _ => false,
+            };
+            (same && d.connection.as_deref() == Some(connection)).then_some(*id)
+        });
+        if let Some(id) = found {
+            self.open_tab(Tab::Doc(id));
+            self.focused = Some(id);
+            if let Some(DocKind::Program(w)) = self.docs.get_mut(&id).map(|d| &mut d.kind) {
+                w.active = w
+                    .parts
+                    .iter()
+                    .position(|p| p.object_type == object.object_type)
+                    .unwrap_or(w.active);
+            }
+        }
+        found.is_some()
+    }
+
+    fn open_tab(&mut self, tab: Tab) {
+        if let Some(path) = self.dock.find_tab(&tab) {
+            let _ = self.dock.set_active_tab(path);
+            return;
+        }
+        if !matches!(tab, Tab::Doc(_)) {
+            self.dock.push_to_focused_leaf(tab);
+            return;
+        }
+        // Documents go next to the focused document, or any document, never
+        // into the browser/log pane.
+        let focused = self.focused.map(Tab::Doc);
+        let near = focused
+            .and_then(|f| self.dock.find_tab(&f))
+            .or_else(|| self.dock.find_tab_from(|t| matches!(t, Tab::Doc(_))));
+        match near {
+            Some(path) => {
+                self.dock.set_focused_node_and_surface(path.node_path());
+                self.dock.push_to_focused_leaf(tab);
+            }
+            None => match self.dock.find_tab(&Tab::Browser) {
+                Some(browser) => {
+                    self.dock
+                        .main_surface_mut()
+                        .split_right(browser.node, 0.24, vec![tab]);
+                }
+                None => self.dock.push_to_focused_leaf(tab),
+            },
+        }
+    }
+
+    fn close_doc(&mut self, id: DocId) {
+        self.conns.close_doc(id);
+        self.docs.remove(&id);
+        self.routes.retain(|_, d| *d != id);
+        if self.focused == Some(id) {
+            self.focused = self.docs.keys().next().copied();
+        }
+    }
+
+    /// Carries out what a document (or the browser, `doc == None`) asked for.
+    fn apply(&mut self, doc: Option<DocId>, effects: Effects) {
+        let connection = doc
+            .and_then(|id| self.docs.get(&id))
+            .and_then(|d| d.connection.clone());
+        for (target, request) in effects.requests {
+            let Some(name) = connection
+                .as_deref()
+                .filter(|c| self.conns.get(c).is_some())
+            else {
+                if let Some(id) = doc {
+                    let event = DbEvent::Error(orui_db::DbError::new(
+                        "Not connected. Connect first (Session → Connect…) or pick a connection for this window.",
+                    ));
+                    self.deliver(id, event);
+                }
+                continue;
+            };
+            match (target, doc) {
+                (Target::Own, Some(id)) => {
+                    let conn = self.conns.get_mut(name).expect("checked above");
+                    conn.doc_session(id, &self.notify).session.send(request);
+                }
+                (_, doc) => {
+                    if let (Some(id), Some(req)) = (doc, request_key(&request)) {
+                        self.routes.insert(req, id);
+                    }
+                    self.conns.send_main(name, request);
+                }
+            }
+        }
+        if effects.cancel
+            && let (Some(id), Some(name)) = (doc, &connection)
+            && let Some(s) = self.conns.get(name).and_then(|c| c.docs.get(&id))
+        {
+            s.session.cancel();
+        }
+        if let Some(name) = &connection {
+            for sql in effects.executed {
+                self.history.add(name, &sql);
+            }
+        }
+        for line in effects.log {
+            self.log(line);
+        }
+        for request in effects.open {
+            self.open(request);
+        }
+    }
+
+    fn apply_browser(&mut self, effects: Effects) {
+        let connection = self.browser.connection.clone();
+        let Effects {
+            requests,
+            open,
+            log,
+            ..
+        } = effects;
+        if let Some(name) = connection {
+            for (_, request) in requests {
+                self.conns.send_main(&name, request);
+            }
+        }
+        for line in log {
+            self.log(line);
+        }
+        for request in open {
+            self.open(request);
+        }
+    }
+
+    fn deliver(&mut self, id: DocId, event: DbEvent) {
+        let cx = self.doc_context(id);
+        let (settings, connected, fetch_size) = (cx.settings.clone(), cx.connected, cx.fetch_size);
+        let Some(doc) = self.docs.get_mut(&id) else {
+            return;
+        };
+        let cx = DocContext {
+            id,
+            settings: &settings,
+            connected,
+            fetch_size,
+        };
+        let effects = doc.on_event(event, &cx);
+        self.apply(Some(id), effects);
     }
 
     // ----- commands -------------------------------------------------------
@@ -180,69 +449,110 @@ impl OruiApp {
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
         match command {
             Command::NewSqlWindow => {
-                let id = self.new_window_id();
-                self.windows
-                    .insert(id, SqlWindow::new(format!("SQL Window {}", id.0)));
-                self.open_tab(Tab::Sql(id));
-                self.focused = Some(id);
+                let title = self.new_sql_title();
+                let connection = self.current_connection();
+                self.add_doc(
+                    connection,
+                    DocKind::Sql(SqlWindow::new(title, String::new())),
+                );
             }
             Command::CloseTab => {
                 if let Some(id) = self.focused
-                    && let Some(path) = self.dock.find_tab(&Tab::Sql(id))
+                    && let Some(path) = self.dock.find_tab(&Tab::Doc(id))
                 {
                     self.dock.remove_tab(path);
-                    self.close_window(id);
+                    self.close_doc(id);
+                }
+            }
+            Command::CloseOtherTabs => {
+                let keep = self.focused;
+                let others: Vec<DocId> = self
+                    .docs
+                    .keys()
+                    .copied()
+                    .filter(|id| Some(*id) != keep)
+                    .collect();
+                for id in others {
+                    if let Some(path) = self.dock.find_tab(&Tab::Doc(id)) {
+                        self.dock.remove_tab(path);
+                    }
+                    self.close_doc(id);
                 }
             }
             Command::Connect => self.connect_dialog.show(self.last_profile.as_ref()),
             Command::Disconnect => {
-                if self.conn.as_ref().is_some_and(|c| c.pending_tx) {
+                let Some(name) = self.current_connection() else {
+                    return;
+                };
+                if self.conns.get(&name).is_some_and(|c| c.any_pending_tx()) {
                     self.confirm = Some(Confirm {
-                        action: ConfirmAction::Disconnect,
+                        action: ConfirmAction::Disconnect(name.clone()),
                         title: "Uncommitted transaction".into(),
-                        text: "The session has uncommitted changes. Disconnecting rolls them back."
-                            .into(),
+                        text: format!(
+                            "{name} has uncommitted changes. Disconnecting rolls them back."
+                        ),
                         yes: "Disconnect and roll back",
                     });
                 } else {
-                    self.disconnect();
+                    self.disconnect(&name);
                 }
             }
-            Command::ExecuteAll => self.execute(false),
-            Command::ExecuteCurrent => self.execute(true),
+            Command::ExecuteAll | Command::ExecuteCurrent => {
+                if let Some(id) = self.focused {
+                    self.execute(id, command == Command::ExecuteCurrent);
+                }
+            }
+            Command::ExplainPlan => {
+                if let Some(id) = self.focused
+                    && let Some(w) = self.docs.get_mut(&id).and_then(Document::sql_window)
+                {
+                    let effects = w.explain();
+                    self.apply(Some(id), effects);
+                }
+            }
             Command::Cancel => {
-                if let Some(conn) = &self.conn {
-                    conn.session.cancel();
+                if let Some((id, name)) = self.focused_session()
+                    && let Some(s) = self.conns.get(&name).and_then(|c| c.docs.get(&id))
+                {
+                    s.session.cancel();
                 }
             }
             Command::Commit => {
-                if self.conn.as_ref().is_some_and(|c| c.profile.production) {
+                let Some((_, name)) = self.focused_session() else {
+                    return;
+                };
+                if self.conns.get(&name).is_some_and(|c| c.profile.production) {
                     self.confirm = Some(Confirm {
                         action: ConfirmAction::Commit,
                         title: "Commit on production".into(),
-                        text: format!(
-                            "Commit the transaction on production connection {}?",
-                            self.conn
-                                .as_ref()
-                                .map(|c| c.profile.display_name())
-                                .unwrap_or_default()
-                        ),
+                        text: format!("Commit the transaction on production connection {name}?"),
                         yes: "Commit",
                     });
                 } else {
-                    self.send(DbRequest::Commit);
+                    self.end_transaction(true);
                 }
             }
-            Command::Rollback => self.send(DbRequest::Rollback),
+            Command::Rollback => self.end_transaction(false),
             Command::ToggleAutocommit => {
-                if let Some(conn) = &mut self.conn {
-                    conn.autocommit = !conn.autocommit;
-                    conn.session.send(DbRequest::SetAutocommit(conn.autocommit));
+                if let Some((id, name)) = self.focused_session()
+                    && let Some(conn) = self.conns.get_mut(&name)
+                {
+                    let s = conn.doc_session(id, &self.notify);
+                    s.autocommit = !s.autocommit;
+                    s.session.send(DbRequest::SetAutocommit(s.autocommit));
+                }
+            }
+            Command::History => self.history_dialog.toggle(),
+            Command::FindObject => {
+                if self.current_connection().is_some() {
+                    self.finder.toggle();
+                } else {
+                    self.connect_dialog.show(self.last_profile.as_ref());
                 }
             }
             Command::ShowPalette => self.palette.toggle(),
-            Command::ShowObjectBrowser => self.open_tab(Tab::ObjectBrowser),
-            Command::ShowOutput => self.open_tab(Tab::Log),
+            Command::ShowBrowser => self.open_tab(Tab::Browser),
+            Command::ShowLog => self.open_tab(Tab::Log),
             Command::ThemeDark | Command::ThemeLight | Command::ThemeSystem => {
                 self.settings.theme = match command {
                     Command::ThemeDark => ThemeChoice::Dark,
@@ -261,129 +571,86 @@ impl OruiApp {
                 self.apply_settings(ctx);
                 self.save_settings();
             }
-            Command::ResetLayout => {
-                self.windows
-                    .retain(|_, w| !w.text.is_empty() || w.is_running());
-                self.reset_layout();
-            }
+            Command::ResetLayout => self.reset_layout(),
             Command::About => self.about_open = true,
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
     }
 
-    fn open_tab(&mut self, tab: Tab) {
-        match self.dock.find_tab(&tab) {
-            Some(path) => {
-                let _ = self.dock.set_active_tab(path);
-            }
-            None => self.dock.push_to_focused_leaf(tab),
-        }
+    /// The focused document and its connection, if it has one that is open.
+    fn focused_session(&self) -> Option<(DocId, String)> {
+        let id = self.focused?;
+        let name = self.docs.get(&id)?.connection.clone()?;
+        self.conns.get(&name).map(|_| (id, name))
     }
 
-    fn close_window(&mut self, id: WindowId) {
-        if let Some(window) = self.windows.get(&id)
-            && window.is_running()
-            && let Some(conn) = &self.conn
-        {
-            conn.session.cancel();
-        }
-        self.windows.remove(&id);
-        self.requests.retain(|_, w| *w != id);
-        if self.focused == Some(id) {
-            self.focused = self.windows.keys().next().copied();
-        }
-    }
-
-    fn send(&mut self, request: DbRequest) {
-        match &self.conn {
-            Some(conn) => {
-                self.last_window = self.focused;
-                conn.session.send(request);
-            }
-            None => self.log("Not connected"),
-        }
-    }
-
-    fn execute(&mut self, current_only: bool) {
-        let Some(id) = self.focused else {
-            return;
-        };
-        let connected = matches!(
-            self.conn,
-            Some(ActiveConnection {
-                status: ConnStatus::Connected(_),
-                ..
-            })
-        );
-        let Some(window) = self.windows.get_mut(&id) else {
-            return;
-        };
+    fn execute(&mut self, id: DocId, current_only: bool) {
+        let cx = self.doc_context(id);
+        let (settings, connected, fetch_size) = (cx.settings.clone(), cx.connected, cx.fetch_size);
         if !connected {
-            window.info("Not connected. Use Session → Connect… first.");
+            if self.docs.get(&id).is_some_and(|d| d.connection.is_none())
+                && let Some(name) = self.current_connection()
+            {
+                // An unbound window runs on the current connection.
+                self.docs.get_mut(&id).expect("doc").connection = Some(name);
+                return self.execute(id, current_only);
+            }
             self.connect_dialog.show(self.last_profile.as_ref());
             return;
         }
-        if window.is_running() {
+        let read_only = self
+            .docs
+            .get(&id)
+            .and_then(|d| d.connection.as_deref())
+            .and_then(|c| self.conns.get(c))
+            .is_some_and(|c| c.profile.read_only);
+        let Some(doc) = self.docs.get_mut(&id) else {
             return;
-        }
-        let statements = if current_only {
-            window.statement_current()
-        } else {
-            window.statements_all()
         };
-        if statements.is_empty() {
-            window.info("Nothing to execute");
-            return;
-        }
-        window.start(statements);
-        self.run_next(id);
+        let cx = DocContext {
+            id,
+            settings: &settings,
+            connected,
+            fetch_size,
+        };
+        let effects = match &mut doc.kind {
+            DocKind::Sql(w) => {
+                let mut effects = w.execute(current_only, &cx);
+                if read_only {
+                    effects.requests.retain(|(_, r)| match r {
+                        DbRequest::Execute { sql, .. } => is_query(sql),
+                        _ => true,
+                    });
+                    if w.state.running.as_ref().is_some_and(|r| !is_query(&r.sql)) {
+                        w.state.running = None;
+                        w.state.queue.clear();
+                        w.info("Connection is read-only: only queries are allowed");
+                    }
+                }
+                effects
+            }
+            DocKind::Program(w) if !read_only => w.compile(false),
+            _ => Effects::default(),
+        };
+        self.apply(Some(id), effects);
     }
 
-    /// Sends the next queued statement of window `id`, skipping what can't run.
-    fn run_next(&mut self, id: WindowId) {
-        let Some(conn) = &self.conn else {
-            return;
-        };
-        let Some(window) = self.windows.get_mut(&id) else {
-            return;
-        };
-        while let Some(stmt) = window.state.queue.pop_front() {
-            if stmt.kind == StatementKind::SqlPlus {
-                let first_line = stmt.sql.lines().next().unwrap_or_default();
-                window.info(format!(
-                    "Skipped SQL*Plus command (not supported yet): {first_line}"
-                ));
-                continue;
-            }
-            if conn.profile.read_only && !is_query(&stmt.sql) {
-                window.info("Connection is read-only: only queries are allowed");
-                window.state.queue.clear();
-                return;
-            }
-            let request = self.next_request;
-            self.next_request += 1;
-            self.requests.insert(request, id);
-            self.last_window = Some(id);
-            window.state.running = Some(request);
-            conn.session.send(DbRequest::Execute {
-                id: request,
-                sql: stmt.sql,
-                max_rows: self.settings.fetch_size,
-                binds: Vec::new(),
+    fn end_transaction(&mut self, commit: bool) {
+        if let Some((id, name)) = self.focused_session()
+            && let Some(conn) = self.conns.get_mut(&name)
+        {
+            conn.doc_session(id, &self.notify).session.send(if commit {
+                DbRequest::Commit
+            } else {
+                DbRequest::Rollback
             });
-            return;
         }
     }
 
-    fn connect(
-        &mut self,
-        ctx: &egui::Context,
-        profile: ConnectionProfile,
-        password: String,
-        save_profile: bool,
-    ) {
-        if self.conn.is_some() {
-            self.disconnect();
+    fn connect(&mut self, profile: ConnectionProfile, password: String, save_profile: bool) {
+        let name = profile.display_name();
+        if self.conns.get(&name).is_some() {
+            self.disconnect(&name);
         }
         if save_profile && let Some(paths) = &self.paths {
             self.saved.upsert(profile.clone());
@@ -391,65 +658,85 @@ impl OruiApp {
                 error!("saving connections: {e:#}");
             }
         }
-        let params = ConnectParams {
-            username: profile.username.clone(),
-            password,
-            connect_string: profile.connect_string.clone(),
-            privilege: profile.privilege,
-        };
-        let repaint = ctx.clone();
-        let session = Session::connect(params, move || repaint.request_repaint());
-        self.log(format!("Connecting to {}…", profile.display_name()));
+        if profile.save_password {
+            secrets::store(&name, &password);
+        } else {
+            secrets::forget(&name);
+        }
+        self.log(format!("Connecting to {name}…"));
         self.last_profile = Some(profile.clone());
-        self.conn = Some(ActiveConnection {
-            profile,
-            session,
-            status: ConnStatus::Connecting,
-            pending_tx: false,
-            autocommit: false,
-        });
+        self.connecting = Some(self.conns.connect(profile, password, &self.notify));
     }
 
-    fn disconnect(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            self.log(format!("Disconnected from {}", conn.profile.display_name()));
-            // Dropping the session sends `Disconnect` to the worker.
+    fn disconnect(&mut self, name: &str) {
+        if self.conns.close(name).is_some() {
+            self.log(format!("Disconnected from {name}"));
         }
-        for window in self.windows.values_mut() {
-            window.state.running = None;
-            window.state.fetching = None;
-            window.state.queue.clear();
+        self.browser.detach(name);
+        if self.browser.connection.is_none()
+            && let Some(other) = self.conns.open.keys().next().cloned()
+        {
+            self.open(OpenRequest::Browse { connection: other });
         }
-        self.requests.clear();
+        for doc in self
+            .docs
+            .values_mut()
+            .filter(|d| d.connection.as_deref() == Some(name))
+        {
+            if let DocKind::Sql(w) = &mut doc.kind {
+                w.state.running = None;
+                w.state.fetching = None;
+                w.state.queue.clear();
+            }
+        }
     }
 
     // ----- database events ------------------------------------------------
 
     fn pump_events(&mut self) {
-        let Some(conn) = &self.conn else {
-            return;
-        };
-        let events: Vec<DbEvent> = std::iter::from_fn(|| conn.session.try_recv()).collect();
-        for event in events {
-            self.handle_event(event);
+        for (name, key, event) in self.conns.poll() {
+            match key {
+                SessionKey::Main => self.main_event(&name, event),
+                SessionKey::Doc(id) => self.deliver(id, event),
+            }
         }
     }
 
-    fn handle_event(&mut self, event: DbEvent) {
-        let Some(conn) = &mut self.conn else {
-            return;
-        };
+    fn main_event(&mut self, name: &str, event: DbEvent) {
         match event {
             DbEvent::Connected(server) => {
                 let line = format!(
-                    "Connected to {} (Oracle {}, schema {})",
-                    conn.profile.display_name(),
-                    server.version,
-                    server.current_schema
+                    "Connected to {name} (Oracle {}, schema {})",
+                    server.version, server.current_schema
                 );
-                conn.status = ConnStatus::Connected(server);
-                self.connect_dialog.connected();
+                let schema = server.current_schema.clone();
+                if let Some(conn) = self.conns.get_mut(name) {
+                    conn.status = crate::connections::Status::Connected(server);
+                }
                 self.log(line);
+                if self.connecting.as_deref() == Some(name) {
+                    self.connecting = None;
+                    self.connect_dialog.connected();
+                    let effects = self.browser.attach(name.to_owned(), schema);
+                    self.apply_browser(effects);
+                    // Bind unbound windows to the first connection.
+                    for doc in self.docs.values_mut().filter(|d| d.connection.is_none()) {
+                        doc.connection = Some(name.to_owned());
+                    }
+                    let reload: Vec<DocId> = self
+                        .docs
+                        .iter()
+                        .filter(|(_, d)| {
+                            d.connection.as_deref() == Some(name)
+                                && !matches!(d.kind, DocKind::Sql(_))
+                        })
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for id in reload {
+                        let effects = self.docs.get_mut(&id).expect("doc").on_attach();
+                        self.apply(Some(id), effects);
+                    }
+                }
             }
             DbEvent::ConnectFailed(e) => {
                 let message = if e.is_missing_client() {
@@ -457,33 +744,34 @@ impl OruiApp {
                 } else {
                     e.to_string()
                 };
-                warn!("connect failed: {e}");
-                self.conn = None;
-                self.connect_dialog.failed(message);
-            }
-            DbEvent::Transaction { pending } => conn.pending_tx = pending,
-            DbEvent::Meta { .. } => {}
-            DbEvent::Disconnected => self.conn = None,
-            DbEvent::QueryStarted { id, .. }
-            | DbEvent::Rows { id, .. }
-            | DbEvent::Executed { id, .. }
-            | DbEvent::Failed { id, .. } => {
-                let Some(&window_id) = self.requests.get(&id) else {
-                    return;
-                };
-                let Some(window) = self.windows.get_mut(&window_id) else {
-                    return;
-                };
-                if let Next::Continue = window.handle_event(event) {
-                    self.run_next(window_id);
+                warn!("connect to {name} failed: {e}");
+                self.conns.close(name);
+                if self.connecting.as_deref() == Some(name) {
+                    self.connecting = None;
+                    self.connect_dialog.failed(message);
+                } else {
+                    self.log(format!("{name}: {message}"));
                 }
             }
-            event @ (DbEvent::Output(_) | DbEvent::Notice(_) | DbEvent::Error(_)) => {
-                match self.last_window.and_then(|id| self.windows.get_mut(&id)) {
-                    Some(window) => {
-                        window.handle_event(event);
+            DbEvent::Meta { id, result } if self.finder.pending == Some(id) => match result {
+                Ok(MetaResult::Objects(objects)) => self.finder.results(id, objects),
+                Ok(_) => {}
+                Err(e) => {
+                    self.finder.results(id, Vec::new());
+                    self.log(format!("Find object: {e}"));
+                }
+            },
+            event => {
+                let id = event_id(&event);
+                if let Some(doc) = id.and_then(|id| self.routes.remove(&id)) {
+                    self.deliver(doc, event);
+                } else if id.is_some_and(|id| self.browser.owns(id)) {
+                    let mut log = Vec::new();
+                    let effects = self.browser.on_event(event, &mut log);
+                    for line in log {
+                        self.log(line);
                     }
-                    None => self.log(format!("{event:?}")),
+                    self.apply_browser(effects);
                 }
             }
         }
@@ -493,24 +781,25 @@ impl OruiApp {
 
     fn menu_bar(&mut self, ui: &mut Ui, commands: &mut Vec<Command>) {
         let keymap = &self.keymap;
+        let ctx = ui.ctx().clone();
         let mut item = |ui: &mut Ui, command: Command| {
-            let shortcut = keymap
-                .shortcut(command)
-                .map(|s| ui.ctx().format_shortcut(s))
-                .unwrap_or_default();
-            if ui
-                .add(egui::Button::new(command.short_label()).shortcut_text(shortcut))
-                .clicked()
-            {
+            let button = egui::Button::new(command.short_label())
+                .shortcut_text(keymap.shortcut_text(&ctx, command));
+            if ui.add(button).clicked() {
                 commands.push(command);
             }
         };
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 item(ui, Command::NewSqlWindow);
+                ui.separator();
                 item(ui, Command::CloseTab);
+                item(ui, Command::CloseOtherTabs);
                 ui.separator();
                 item(ui, Command::Quit);
+            });
+            ui.menu_button("Edit", |ui| {
+                item(ui, Command::History);
             });
             ui.menu_button("Session", |ui| {
                 item(ui, Command::Connect);
@@ -518,16 +807,20 @@ impl OruiApp {
                 ui.separator();
                 item(ui, Command::ExecuteAll);
                 item(ui, Command::ExecuteCurrent);
+                item(ui, Command::ExplainPlan);
                 item(ui, Command::Cancel);
                 ui.separator();
                 item(ui, Command::Commit);
                 item(ui, Command::Rollback);
                 item(ui, Command::ToggleAutocommit);
             });
+            ui.menu_button("Tools", |ui| {
+                item(ui, Command::FindObject);
+            });
             ui.menu_button("View", |ui| {
                 item(ui, Command::ShowPalette);
-                item(ui, Command::ShowObjectBrowser);
-                item(ui, Command::ShowOutput);
+                item(ui, Command::ShowBrowser);
+                item(ui, Command::ShowLog);
                 ui.separator();
                 item(ui, Command::ThemeSystem);
                 item(ui, Command::ThemeDark);
@@ -544,113 +837,130 @@ impl OruiApp {
     }
 
     fn toolbar(&self, ui: &mut Ui, commands: &mut Vec<Command>) {
-        let connected = self.conn.is_some();
-        let running = self
-            .focused
-            .and_then(|id| self.windows.get(&id))
-            .is_some_and(SqlWindow::is_running);
+        let connected = self.current_connection().is_some();
+        let focused = self.focused.and_then(|id| self.docs.get(&id));
+        let running = focused.is_some_and(Document::is_busy);
+        let is_sql = focused.is_some_and(|d| matches!(d.kind, DocKind::Sql(_)));
         let ctx = ui.ctx().clone();
         let tip = |c: Command| match self.keymap.shortcut(c) {
             Some(s) => format!("{} ({})", c.short_label(), ctx.format_shortcut(s)),
             None => c.short_label().to_owned(),
         };
         ui.horizontal(|ui| {
-            let mut button = |ui: &mut Ui, text: &str, command: Command, enabled: bool| {
-                if ui
-                    .add_enabled(enabled, egui::Button::new(text))
-                    .on_hover_text(tip(command))
-                    .clicked()
-                {
-                    commands.push(command);
-                }
-            };
-            button(ui, "🗋 New", Command::NewSqlWindow, true);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let mut button =
+                |ui: &mut Ui, icon: Icon, text: &str, command: Command, enabled: bool| {
+                    let image = if icon.is_colored() {
+                        icon.image(ui)
+                    } else {
+                        icon.mono(Color32::WHITE)
+                    };
+                    let b = if text.is_empty() {
+                        egui::Button::image(image)
+                    } else {
+                        egui::Button::image_and_text(image, text)
+                    }
+                    .frame_when_inactive(false)
+                    .image_tint_follows_text_color(!icon.is_colored())
+                    .min_size(egui::vec2(28.0, 28.0));
+                    if ui
+                        .add_enabled(enabled, b)
+                        .on_hover_text(tip(command))
+                        .clicked()
+                    {
+                        commands.push(command);
+                    }
+                };
+            button(ui, Icon::Connect, "Connect", Command::Connect, true);
+            button(ui, Icon::NewSql, "", Command::NewSqlWindow, true);
             ui.separator();
-            if connected {
-                button(ui, "⏏ Disconnect", Command::Disconnect, true);
-            } else {
-                button(ui, "🔌 Connect", Command::Connect, true);
-            }
+            button(
+                ui,
+                Icon::Execute,
+                "Execute",
+                Command::ExecuteAll,
+                connected && !running,
+            );
+            button(
+                ui,
+                Icon::ExecuteCurrent,
+                "",
+                Command::ExecuteCurrent,
+                connected && !running && is_sql,
+            );
+            button(ui, Icon::Stop, "", Command::Cancel, running);
+            button(
+                ui,
+                Icon::Explain,
+                "",
+                Command::ExplainPlan,
+                connected && is_sql,
+            );
             ui.separator();
-            button(ui, "▶ Execute", Command::ExecuteAll, connected && !running);
-            button(ui, "⏹ Break", Command::Cancel, running);
+            button(ui, Icon::Commit, "Commit", Command::Commit, connected);
+            button(ui, Icon::Rollback, "Rollback", Command::Rollback, connected);
             ui.separator();
-            button(ui, "✔ Commit", Command::Commit, connected);
-            button(ui, "↶ Rollback", Command::Rollback, connected);
-            let mut autocommit = self.conn.as_ref().is_some_and(|c| c.autocommit);
-            if ui
-                .add_enabled(
-                    connected,
-                    egui::Checkbox::new(&mut autocommit, "Auto-commit"),
-                )
-                .changed()
-            {
-                commands.push(Command::ToggleAutocommit);
-            }
+            button(ui, Icon::History, "", Command::History, true);
+            button(ui, Icon::Search, "", Command::FindObject, connected);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                button(ui, Icon::Palette, "", Command::ShowPalette, true);
+            });
         });
     }
 
     fn status_bar(&self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            match &self.conn {
+            let focused = self.focused.and_then(|id| self.docs.get(&id).map(|d| (id, d)));
+            let connection = self.current_connection();
+            match connection.as_deref().and_then(|c| self.conns.get(c)) {
                 None => {
-                    ui.weak("Not connected");
+                    icon_label(ui, Icon::Disconnect, RichText::new("Not connected").weak());
                 }
                 Some(conn) => {
-                    let name = conn.profile.display_name();
-                    let color = if conn.profile.production {
-                        Color32::from_rgb(0xe0, 0x30, 0x30)
-                    } else {
-                        conn.profile
-                            .color
-                            .map_or(ui.visuals().text_color(), |[r, g, b]| {
-                                Color32::from_rgb(r, g, b)
-                            })
-                    };
-                    match &conn.status {
-                        ConnStatus::Connecting => {
+                    let name = conn.name();
+                    let color = connection_color(&conn.profile).unwrap_or(ui.visuals().text_color());
+                    match conn.server() {
+                        None => {
                             ui.spinner();
                             ui.label(format!("Connecting to {name}…"));
                         }
-                        ConnStatus::Connected(server) => {
-                            let marker = if conn.profile.production {
-                                "● PRODUCTION "
+                        Some(server) => {
+                            let (icon, text) = if conn.profile.production {
+                                (Icon::Production, format!("{name}  PRODUCTION"))
                             } else {
-                                "● "
+                                (Icon::Database, name)
                             };
-                            ui.label(RichText::new(format!("{marker}{name}")).color(color))
-                                .on_hover_text(&server.banner);
+                            icon_label(ui, icon, RichText::new(text).color(color))
+                                .on_hover_text(format!("{}\nSchema {}", server.banner, server.current_schema));
                         }
                     }
+                    let session = focused.and_then(|(id, _)| conn.docs.get(&id));
                     ui.separator();
-                    if conn.pending_tx {
-                        ui.label(
-                            RichText::new("Transaction pending")
-                                .color(Color32::from_rgb(0xe0, 0x90, 0x20)),
-                        )
-                        .on_hover_text(
-                            "Uncommitted changes in this session (F10 commit, Shift+F10 rollback)",
-                        );
+                    if session.is_some_and(|s| s.pending_tx) {
+                        icon_label(ui, Icon::Transaction, RichText::new("Transaction pending").color(theme::WARN))
+                            .on_hover_text("Uncommitted changes in this window's session (F10 commit, Shift+F10 rollback)");
                     } else {
                         ui.weak("No transaction");
                     }
-                    if conn.autocommit {
+                    if session.is_some_and(|s| s.autocommit) {
                         ui.separator();
                         ui.label("Auto-commit");
                     }
                     if conn.profile.read_only {
                         ui.separator();
-                        ui.label("Read-only");
+                        icon_label(ui, Icon::Lock, "Read-only");
                     }
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.weak("UTF-8");
-                if let Some(window) = self.focused.and_then(|id| self.windows.get(&id)) {
-                    ui.separator();
-                    let (line, col) = window.state.line_col;
-                    ui.label(format!("Ln {line}, Col {col}"));
-                    if let Some(status) = window.result_status() {
+                if let Some((_, doc)) = focused {
+                    let (line_col, status) = doc.status();
+                    if let Some((line, col)) = line_col {
+                        ui.separator();
+                        ui.label(format!("Ln {line}, Col {col}"));
+                    }
+                    if let Some(status) = status {
                         ui.separator();
                         ui.label(status);
                     }
@@ -661,15 +971,13 @@ impl OruiApp {
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         let close_requested = ctx.input(|i| i.viewport().close_requested());
-        if close_requested
-            && !self.quit_confirmed
-            && self.conn.as_ref().is_some_and(|c| c.pending_tx)
-        {
+        if close_requested && !self.quit_confirmed && self.conns.any_pending_tx() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(Confirm {
                 action: ConfirmAction::Quit,
                 title: "Uncommitted transaction".into(),
-                text: "The session has uncommitted changes. Exiting rolls them back.".into(),
+                text: "There are sessions with uncommitted changes. Exiting rolls them back."
+                    .into(),
                 yes: "Exit and roll back",
             });
         }
@@ -697,6 +1005,82 @@ impl OruiApp {
             self.about_open = false;
         }
     }
+
+    fn popups(&mut self, ctx: &egui::Context, commands: &mut Vec<Command>) {
+        if let Some(request) = self.connect_dialog.ui(ctx, &self.saved) {
+            self.connect(request.profile, request.password, request.save_profile);
+        }
+        if let Some(command) = self.palette.ui(ctx, &self.keymap) {
+            commands.push(command);
+        }
+        match self.finder.ui(ctx) {
+            Some(FinderAction::Search(pattern)) => {
+                if let Some(name) = self.current_connection() {
+                    let id = request_id();
+                    self.finder.pending = Some(id);
+                    self.conns.send_main(
+                        &name,
+                        DbRequest::Meta {
+                            id,
+                            query: MetaQuery::Find {
+                                pattern,
+                                limit: 200,
+                            },
+                        },
+                    );
+                }
+            }
+            Some(FinderAction::Open(object)) => {
+                if let Some(connection) = self.current_connection() {
+                    self.open(if opens_as_program(object.object_type) {
+                        OpenRequest::Program { connection, object }
+                    } else {
+                        OpenRequest::Object { connection, object }
+                    });
+                }
+            }
+            None => {}
+        }
+        let connection = self.current_connection();
+        if let Some(sql) = self
+            .history_dialog
+            .ui(ctx, &self.history, connection.as_deref())
+        {
+            match self
+                .focused
+                .and_then(|id| self.docs.get_mut(&id))
+                .and_then(Document::sql_window)
+            {
+                Some(w) => w.editor.insert(&sql),
+                None => {
+                    if let Some(connection) = connection {
+                        self.open(OpenRequest::Sql {
+                            connection,
+                            text: sql,
+                            run: false,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(confirm) = &self.confirm
+            && let Some(yes) = confirm_ui(ctx, confirm)
+        {
+            let action = confirm.action.clone();
+            self.confirm = None;
+            if yes {
+                match action {
+                    ConfirmAction::Commit => self.end_transaction(true),
+                    ConfirmAction::Disconnect(name) => self.disconnect(&name),
+                    ConfirmAction::Quit => {
+                        self.quit_confirmed = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            }
+        }
+        self.about_ui(ctx);
+    }
 }
 
 impl eframe::App for OruiApp {
@@ -705,7 +1089,12 @@ impl eframe::App for OruiApp {
         self.pump_events();
         self.handle_close_request(&ctx);
 
-        let modal_open = self.connect_dialog.open || self.confirm.is_some() || self.about_open;
+        let modal_open = self.connect_dialog.open
+            || self.confirm.is_some()
+            || self.about_open
+            || self.palette.open
+            || self.finder.open
+            || self.history_dialog.open;
         let mut commands = if modal_open {
             Vec::new()
         } else {
@@ -713,19 +1102,41 @@ impl eframe::App for OruiApp {
         };
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui, &mut commands));
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui, &mut commands));
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        egui::Panel::top("toolbar")
+            .frame(theme::toolbar_frame(ui.style()))
+            .show(ui, |ui| self.toolbar(ui, &mut commands));
+        egui::Panel::bottom("status")
+            .frame(theme::status_frame(ui.style()))
+            .show(ui, |ui| self.status_bar(ui));
 
-        if let Some((_, Tab::Sql(id))) = self.dock.find_active_focused() {
+        if let Some((_, Tab::Doc(id))) = self.dock.find_active_focused() {
             self.focused = Some(*id);
         }
+        let connections: Vec<String> = self.conns.open.keys().cloned().collect();
+        let colors: HashMap<String, Color32> = self
+            .conns
+            .open
+            .iter()
+            .filter_map(|(n, c)| connection_color(&c.profile).map(|col| (n.clone(), col)))
+            .collect();
+        let connected: HashMap<String, bool> = self
+            .conns
+            .open
+            .iter()
+            .map(|(n, c)| (n.clone(), c.is_connected()))
+            .collect();
         let mut viewer = Viewer {
-            windows: &mut self.windows,
+            docs: &mut self.docs,
+            browser: &mut self.browser,
             log: &self.log,
             settings: &self.settings,
-            fetch_more: Vec::new(),
+            connections: &connections,
+            colors: &colors,
+            connected: &connected,
+            effects: Vec::new(),
+            browser_effects: Effects::default(),
             closed: Vec::new(),
-            connection: self.conn.as_ref().map(|c| c.profile.display_name()),
+            rebind: Vec::new(),
         };
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -736,50 +1147,29 @@ impl eframe::App for OruiApp {
                     .show_inside(ui, &mut viewer);
             });
         let Viewer {
-            fetch_more, closed, ..
+            effects,
+            browser_effects,
+            closed,
+            rebind,
+            ..
         } = viewer;
+        for (id, connection) in rebind {
+            self.conns.close_doc(id);
+            if let Some(doc) = self.docs.get_mut(&id) {
+                doc.connection = Some(connection);
+                let effects = doc.on_attach();
+                self.apply(Some(id), effects);
+            }
+        }
         for id in closed {
-            self.close_window(id);
+            self.close_doc(id);
         }
-        for (window, id) in fetch_more {
-            if let Some(conn) = &self.conn {
-                self.last_window = Some(window);
-                conn.session.send(DbRequest::FetchMore {
-                    id,
-                    max_rows: self.settings.fetch_size,
-                });
-            }
+        for (id, effects) in effects {
+            self.apply(Some(id), effects);
         }
+        self.apply_browser(browser_effects);
 
-        if let Some(request) = self.connect_dialog.ui(&ctx, &self.saved) {
-            self.connect(
-                &ctx,
-                request.profile,
-                request.password,
-                request.save_profile,
-            );
-        }
-        if let Some(command) = self.palette.ui(&ctx, &self.keymap) {
-            commands.push(command);
-        }
-        if let Some(confirm) = &self.confirm
-            && let Some(yes) = confirm_ui(&ctx, confirm)
-        {
-            let action = confirm.action;
-            self.confirm = None;
-            if yes {
-                match action {
-                    ConfirmAction::Commit => self.send(DbRequest::Commit),
-                    ConfirmAction::Disconnect => self.disconnect(),
-                    ConfirmAction::Quit => {
-                        self.quit_confirmed = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                }
-            }
-        }
-        self.about_ui(&ctx);
-
+        self.popups(&ctx, &mut commands);
         for command in commands {
             self.run_command(&ctx, command);
         }
@@ -788,28 +1178,75 @@ impl eframe::App for OruiApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let workspace = Workspace {
             dock: self.dock.clone(),
-            windows: std::mem::take(&mut self.windows),
-            next_window: self.next_window,
+            docs: std::mem::take(&mut self.docs),
+            next_doc: self.next_doc,
             last_profile: self.last_profile.clone(),
         };
         eframe::set_value(storage, WORKSPACE_KEY, &workspace);
-        self.windows = workspace.windows;
+        self.docs = workspace.docs;
+        self.save_history();
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.disconnect();
+        self.conns.open.clear();
         self.save_settings();
+        self.save_history();
+    }
+}
+
+#[cfg(test)]
+impl OruiApp {
+    pub fn test_connect(&mut self, profile: ConnectionProfile, password: String) {
+        self.connect(profile, password, false);
+    }
+
+    pub fn test_connected(&self) -> bool {
+        self.connecting.is_none() && self.conns.open.values().any(|c| c.is_connected())
+    }
+
+    pub fn test_open(&mut self, request: OpenRequest) {
+        self.open(request);
+    }
+
+    pub fn test_focused_busy(&self) -> bool {
+        self.focused
+            .and_then(|id| self.docs.get(&id))
+            .is_some_and(Document::is_busy)
+    }
+
+    pub fn test_close_focused(&mut self) {
+        self.run_command(&self.notify.0.clone(), Command::CloseTab);
+    }
+
+    pub fn test_execute_focused(&mut self) {
+        if let Some(id) = self.focused {
+            self.execute(id, false);
+        }
+    }
+
+    pub fn test_expand_browser(&mut self, types: &[orui_db::ObjectType]) {
+        let effects = self.browser.expand(types);
+        self.apply_browser(effects);
+    }
+
+    pub fn test_browser_loading(&self) -> bool {
+        self.browser.is_loading()
     }
 }
 
 struct Viewer<'a> {
-    windows: &'a mut BTreeMap<WindowId, SqlWindow>,
+    docs: &'a mut BTreeMap<DocId, Document>,
+    browser: &'a mut Browser,
     log: &'a [String],
     settings: &'a Settings,
-    connection: Option<String>,
-    /// (window, query id) pairs whose grid asked for more rows.
-    fetch_more: Vec<(WindowId, u64)>,
-    closed: Vec<WindowId>,
+    connections: &'a [String],
+    colors: &'a HashMap<String, Color32>,
+    connected: &'a HashMap<String, bool>,
+    effects: Vec<(DocId, Effects)>,
+    browser_effects: Effects,
+    closed: Vec<DocId>,
+    /// Documents moved to another connection.
+    rebind: Vec<(DocId, String)>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -821,25 +1258,27 @@ impl TabViewer for Viewer<'_> {
 
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
         match tab {
-            Tab::ObjectBrowser => "Objects".into(),
+            Tab::Browser => "Objects".into(),
             Tab::Log => "Log".into(),
-            Tab::Sql(id) => self
-                .windows
-                .get(id)
-                .map_or_else(|| "?".into(), |w| w.tab_title().into()),
+            Tab::Doc(id) => match self.docs.get(id) {
+                Some(doc) => {
+                    let color = doc
+                        .connection
+                        .as_ref()
+                        .and_then(|c| self.colors.get(c))
+                        .copied();
+                    doc.tab_title(color).into()
+                }
+                None => "?".into(),
+            },
         }
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Tab) {
         match tab {
-            Tab::ObjectBrowser => {
-                ui.add_space(4.0);
-                match &self.connection {
-                    Some(name) => ui.label(RichText::new(name).strong()),
-                    None => ui.weak("Not connected"),
-                };
-                ui.add_space(8.0);
-                ui.weak("The object browser arrives with milestone M3.");
+            Tab::Browser => {
+                let effects = self.browser.ui(ui, self.connections);
+                self.browser_effects.extend(effects);
             }
             Tab::Log => {
                 egui::ScrollArea::vertical()
@@ -851,20 +1290,48 @@ impl TabViewer for Viewer<'_> {
                         }
                     });
             }
-            Tab::Sql(id) => {
-                if let Some(window) = self.windows.get_mut(id) {
-                    let editor = &self.settings.editor;
-                    let response = window.ui(ui, *id, editor.font_size, editor.show_line_numbers);
-                    if let Some(query) = response.fetch_more {
-                        self.fetch_more.push((*id, query));
-                    }
+            Tab::Doc(id) => {
+                let Some(doc) = self.docs.get_mut(id) else {
+                    return;
+                };
+                // Connection picker for windows that can switch connections.
+                if matches!(doc.kind, DocKind::Sql(_)) && !self.connections.is_empty() {
+                    let current = doc.connection.clone().unwrap_or_else(|| "(none)".into());
+                    ui.horizontal(|ui| {
+                        ui.weak("Connection");
+                        egui::ComboBox::from_id_salt(("doc-conn", *id))
+                            .selected_text(&current)
+                            .show_ui(ui, |ui| {
+                                for c in self.connections {
+                                    if ui.selectable_label(*c == current, c).clicked()
+                                        && *c != current
+                                    {
+                                        self.rebind.push((*id, c.clone()));
+                                    }
+                                }
+                            });
+                    });
                 }
+                let connected = doc
+                    .connection
+                    .as_ref()
+                    .and_then(|c| self.connected.get(c))
+                    .copied()
+                    .unwrap_or(false);
+                let cx = DocContext {
+                    id: *id,
+                    settings: self.settings,
+                    connected,
+                    fetch_size: self.settings.fetch_size,
+                };
+                let effects = doc.ui(ui, &cx);
+                self.effects.push((*id, effects));
             }
         }
     }
 
     fn on_close(&mut self, tab: &mut Tab) -> egui_dock::widgets::tab_viewer::OnCloseResponse {
-        if let Tab::Sql(id) = tab {
+        if let Tab::Doc(id) = tab {
             self.closed.push(*id);
         }
         egui_dock::widgets::tab_viewer::OnCloseResponse::Close
@@ -875,11 +1342,46 @@ impl TabViewer for Viewer<'_> {
     }
 }
 
+fn history_file(paths: &Paths) -> std::path::PathBuf {
+    paths.data_dir.join("history.toml")
+}
+
 fn load_or_default<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {
     load_toml(path).unwrap_or_else(|e| {
         error!("{e:#}");
         T::default()
     })
+}
+
+fn connection_color(profile: &ConnectionProfile) -> Option<Color32> {
+    if profile.production {
+        Some(theme::DANGER)
+    } else {
+        profile.color.map(|[r, g, b]| Color32::from_rgb(r, g, b))
+    }
+}
+
+/// Request id of requests that are answered with an id-carrying event.
+fn request_key(request: &DbRequest) -> Option<u64> {
+    match request {
+        DbRequest::Execute { id, .. }
+        | DbRequest::FetchMore { id, .. }
+        | DbRequest::Meta { id, .. }
+        | DbRequest::Task { id, .. } => Some(*id),
+        _ => None,
+    }
+}
+
+fn event_id(event: &DbEvent) -> Option<u64> {
+    match event {
+        DbEvent::QueryStarted { id, .. }
+        | DbEvent::Rows { id, .. }
+        | DbEvent::Executed { id, .. }
+        | DbEvent::Failed { id, .. }
+        | DbEvent::Meta { id, .. }
+        | DbEvent::TaskDone { id, .. } => Some(*id),
+        _ => None,
+    }
 }
 
 /// Read-only connections only accept queries.

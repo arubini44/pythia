@@ -25,6 +25,7 @@ toml = "0.9"
 directories = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+keyring = "4"
 anyhow = "1"
 thiserror = "2"
 insta = "1"

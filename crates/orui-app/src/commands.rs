@@ -7,85 +7,55 @@
 use egui::{Key, KeyboardShortcut, Modifiers};
 use orui_config::KeymapPreset;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Command {
-    NewSqlWindow,
-    CloseTab,
-    Connect,
-    Disconnect,
-    ExecuteAll,
-    ExecuteCurrent,
-    Cancel,
-    Commit,
-    Rollback,
-    ToggleAutocommit,
-    ShowPalette,
-    ShowObjectBrowser,
-    ShowOutput,
-    ThemeDark,
-    ThemeLight,
-    ThemeSystem,
-    ZoomIn,
-    ZoomOut,
-    ZoomReset,
-    ResetLayout,
-    About,
-    Quit,
+macro_rules! commands {
+    ($($variant:ident => $label:literal,)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Command {
+            $($variant,)*
+        }
+
+        impl Command {
+            pub const ALL: &[Command] = &[$(Command::$variant,)*];
+
+            pub fn label(self) -> &'static str {
+                match self {
+                    $(Command::$variant => $label,)*
+                }
+            }
+        }
+    };
+}
+
+commands! {
+    NewSqlWindow => "File: New SQL Window",
+    CloseTab => "File: Close Window",
+    CloseOtherTabs => "File: Close Other Windows",
+    Connect => "Session: Connect…",
+    Disconnect => "Session: Disconnect",
+    ExecuteAll => "Session: Execute (selection or all)",
+    ExecuteCurrent => "Session: Execute Current Statement",
+    ExplainPlan => "Session: Explain Plan",
+    Cancel => "Session: Break (cancel execution)",
+    Commit => "Session: Commit",
+    Rollback => "Session: Rollback",
+    ToggleAutocommit => "Session: Toggle Auto-Commit",
+    History => "Edit: Recall Statement (history)",
+    FindObject => "Tools: Find Database Object…",
+    ShowPalette => "View: Command Palette",
+    ShowBrowser => "View: Object Browser",
+    ShowLog => "View: Log",
+    ThemeDark => "View: Dark Theme",
+    ThemeLight => "View: Light Theme",
+    ThemeSystem => "View: System Theme",
+    ZoomIn => "View: Zoom In",
+    ZoomOut => "View: Zoom Out",
+    ZoomReset => "View: Reset Zoom",
+    ResetLayout => "View: Reset Layout",
+    About => "Help: About orui",
+    Quit => "File: Exit",
 }
 
 impl Command {
-    pub const ALL: &[Command] = &[
-        Command::NewSqlWindow,
-        Command::CloseTab,
-        Command::Connect,
-        Command::Disconnect,
-        Command::ExecuteAll,
-        Command::ExecuteCurrent,
-        Command::Cancel,
-        Command::Commit,
-        Command::Rollback,
-        Command::ToggleAutocommit,
-        Command::ShowPalette,
-        Command::ShowObjectBrowser,
-        Command::ShowOutput,
-        Command::ThemeDark,
-        Command::ThemeLight,
-        Command::ThemeSystem,
-        Command::ZoomIn,
-        Command::ZoomOut,
-        Command::ZoomReset,
-        Command::ResetLayout,
-        Command::About,
-        Command::Quit,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Command::NewSqlWindow => "File: New SQL Window",
-            Command::CloseTab => "File: Close Window",
-            Command::Connect => "Session: Connect…",
-            Command::Disconnect => "Session: Disconnect",
-            Command::ExecuteAll => "Session: Execute (selection or all)",
-            Command::ExecuteCurrent => "Session: Execute Current Statement",
-            Command::Cancel => "Session: Break (cancel execution)",
-            Command::Commit => "Session: Commit",
-            Command::Rollback => "Session: Rollback",
-            Command::ToggleAutocommit => "Session: Toggle Auto-Commit",
-            Command::ShowPalette => "View: Command Palette",
-            Command::ShowObjectBrowser => "View: Object Browser",
-            Command::ShowOutput => "View: Log",
-            Command::ThemeDark => "View: Dark Theme",
-            Command::ThemeLight => "View: Light Theme",
-            Command::ThemeSystem => "View: System Theme",
-            Command::ZoomIn => "View: Zoom In",
-            Command::ZoomOut => "View: Zoom Out",
-            Command::ZoomReset => "View: Reset Zoom",
-            Command::ResetLayout => "View: Reset Layout",
-            Command::About => "Help: About orui",
-            Command::Quit => "File: Exit",
-        }
-    }
-
     /// Label without the category prefix, for menus.
     pub fn short_label(self) -> &'static str {
         let label = self.label();
@@ -112,14 +82,21 @@ impl Keymap {
                     Command::ExecuteCurrent,
                     KeyboardShortcut::new(ctrl, Key::Enter),
                 ),
+                (Command::ExplainPlan, KeyboardShortcut::new(none, Key::F5)),
                 (Command::Cancel, KeyboardShortcut::new(shift, Key::Escape)),
                 (Command::Commit, KeyboardShortcut::new(none, Key::F10)),
                 (Command::Rollback, KeyboardShortcut::new(shift, Key::F10)),
+                (Command::History, KeyboardShortcut::new(ctrl, Key::E)),
+                (
+                    Command::FindObject,
+                    KeyboardShortcut::new(ctrl | shift, Key::O),
+                ),
                 (
                     Command::ShowPalette,
                     KeyboardShortcut::new(ctrl | shift, Key::P),
                 ),
                 (Command::ZoomIn, KeyboardShortcut::new(ctrl, Key::Plus)),
+                (Command::ZoomIn, KeyboardShortcut::new(ctrl, Key::Equals)),
                 (Command::ZoomOut, KeyboardShortcut::new(ctrl, Key::Minus)),
                 (Command::ZoomReset, KeyboardShortcut::new(ctrl, Key::Num0)),
             ],
@@ -132,6 +109,13 @@ impl Keymap {
             .iter()
             .find(|(c, _)| *c == command)
             .map(|(_, s)| s)
+    }
+
+    /// Formatted shortcut for menus and tooltips (empty if none).
+    pub fn shortcut_text(&self, ctx: &egui::Context, command: Command) -> String {
+        self.shortcut(command)
+            .map(|s| ctx.format_shortcut(s))
+            .unwrap_or_default()
     }
 
     /// Consumes pressed shortcuts and returns the triggered commands.
@@ -176,7 +160,7 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i32> {
         if prev_match == Some(found.wrapping_sub(1)) {
             score += 5;
         }
-        if found == 0 || !cand[found - 1].is_alphanumeric() {
+        if word_start(&found) {
             score += 3;
         }
         prev_match = Some(found);
@@ -199,7 +183,10 @@ mod tests {
     }
 
     #[test]
-    fn every_command_listed() {
-        assert_eq!(Command::ALL.len(), 22);
+    fn labels_unique() {
+        let mut labels: Vec<_> = Command::ALL.iter().map(|c| c.label()).collect();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), Command::ALL.len());
     }
 }

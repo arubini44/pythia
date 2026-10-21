@@ -1,9 +1,20 @@
 //! orui – a fast, native Oracle PL/SQL IDE.
 
 mod app;
+mod browser;
 mod commands;
+mod connections;
 mod dialogs;
+mod documents;
+mod editor;
+mod history;
+mod object_view;
+mod program_window;
+#[cfg(test)]
+mod screenshots;
+mod secrets;
 mod sql_window;
+mod theme;
 
 use std::fs::{self, File};
 use std::sync::Mutex;

@@ -43,6 +43,8 @@ impl<'a> ResultGrid<'a> {
         let row_height = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
         let row_digits = self.rows.len().max(1).to_string().len();
 
+        let mono = egui::TextStyle::Monospace.resolve(ui.style());
+        let char_width = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
         egui::ScrollArea::horizontal()
             .id_salt(self.id_salt.with("h"))
             .show(ui, |ui| {
@@ -53,8 +55,18 @@ impl<'a> ResultGrid<'a> {
                     .auto_shrink(false)
                     .cell_layout(Layout::left_to_right(Align::Center))
                     .column(TableColumn::exact(row_digits as f32 * 8.0 + 16.0));
-                for col in self.columns {
-                    let width = (col.name.len().max(8) as f32 * 8.0).min(300.0);
+                for (c, col) in self.columns.iter().enumerate() {
+                    // Fit the header and the first rows' values, within limits.
+                    let content = self
+                        .rows
+                        .iter()
+                        .take(200)
+                        .filter_map(|r| r.get(c)?.as_deref())
+                        .map(|v| v.lines().next().unwrap_or_default().chars().count())
+                        .max()
+                        .unwrap_or(4);
+                    let chars = content.max(col.name.chars().count() + 1).max(4) as f32;
+                    let width = (chars * char_width + 14.0).min(char_width * 48.0);
                     table = table.column(TableColumn::initial(width).at_least(30.0).clip(true));
                 }
                 table

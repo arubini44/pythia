@@ -166,7 +166,9 @@ impl<'a> SqlEditor<'a> {
                     .get((&font, &theme, buf.as_str()))
                     .clone()
             });
-            job.wrap.max_width = wrap_width;
+            // Code never soft-wraps; long lines scroll horizontally.
+            let _ = wrap_width;
+            job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|f| f.layout_job(job))
         };
 
@@ -212,10 +214,16 @@ impl<'a> SqlEditor<'a> {
                         use egui::text::{CCursor, CCursorRange};
                         let range = CCursorRange::two(CCursor::new(start), CCursor::new(end));
                         output.state.cursor.set_char_range(Some(range));
-                        output.state.clone().store(ui.ctx(), output.response.response.id);
+                        output
+                            .state
+                            .clone()
+                            .store(ui.ctx(), output.response.response.id);
                         output.response.response.request_focus();
                         let rect = output.galley.pos_from_cursor(CCursor::new(start));
-                        ui.scroll_to_rect(rect.translate(output.galley_pos.to_vec2()).expand(40.0), None);
+                        ui.scroll_to_rect(
+                            rect.translate(output.galley_pos.to_vec2()).expand(40.0),
+                            None,
+                        );
                     }
                     output
                 })
