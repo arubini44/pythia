@@ -42,6 +42,7 @@ enum FileAction {
 pub enum Tab {
     Browser,
     Log,
+    Debugger,
     Doc(DocId),
 }
 
@@ -76,6 +77,9 @@ pub struct OruiApp {
     connecting: Option<String>,
 
     history: History,
+    debug: orui_debugger::ui::DebugSession,
+    /// The running debug call: (document, task request id).
+    debug_run: Option<(DocId, u64)>,
     /// Dictionary caches for code assistance, by connection.
     catalogs: HashMap<String, orui_lsp_core::CatalogCache>,
     catalog_revision: u64,
@@ -133,6 +137,8 @@ impl OruiApp {
             last_profile: None,
             connecting: None,
             history,
+            debug: Default::default(),
+            debug_run: None,
             catalogs: HashMap::new(),
             catalog_revision: 0,
             catalog_inflight: HashMap::new(),
@@ -262,6 +268,7 @@ impl OruiApp {
             catalog: None,
             catalog_revision: self.catalog_revision,
             connections: &[],
+            debug: Some(&self.debug),
         }
     }
 
@@ -402,6 +409,14 @@ impl OruiApp {
     }
 
     fn place_tab(&mut self, tab: Tab) {
+        // The debugger docks below the documents so code and variables are
+        // visible together.
+        if tab == Tab::Debugger
+            && let Some(path) = self.dock.find_tab_from(|t| matches!(t, Tab::Doc(_)))
+        {
+            self.dock[path.surface].split_below(path.node, 0.62, vec![tab]);
+            return;
+        }
         if !matches!(tab, Tab::Doc(_)) {
             self.dock.push_to_focused_leaf(tab);
             return;
@@ -503,8 +518,108 @@ impl OruiApp {
         if let Some(name) = &connection {
             self.fetch_catalog(name, effects.catalog_requests);
         }
+        for (unit, line) in effects.breakpoints {
+            self.debug.toggle_breakpoint(unit, line);
+        }
+        if let (Some(block), Some(id)) = (effects.debug, doc) {
+            self.start_debug(id, block);
+        }
         for request in effects.open {
             self.open(request);
+        }
+    }
+
+    /// Starts a debug run of `block` on the document's session.
+    fn start_debug(&mut self, doc: DocId, block: String) {
+        if self.debug.is_active() {
+            self.log("A debug session is already running");
+            return;
+        }
+        let host = Some(self.settings.debug_host.trim().to_owned())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(orui_debugger::target::default_host);
+        let actions = self.debug.start(block, host, self.notify.callback());
+        self.debug_run = Some((doc, 0));
+        self.open_tab(Tab::Debugger);
+        self.open_tab(Tab::Doc(doc));
+        self.debug_actions(actions);
+    }
+
+    fn debug_actions(&mut self, actions: Vec<orui_debugger::ui::DebugAction>) {
+        use orui_debugger::ui::DebugAction;
+        for action in actions {
+            match action {
+                DebugAction::RunTarget { host, port, block } => {
+                    let Some((doc, _)) = self.debug_run else {
+                        continue;
+                    };
+                    let Some(connection) = self.docs.get(&doc).and_then(|d| d.connection.clone())
+                    else {
+                        continue;
+                    };
+                    let Some(conn) = self.conns.get_mut(&connection) else {
+                        continue;
+                    };
+                    let session = conn.doc_session(doc, &self.notify);
+                    // Units with breakpoints need debug info; compile them on
+                    // the same session so it happens before the block runs.
+                    let units: std::collections::BTreeSet<orui_debugger::Unit> = self
+                        .debug
+                        .breakpoints
+                        .iter()
+                        .map(|b| b.unit.clone())
+                        .collect();
+                    for unit in units {
+                        let task: orui_db::TaskFn =
+                            Box::new(move |c: &orui_db::oracle::Connection| {
+                                orui_debugger::target::compile_debug(c, &unit)?;
+                                Ok(Box::new(()) as Box<dyn std::any::Any + Send>)
+                            });
+                        session.session.send(DbRequest::Task {
+                            id: request_id(),
+                            task,
+                        });
+                    }
+                    let id = request_id();
+                    session.session.send(DbRequest::Task {
+                        id,
+                        task: orui_debugger::target::debug_task(host, port, block),
+                    });
+                    self.debug_run = Some((doc, id));
+                }
+                DebugAction::ShowLocation(location) => {
+                    use orui_debugger::UnitType;
+                    let object_type = match location.unit.unit_type {
+                        UnitType::Procedure => Some(orui_db::ObjectType::Procedure),
+                        UnitType::Function => Some(orui_db::ObjectType::Function),
+                        UnitType::Package => Some(orui_db::ObjectType::Package),
+                        UnitType::PackageBody => Some(orui_db::ObjectType::PackageBody),
+                        UnitType::Trigger => Some(orui_db::ObjectType::Trigger),
+                        UnitType::Type => Some(orui_db::ObjectType::Type),
+                        UnitType::TypeBody => Some(orui_db::ObjectType::TypeBody),
+                        UnitType::Block => None,
+                    };
+                    let connection = self
+                        .debug_run
+                        .and_then(|(doc, _)| self.docs.get(&doc))
+                        .and_then(|d| d.connection.clone());
+                    if let (Some(object_type), Some(connection), Some(line)) =
+                        (object_type, connection, location.line)
+                    {
+                        let object = ObjectRef {
+                            owner: location.unit.owner,
+                            name: location.unit.name,
+                            object_type,
+                        };
+                        self.open(OpenRequest::ProgramAt {
+                            connection,
+                            object,
+                            line: line as usize,
+                        });
+                    }
+                }
+                DebugAction::Finished => self.log("Debug session ended"),
+            }
         }
     }
 
@@ -580,6 +695,7 @@ impl OruiApp {
             catalog,
             catalog_revision: self.catalog_revision,
             connections: &[],
+            debug: Some(&self.debug),
         };
         let effects = doc.on_event(event, &cx);
         self.apply(Some(id), effects);
@@ -622,6 +738,34 @@ impl OruiApp {
             }
             Command::Connect => self.connect_dialog.show(self.last_profile.as_ref()),
             Command::Settings => self.settings_dialog.open = true,
+            Command::DebugStart => {
+                if let Some(id) = self.focused {
+                    let effects = match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+                        Some(DocKind::Sql(w)) => w.debug_current(),
+                        _ => {
+                            self.log(
+                                "Open a SQL window with a PL/SQL block (e.g. from Test…) to debug",
+                            );
+                            Effects::default()
+                        }
+                    };
+                    self.apply(Some(id), effects);
+                }
+            }
+            Command::ToggleBreakpoint => {
+                if let Some(id) = self.focused
+                    && let Some(DocKind::Program(w)) = self.docs.get(&id).map(|d| &d.kind)
+                {
+                    let effects = w.toggle_breakpoint();
+                    self.apply(Some(id), effects);
+                }
+            }
+            Command::DebugContinue => self.debug.command(orui_debugger::DebugCommand::Resume),
+            Command::DebugStepOver => self.debug.command(orui_debugger::DebugCommand::StepOver),
+            Command::DebugStepInto => self.debug.command(orui_debugger::DebugCommand::StepInto),
+            Command::DebugStepOut => self.debug.command(orui_debugger::DebugCommand::StepOut),
+            Command::DebugStop => self.debug.stop(),
+            Command::ShowDebugger => self.open_tab(Tab::Debugger),
             Command::OpenFile => self.file_dialog(FileAction::Open, None),
             Command::SaveFile | Command::SaveFileAs => {
                 let Some(id) = self.focused else { return };
@@ -834,6 +978,7 @@ impl OruiApp {
             catalog,
             catalog_revision: self.catalog_revision,
             connections: &[],
+            debug: Some(&self.debug),
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
@@ -919,7 +1064,21 @@ impl OruiApp {
         for (name, key, event) in self.conns.poll() {
             match key {
                 SessionKey::Main => self.main_event(&name, event),
-                SessionKey::Doc(id) => self.deliver(id, event),
+                SessionKey::Doc(id) => match event {
+                    DbEvent::TaskDone { id: task, result }
+                        if self.debug_run.is_some_and(|(_, t)| t == task) =>
+                    {
+                        self.debug_run = None;
+                        match result {
+                            Ok(_) => self.log("Debugged block finished"),
+                            Err(e) => {
+                                self.log(format!("Debugged block failed: {e}"));
+                                self.deliver(id, DbEvent::Error(e));
+                            }
+                        }
+                    }
+                    event => self.deliver(id, event),
+                },
             }
         }
     }
@@ -1067,6 +1226,18 @@ impl OruiApp {
                 ui.separator();
                 item(ui, Command::CompareSchemas);
                 item(ui, Command::CompareData);
+            });
+            ui.menu_button("Debug", |ui| {
+                item(ui, Command::DebugStart);
+                item(ui, Command::ToggleBreakpoint);
+                ui.separator();
+                item(ui, Command::DebugContinue);
+                item(ui, Command::DebugStepOver);
+                item(ui, Command::DebugStepInto);
+                item(ui, Command::DebugStepOut);
+                item(ui, Command::DebugStop);
+                ui.separator();
+                item(ui, Command::ShowDebugger);
             });
             ui.menu_button("Monitor", |ui| {
                 item(ui, Command::MonitorDashboard);
@@ -1488,6 +1659,11 @@ impl eframe::App for OruiApp {
             || self.palette.open
             || self.finder.open
             || self.history_dialog.open;
+        if self.debug.is_active() && !modal_open {
+            self.debug.handle_keys(&ctx);
+        }
+        let actions = self.debug.poll();
+        self.debug_actions(actions);
         let mut commands = if modal_open {
             Vec::new()
         } else {
@@ -1528,6 +1704,8 @@ impl eframe::App for OruiApp {
             connected: &connected,
             catalogs: &self.catalogs,
             catalog_revision: self.catalog_revision,
+            debug: &mut self.debug,
+            debug_actions: Vec::new(),
             effects: Vec::new(),
             browser_effects: Effects::default(),
             closed: Vec::new(),
@@ -1687,6 +1865,23 @@ impl OruiApp {
         }
     }
 
+    pub fn test_debug_setup(&mut self, host: &str, unit: orui_debugger::Unit, line: u32) {
+        self.settings.debug_host = host.to_owned();
+        self.debug.toggle_breakpoint(unit, line);
+    }
+
+    pub fn test_debug(&self) -> &orui_debugger::ui::DebugSession {
+        &self.debug
+    }
+
+    pub fn test_debug_mut(&mut self) -> &mut orui_debugger::ui::DebugSession {
+        &mut self.debug
+    }
+
+    pub fn test_debug_running(&self) -> bool {
+        self.debug_run.is_some()
+    }
+
     pub fn test_command(&mut self, command: Command) {
         let ctx = self.notify.0.clone();
         self.run_command(&ctx, command);
@@ -1723,6 +1918,8 @@ struct Viewer<'a> {
     connected: &'a HashMap<String, bool>,
     catalogs: &'a HashMap<String, orui_lsp_core::CatalogCache>,
     catalog_revision: u64,
+    debug: &'a mut orui_debugger::ui::DebugSession,
+    debug_actions: Vec<orui_debugger::ui::DebugAction>,
     effects: Vec<(DocId, Effects)>,
     browser_effects: Effects,
     closed: Vec<DocId>,
@@ -1741,6 +1938,7 @@ impl TabViewer for Viewer<'_> {
         match tab {
             Tab::Browser => "Objects".into(),
             Tab::Log => "Log".into(),
+            Tab::Debugger => "Debugger".into(),
             Tab::Doc(id) => match self.docs.get(id) {
                 Some(doc) => {
                     let color = doc
@@ -1760,6 +1958,10 @@ impl TabViewer for Viewer<'_> {
             Tab::Browser => {
                 let effects = self.browser.ui(ui, self.connections);
                 self.browser_effects.extend(effects);
+            }
+            Tab::Debugger => {
+                let actions = self.debug.ui(ui);
+                self.debug_actions.extend(actions);
             }
             Tab::Log => {
                 egui::ScrollArea::vertical()
@@ -1808,6 +2010,7 @@ impl TabViewer for Viewer<'_> {
                     catalog: doc.connection.as_ref().and_then(|c| self.catalogs.get(c)),
                     catalog_revision: self.catalog_revision,
                     connections: self.connections,
+                    debug: Some(&*self.debug),
                 };
                 let effects = doc.ui(ui, &cx);
                 self.effects.push((*id, effects));

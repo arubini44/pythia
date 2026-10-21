@@ -81,7 +81,7 @@ impl Connection {
 pub struct Notify(pub egui::Context);
 
 impl Notify {
-    fn callback(&self) -> impl Fn() + Send + 'static {
+    pub fn callback(&self) -> impl Fn() + Send + 'static {
         let ctx = self.0.clone();
         move || ctx.request_repaint()
     }

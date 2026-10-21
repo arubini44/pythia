@@ -16,14 +16,16 @@ enum Section {
     Editor,
     CodeAssist,
     Query,
+    Debugger,
 }
 
 impl Section {
-    const ALL: [Section; 4] = [
+    const ALL: [Section; 5] = [
         Section::Appearance,
         Section::Editor,
         Section::CodeAssist,
         Section::Query,
+        Section::Debugger,
     ];
 
     fn label(self) -> &'static str {
@@ -32,6 +34,7 @@ impl Section {
             Section::Editor => "Editor",
             Section::CodeAssist => "Code assistance",
             Section::Query => "Queries",
+            Section::Debugger => "Debugger",
         }
     }
 }
@@ -74,6 +77,7 @@ impl SettingsDialog {
                             Section::Editor => editor(ui, settings),
                             Section::CodeAssist => code_assist(ui, settings),
                             Section::Query => query(ui, settings),
+                            Section::Debugger => debugger(ui, settings),
                         }
                     });
                 });
@@ -188,6 +192,22 @@ fn query(ui: &mut Ui, s: &mut Settings) {
                 egui::DragValue::new(&mut s.fetch_size)
                     .range(10..=100_000)
                     .speed(10),
+            );
+        },
+    );
+}
+
+fn debugger(ui: &mut Ui, s: &mut Settings) {
+    row(
+        ui,
+        "Debugger host",
+        "How the database server reaches this machine (the database connects back to orui). \
+         Empty: this computer's host name. For a local container: host.containers.internal",
+        |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut s.debug_host)
+                    .hint_text(orui_debugger::target::default_host())
+                    .desired_width(260.0),
             );
         },
     );

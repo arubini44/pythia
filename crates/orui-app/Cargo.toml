@@ -20,6 +20,7 @@ orui-compare.workspace = true
 orui-config.workspace = true
 orui-data.workspace = true
 orui-db.workspace = true
+orui-debugger.workspace = true
 orui-lsp-core.workspace = true
 orui-monitor.workspace = true
 orui-plsql.workspace = true

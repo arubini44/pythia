@@ -58,6 +58,8 @@ pub struct RunState {
     pub bottom: BottomTab,
     pub line_col: (usize, usize),
     pub prompt: Option<VariablePrompt>,
+    /// The open variable prompt is for a debug run.
+    pub prompt_for_debug: bool,
     /// Result of a running export (file dialog + write on a helper thread).
     pub export: Option<std::sync::mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>>,
     pub selection_summary: Option<String>,
@@ -247,6 +249,64 @@ impl SqlWindow {
         }
         self.state.queue = statements.into();
         self.run_next(cx)
+    }
+
+    /// Debugs the PL/SQL block under the cursor (asks for variables first).
+    pub fn debug_current(&mut self) -> Effects {
+        let mut effects = Effects::default();
+        if self.is_running() {
+            return effects;
+        }
+        let Some(stmt) = self.statements(true).into_iter().next() else {
+            return effects;
+        };
+        if stmt.kind != StatementKind::PlSql || orui_plsql::unit_header(&stmt.sql).is_some() {
+            self.warn(
+                "Debugging runs an anonymous block (BEGIN … END;). Use Test… on a procedure or function to create one.",
+            );
+            self.state.bottom = BottomTab::Messages;
+            return effects;
+        }
+        let missing: Vec<String> = if self.substitution {
+            dedup(
+                find_substitutions(&stmt.sql)
+                    .into_iter()
+                    .filter(|s| !self.defines.contains_key(&s.name))
+                    .map(|s| s.name),
+            )
+        } else {
+            Vec::new()
+        };
+        let binds = dedup(find_binds(&stmt.sql).into_iter());
+        if missing.is_empty() && binds.is_empty() {
+            let sql = if self.substitution {
+                substitute(&stmt.sql, &self.defines)
+            } else {
+                stmt.sql
+            };
+            effects.debug = Some(sql);
+            return effects;
+        }
+        let binds = binds
+            .into_iter()
+            .map(|name| {
+                let remembered = self.bind_values.get(&name.to_lowercase());
+                let is_null = matches!(remembered, Some(None));
+                (
+                    name.clone(),
+                    remembered.cloned().flatten().unwrap_or_default(),
+                    is_null,
+                )
+            })
+            .collect();
+        self.state.prompt_for_debug = true;
+        self.state.prompt = Some(VariablePrompt {
+            statement: stmt,
+            substitutions: missing.into_iter().map(|n| (n, String::new())).collect(),
+            binds,
+            focus_first: true,
+        });
+        effects
     }
 
     /// Runs `EXPLAIN PLAN` for the current statement (on the main session).
@@ -1171,9 +1231,14 @@ impl SqlWindow {
                         (name, value)
                     })
                     .collect();
-                self.send(prompt.statement.start, sql, binds, cx, &mut effects);
+                if std::mem::take(&mut self.state.prompt_for_debug) {
+                    effects.debug = Some(inline_binds(&sql, &binds));
+                } else {
+                    self.send(prompt.statement.start, sql, binds, cx, &mut effects);
+                }
             }
             Some(false) => {
+                self.state.prompt_for_debug = false;
                 self.state.prompt = None;
                 self.state.queue.clear();
                 self.info("Execution cancelled");
@@ -1288,6 +1353,31 @@ pub fn substitute(sql: &str, values: &BTreeMap<String, String>) -> String {
             out.push_str(value);
             pos = s.range.end;
         }
+    }
+    out.push_str(&sql[pos..]);
+    out
+}
+
+/// Replaces `:bind` references with literals (for debug runs, which execute
+/// the block as plain text).
+pub fn inline_binds(sql: &str, binds: &[(String, Option<String>)]) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut pos = 0;
+    for t in tokenize(sql)
+        .into_iter()
+        .filter(|t| t.kind == TokenKind::BindVar)
+    {
+        let name = &sql[t.span.start + 1..t.span.end];
+        let Some((_, value)) = binds.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) else {
+            continue;
+        };
+        out.push_str(&sql[pos..t.span.start]);
+        match value {
+            None => out.push_str("NULL"),
+            Some(v) if v.trim().parse::<f64>().is_ok() => out.push_str(v.trim()),
+            Some(v) => out.push_str(&format!("'{}'", v.replace('\'', "''"))),
+        }
+        pos = t.span.end;
     }
     out.push_str(&sql[pos..]);
     out
@@ -1410,6 +1500,19 @@ mod tests {
         assert_eq!(
             dedup(["a".to_owned(), "A".to_owned(), "b".to_owned()].into_iter()),
             ["a", "b"]
+        );
+    }
+
+    #[test]
+    fn inlines_binds() {
+        let binds = vec![
+            ("a".into(), Some("12".into())),
+            ("B".into(), Some("O'Neil".into())),
+            ("c".into(), None),
+        ];
+        assert_eq!(
+            inline_binds("p(:a, :b, :c, ':a')", &binds),
+            "p(12, 'O''Neil', NULL, ':a')"
         );
     }
 

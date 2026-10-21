@@ -89,6 +89,18 @@ impl ProgramWindow {
         }
     }
 
+    /// Toggles a breakpoint on the cursor line of the active part.
+    pub fn toggle_breakpoint(&self) -> Effects {
+        let mut effects = Effects::default();
+        if let Some(part) = self.parts.get(self.active) {
+            let line = part.editor.line_col().0 as u32;
+            effects
+                .breakpoints
+                .push((debug_unit(&self.object, part.object_type), line));
+        }
+        effects
+    }
+
     /// File name for saving the active part, e.g. `emp_pkg.pkb`.
     pub fn file_name(&self) -> String {
         let ext = match self.parts.get(self.active).map(|p| p.object_type) {
@@ -375,6 +387,14 @@ impl ProgramWindow {
             );
             effects.extend(part.assist.handle(&mut part.editor, &out, cx));
             part.assist.background(&mut part.editor, ui);
+            let unit = debug_unit(&self.object, part.object_type);
+            if let Some(line) = out.gutter_clicked {
+                effects.breakpoints.push((unit.clone(), line as u32));
+            }
+            if let Some(debug) = cx.debug {
+                let (lines, current) = debug.markers(&unit);
+                part.editor.set_debug_lines(&lines, current);
+            }
         });
         effects
     }
@@ -394,6 +414,21 @@ impl Part {
     fn is_dirty(&self) -> bool {
         self.editor.text() != self.saved
     }
+}
+
+/// The debugger's name for a program window part.
+pub fn debug_unit(object: &ObjectRef, object_type: ObjectType) -> orui_debugger::Unit {
+    use orui_debugger::UnitType;
+    let unit_type = match object_type {
+        ObjectType::Package => UnitType::Package,
+        ObjectType::PackageBody => UnitType::PackageBody,
+        ObjectType::Function => UnitType::Function,
+        ObjectType::Trigger => UnitType::Trigger,
+        ObjectType::Type => UnitType::Type,
+        ObjectType::TypeBody => UnitType::TypeBody,
+        _ => UnitType::Procedure,
+    };
+    orui_debugger::Unit::new(object.owner.clone(), object.name.clone(), unit_type)
 }
 
 /// One outline entry with its children, indented by depth.

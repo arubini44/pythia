@@ -27,6 +27,9 @@ pub struct Settings {
     /// Rows fetched per round trip and shown before "fetch more".
     pub fetch_size: usize,
     pub editor: EditorSettings,
+    /// Host name or address the database uses to reach orui's debugger
+    /// (empty: this machine's host name).
+    pub debug_host: String,
 }
 
 impl Default for Settings {
@@ -37,6 +40,7 @@ impl Default for Settings {
             ui_scale: 1.0,
             fetch_size: 500,
             editor: EditorSettings::default(),
+            debug_host: String::new(),
         }
     }
 }

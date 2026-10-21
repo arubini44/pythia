@@ -73,6 +73,10 @@ pub struct Effects {
     pub log: Vec<String>,
     /// Dictionary data code assistance is waiting for.
     pub catalog_requests: Vec<orui_lsp_core::CatalogRequest>,
+    /// Run this anonymous block under the debugger.
+    pub debug: Option<String>,
+    /// Breakpoints toggled in an editor: (unit, line).
+    pub breakpoints: Vec<(orui_debugger::Unit, u32)>,
 }
 
 impl Effects {
@@ -87,6 +91,8 @@ impl Effects {
         self.cancel |= other.cancel;
         self.log.extend(other.log);
         self.catalog_requests.extend(other.catalog_requests);
+        self.debug = other.debug.or(self.debug.take());
+        self.breakpoints.extend(other.breakpoints);
     }
 }
 
@@ -161,6 +167,8 @@ pub struct DocContext<'a> {
     pub catalog_revision: u64,
     /// Names of all open connections.
     pub connections: &'a [String],
+    /// Debugger state, for breakpoint and execution markers.
+    pub debug: Option<&'a orui_debugger::ui::DebugSession>,
 }
 
 impl Document {

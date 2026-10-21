@@ -49,6 +49,14 @@ commands! {
     ImportData => "Tools: Import Data (CSV, Excel)…",
     CompareSchemas => "Tools: Compare Schemas…",
     CompareData => "Tools: Compare Table Data…",
+    DebugStart => "Debug: Debug Block Under Cursor",
+    ToggleBreakpoint => "Debug: Toggle Breakpoint",
+    DebugContinue => "Debug: Continue",
+    DebugStepOver => "Debug: Step Over",
+    DebugStepInto => "Debug: Step Into",
+    DebugStepOut => "Debug: Step Out",
+    DebugStop => "Debug: Stop",
+    ShowDebugger => "View: Debugger",
     MonitorDashboard => "Monitor: Dashboard",
     MonitorSessions => "Monitor: Sessions",
     MonitorBlocking => "Monitor: Blocking Sessions",
@@ -90,6 +98,11 @@ impl Keymap {
             KeymapPreset::PlsqlDeveloper => vec![
                 (Command::NewSqlWindow, KeyboardShortcut::new(ctrl, Key::N)),
                 (Command::OpenFile, KeyboardShortcut::new(ctrl, Key::O)),
+                (Command::DebugStart, KeyboardShortcut::new(ctrl, Key::F9)),
+                (
+                    Command::ToggleBreakpoint,
+                    KeyboardShortcut::new(ctrl, Key::B),
+                ),
                 (
                     Command::SaveFileAs,
                     KeyboardShortcut::new(ctrl | shift, Key::S),

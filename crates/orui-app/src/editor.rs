@@ -20,6 +20,8 @@ pub struct Editor {
     compile_markers: Vec<Marker>,
     /// Syntax problems found while typing.
     syntax_markers: Vec<Marker>,
+    /// Breakpoints and the current execution line while debugging.
+    debug_markers: Vec<Marker>,
 }
 
 impl Default for Editor {
@@ -51,6 +53,7 @@ impl Editor {
             revision,
             compile_markers: Vec::new(),
             syntax_markers: Vec::new(),
+            debug_markers: Vec::new(),
         }
     }
 
@@ -121,7 +124,39 @@ impl Editor {
                 .filter(|m| !self.compile_markers.iter().any(|c| c.line == m.line))
                 .cloned(),
         );
+        all.extend(self.debug_markers.iter().cloned());
         self.inner.set_markers(all);
+    }
+
+    /// Breakpoint lines and the execution line (1-based) from the debugger.
+    pub fn set_debug_lines(&mut self, breakpoints: &[u32], current: Option<u32>) {
+        let mut markers: Vec<Marker> = breakpoints
+            .iter()
+            .map(|l| Marker {
+                line: *l as usize,
+                kind: MarkerKind::Breakpoint,
+                message: "Breakpoint".into(),
+            })
+            .collect();
+        if let Some(line) = current {
+            markers.push(Marker {
+                line: line as usize,
+                kind: MarkerKind::ExecutionPoint,
+                message: "Stopped here".into(),
+            });
+        }
+        let same = markers.len() == self.debug_markers.len()
+            && markers
+                .iter()
+                .zip(&self.debug_markers)
+                .all(|(a, b)| a.line == b.line && a.kind == b.kind);
+        if !same {
+            self.debug_markers = markers;
+            self.push_markers();
+            if let Some(line) = current {
+                self.inner.goto_line(line as usize);
+            }
+        }
     }
 
     /// Changes whenever the text changes.

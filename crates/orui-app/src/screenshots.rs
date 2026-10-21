@@ -312,6 +312,7 @@ fn data_editing() {
             catalog: None,
             catalog_revision: 0,
             connections: &[],
+            debug: None,
         };
         let effects = app.test_sql_window().start_editing(0, &cx);
         app.test_apply(effects);
@@ -341,6 +342,7 @@ fn data_editing() {
             catalog: None,
             catalog_revision: 0,
             connections: &[],
+            debug: None,
         };
         let effects = app.test_sql_window().apply_changes(0, &cx);
         app.test_apply(effects);
@@ -478,4 +480,63 @@ fn import_csv() {
     );
     conn.execute("drop table orui_import_t purge", &[]).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Debugs a block calling `demo_pkg.raise_salary` with a breakpoint in the
+/// package body: stops at the line, shows variables, steps and finishes.
+/// Needs DEBUG CONNECT SESSION / DEBUG ANY PROCEDURE and a JDWP ACL for the
+/// test user (see orui-debugger's setup script) and ORUI_DEBUG_HOST.
+#[test]
+fn debugger_session() {
+    let (Some((profile, password)), Ok(host)) = (profile(), std::env::var("ORUI_DEBUG_HOST"))
+    else {
+        eprintln!("ORUI_TEST_DB / ORUI_DEBUG_HOST not set, skipping");
+        return;
+    };
+    use orui_debugger::{Unit, UnitType};
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let unit = Unit::new("ORUI", "DEMO_PKG", UnitType::PackageBody);
+    // Line 4 of the body: the UPDATE inside raise_salary.
+    h.state_mut().test_debug_setup(&host, unit.clone(), 4);
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text:
+            "begin\n  demo_pkg.raise_salary(p_employee_id => 1, p_percent => 0);\n  rollback;\nend;"
+                .into(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::DebugStart);
+    wait_until(&mut h, "breakpoint", |app| app.test_debug().is_suspended());
+    let stack = &h.state().test_debug().stack;
+    assert_eq!(stack[0].location.unit, unit, "{stack:?}");
+    assert_eq!(stack[0].location.line, Some(4));
+    let vars: Vec<String> = h
+        .state()
+        .test_debug()
+        .variables
+        .iter()
+        .map(|v| format!("{}={}", v.name, v.value.as_deref().unwrap_or("NULL")))
+        .collect();
+    assert!(
+        vars.iter()
+            .any(|v| v.eq_ignore_ascii_case("p_employee_id=1")),
+        "{vars:?}"
+    );
+    h.run_steps(6);
+    save(&mut h, "12-debugger-dark");
+
+    h.state_mut()
+        .test_debug_mut()
+        .command(orui_debugger::DebugCommand::StepOver);
+    wait_until(&mut h, "step", |app| {
+        app.test_debug().is_suspended() || !app.test_debug_running()
+    });
+    h.state_mut()
+        .test_debug_mut()
+        .command(orui_debugger::DebugCommand::Resume);
+    wait_until(&mut h, "finish", |app| !app.test_debug_running());
 }
