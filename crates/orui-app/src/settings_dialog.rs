@@ -7,6 +7,16 @@ use orui_config::{Settings, ThemeChoice};
 pub struct SettingsDialog {
     pub open: bool,
     section: Section,
+    keys: KeysState,
+}
+
+#[derive(Default)]
+struct KeysState {
+    filter: String,
+    /// Waiting for the new shortcut of this command.
+    recording: Option<crate::commands::Command>,
+    /// What the last change did, e.g. which command lost its shortcut.
+    notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -17,16 +27,18 @@ enum Section {
     CodeAssist,
     Query,
     Formatter,
+    Keyboard,
     Debugger,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [
+    const ALL: [Section; 7] = [
         Section::Appearance,
         Section::Editor,
         Section::CodeAssist,
         Section::Query,
         Section::Formatter,
+        Section::Keyboard,
         Section::Debugger,
     ];
 
@@ -37,6 +49,7 @@ impl Section {
             Section::CodeAssist => "Code assistance",
             Section::Query => "Queries",
             Section::Formatter => "Formatter",
+            Section::Keyboard => "Keyboard",
             Section::Debugger => "Debugger",
         }
     }
@@ -52,6 +65,16 @@ pub enum SettingsResult {
 }
 
 impl SettingsDialog {
+    /// Recording a shortcut: the app must not run commands for key presses.
+    pub fn is_recording(&self) -> bool {
+        self.open && self.keys.recording.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn show_keyboard(&mut self) {
+        self.section = Section::Keyboard;
+    }
+
     #[cfg(test)]
     pub fn show_formatter(&mut self) {
         self.section = Section::Formatter;
@@ -88,12 +111,16 @@ impl SettingsDialog {
                             Section::CodeAssist => code_assist(ui, settings),
                             Section::Query => query(ui, settings),
                             Section::Formatter => formatter(ui, settings),
+                            Section::Keyboard => keyboard(ui, settings, &mut self.keys),
                             Section::Debugger => debugger(ui, settings),
                         }
                     });
                 });
             });
         self.open = open;
+        if !open {
+            self.keys.recording = None;
+        }
         if !open {
             SettingsResult::Closed
         } else if *settings != before {
@@ -143,6 +170,28 @@ fn editor(ui: &mut Ui, s: &mut Settings) {
     row(ui, "Font size", "", |ui| {
         ui.add(egui::Slider::new(&mut e.font_size, 8.0..=32.0).step_by(0.5));
     });
+    row(
+        ui,
+        "Font",
+        "A TrueType/OpenType file; empty uses the built-in Hack",
+        |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut e.font_file)
+                    .hint_text("Hack (built in)")
+                    .desired_width(260.0),
+            );
+            if ui.button("Browse…").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Fonts", &["ttf", "otf", "ttc"])
+                    .pick_file()
+            {
+                e.font_file = path.display().to_string();
+            }
+            if !e.font_file.is_empty() && ui.small_button("×").clicked() {
+                e.font_file.clear();
+            }
+        },
+    );
     row(ui, "Tab width", "Tab inserts spaces", |ui| {
         ui.add(egui::Slider::new(&mut e.tab_width, 1..=8));
     });
@@ -271,4 +320,161 @@ fn formatter(ui: &mut Ui, s: &mut Settings) {
                 ui.add(egui::Label::new(RichText::new(preview).monospace()).extend());
             });
         });
+}
+
+fn keyboard(ui: &mut Ui, s: &mut Settings, st: &mut KeysState) {
+    use crate::commands::{Command, Keymap, shortcut_string};
+    let preset = Keymap::new(s.keymap);
+    let current = Keymap::with_overrides(s.keymap, &s.keybindings);
+
+    if let Some(command) = st.recording {
+        // The next key press (with modifiers) becomes the shortcut.
+        let pressed = ui.ctx().input_mut(|i| {
+            let found = i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some((*key, *modifiers)),
+                _ => None,
+            });
+            if let Some((key, modifiers)) = found {
+                i.consume_key(modifiers, key);
+            }
+            found
+        });
+        match pressed {
+            Some((egui::Key::Escape, m)) if m.is_none() => st.recording = None,
+            Some((key, m)) => {
+                let mut modifiers = egui::Modifiers::NONE;
+                if m.command || m.ctrl || m.mac_cmd {
+                    modifiers = modifiers | egui::Modifiers::COMMAND;
+                }
+                if m.shift {
+                    modifiers = modifiers | egui::Modifiers::SHIFT;
+                }
+                if m.alt {
+                    modifiers = modifiers | egui::Modifiers::ALT;
+                }
+                let shortcut = egui::KeyboardShortcut::new(modifiers, key);
+                st.notice = None;
+                if let Some(other) = current.command_for(&shortcut).filter(|c| *c != command) {
+                    s.keybindings.insert(other.id().to_owned(), String::new());
+                    st.notice = Some(format!(
+                        "{} was taken from \"{}\"",
+                        shortcut_string(&shortcut),
+                        other.label()
+                    ));
+                }
+                if preset.shortcut(command) == Some(&shortcut) {
+                    s.keybindings.remove(command.id());
+                } else {
+                    s.keybindings
+                        .insert(command.id().to_owned(), shortcut_string(&shortcut));
+                }
+                st.recording = None;
+            }
+            None => {}
+        }
+    }
+
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut st.filter)
+                .hint_text("Filter commands or shortcuts…")
+                .desired_width(260.0),
+        );
+        if !s.keybindings.is_empty()
+            && ui
+                .button("Reset all")
+                .on_hover_text("Back to the PL/SQL Developer compatible preset")
+                .clicked()
+        {
+            s.keybindings.clear();
+            st.notice = None;
+        }
+    });
+    if let Some(notice) = &st.notice {
+        ui.label(
+            RichText::new(notice)
+                .small()
+                .color(ui.visuals().warn_fg_color),
+        );
+    }
+    ui.add_space(4.0);
+    let needle = st.filter.trim().to_lowercase();
+    let current = Keymap::with_overrides(s.keymap, &s.keybindings);
+    egui::ScrollArea::vertical()
+        .max_height(440.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            egui::Grid::new("keybindings")
+                .num_columns(3)
+                .striped(true)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    for &command in Command::ALL {
+                        let text = current
+                            .shortcut(command)
+                            .map(shortcut_string)
+                            .unwrap_or_default();
+                        if !needle.is_empty()
+                            && !command.label().to_lowercase().contains(&needle)
+                            && !text.to_lowercase().contains(&needle)
+                        {
+                            continue;
+                        }
+                        let changed = s.keybindings.contains_key(command.id());
+                        let mut label = RichText::new(command.label());
+                        if changed {
+                            label = label.strong();
+                        }
+                        ui.label(label);
+                        let recording = st.recording == Some(command);
+                        let button = if recording {
+                            egui::Button::new(
+                                RichText::new("Press keys… (Esc cancels)")
+                                    .color(ui.visuals().hyperlink_color),
+                            )
+                        } else if text.is_empty() {
+                            egui::Button::new(RichText::new("—").weak())
+                        } else {
+                            egui::Button::new(RichText::new(&text).monospace())
+                        };
+                        if ui
+                            .add_sized([200.0, 20.0], button)
+                            .on_hover_text("Click, then press the new shortcut")
+                            .clicked()
+                        {
+                            st.recording = (!recording).then_some(command);
+                        }
+                        ui.horizontal(|ui| {
+                            if !text.is_empty()
+                                && ui.small_button("×").on_hover_text("No shortcut").clicked()
+                            {
+                                s.keybindings.insert(command.id().to_owned(), String::new());
+                            }
+                            if changed
+                                && ui
+                                    .small_button("Reset")
+                                    .on_hover_text(match preset.shortcut(command) {
+                                        Some(d) => format!("Default: {}", shortcut_string(d)),
+                                        None => "Default: none".into(),
+                                    })
+                                    .clicked()
+                            {
+                                s.keybindings.remove(command.id());
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+        });
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new("Editor keys (folding, bookmarks, multi-cursor) are fixed.")
+            .small()
+            .weak(),
+    );
 }

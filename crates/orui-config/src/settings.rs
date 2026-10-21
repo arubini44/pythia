@@ -32,6 +32,9 @@ pub struct Settings {
     pub debug_host: String,
     /// Code formatter rules.
     pub format: orui_plsql::FormatOptions,
+    /// Shortcut overrides on top of the preset: command id → shortcut text
+    /// like `Ctrl+Shift+F` (empty: no shortcut).
+    pub keybindings: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -44,6 +47,7 @@ impl Default for Settings {
             editor: EditorSettings::default(),
             debug_host: String::new(),
             format: orui_plsql::FormatOptions::default(),
+            keybindings: Default::default(),
         }
     }
 }
@@ -52,6 +56,8 @@ impl Default for Settings {
 #[serde(default)]
 pub struct EditorSettings {
     pub font_size: f32,
+    /// A TTF/OTF file for code (empty: the built-in Hack).
+    pub font_file: String,
     pub tab_width: usize,
     pub show_line_numbers: bool,
     pub show_whitespace: bool,
@@ -67,6 +73,7 @@ impl Default for EditorSettings {
     fn default() -> Self {
         Self {
             font_size: 13.0,
+            font_file: String::new(),
             tab_width: 4,
             show_line_numbers: true,
             show_whitespace: false,

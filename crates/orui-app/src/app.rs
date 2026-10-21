@@ -65,6 +65,8 @@ pub struct OruiApp {
     settings: Settings,
     saved: SavedConnections,
     keymap: Keymap,
+    /// Code font file currently installed.
+    loaded_font: Option<String>,
     notify: Notify,
 
     dock: DockState<Tab>,
@@ -133,7 +135,8 @@ impl OruiApp {
 
         let mut app = Self {
             paths,
-            keymap: Keymap::new(settings.keymap),
+            keymap: Keymap::with_overrides(settings.keymap, &settings.keybindings),
+            loaded_font: None,
             settings,
             saved,
             notify: Notify(cc.egui_ctx.clone()),
@@ -213,7 +216,27 @@ impl OruiApp {
         id
     }
 
-    fn apply_settings(&self, ctx: &egui::Context) {
+    fn apply_settings(&mut self, ctx: &egui::Context) {
+        let font = self.settings.editor.font_file.trim().to_owned();
+        if self.loaded_font.as_deref() != Some(font.as_str()) {
+            let bytes = if font.is_empty() {
+                None
+            } else {
+                match std::fs::read(&font) {
+                    Ok(bytes) if is_font(&bytes) => Some(bytes),
+                    Ok(_) => {
+                        self.log(format!("{font} is not a TrueType or OpenType font"));
+                        None
+                    }
+                    Err(e) => {
+                        self.log(format!("Could not load font {font}: {e}"));
+                        None
+                    }
+                }
+            };
+            theme::set_fonts(ctx, bytes);
+            self.loaded_font = Some(font);
+        }
         ctx.set_theme(match self.settings.theme {
             ThemeChoice::System => egui::ThemePreference::System,
             ThemeChoice::Dark => egui::ThemePreference::Dark,
@@ -1851,8 +1874,14 @@ impl OruiApp {
             None => {}
         }
         match self.settings_dialog.ui(ctx, &mut self.settings) {
-            crate::settings_dialog::SettingsResult::Changed => self.apply_settings(ctx),
+            crate::settings_dialog::SettingsResult::Changed => {
+                self.keymap =
+                    Keymap::with_overrides(self.settings.keymap, &self.settings.keybindings);
+                self.apply_settings(ctx);
+            }
             crate::settings_dialog::SettingsResult::Closed => {
+                self.keymap =
+                    Keymap::with_overrides(self.settings.keymap, &self.settings.keybindings);
                 self.apply_settings(ctx);
                 self.save_settings();
             }
@@ -1948,7 +1977,8 @@ impl eframe::App for OruiApp {
             || self.about_open
             || self.palette.open
             || self.finder.open
-            || self.history_dialog.open;
+            || self.history_dialog.open
+            || self.settings_dialog.is_recording();
         if self.debug.is_active() && !modal_open {
             self.debug.handle_keys(&ctx);
         }
@@ -2248,6 +2278,23 @@ impl OruiApp {
         }
     }
 
+    pub fn test_code_font(&mut self, ctx: &egui::Context, file: &str) {
+        self.settings.editor.font_file = file.to_owned();
+        self.apply_settings(ctx);
+    }
+
+    pub fn test_log(&self) -> &[String] {
+        &self.log
+    }
+
+    pub fn test_settings_keyboard(&mut self) {
+        self.settings_dialog.open = true;
+        self.settings_dialog.show_keyboard();
+        self.settings
+            .keybindings
+            .insert("Format".into(), "Alt+Shift+F".into());
+    }
+
     pub fn test_close_settings(&mut self) {
         self.settings_dialog.open = false;
     }
@@ -2447,6 +2494,15 @@ impl TabViewer for Viewer<'_> {
     fn scroll_bars(&self, _tab: &Tab) -> [bool; 2] {
         [false, false]
     }
+}
+
+/// TrueType, OpenType or font collection signature; anything else would
+/// make egui panic when laying out text.
+fn is_font(bytes: &[u8]) -> bool {
+    matches!(
+        bytes.get(..4),
+        Some([0, 1, 0, 0] | b"OTTO" | b"true" | b"ttcf")
+    )
 }
 
 /// Selects every occurrence of the local symbol at the caret, so typing

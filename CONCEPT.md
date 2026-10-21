@@ -99,9 +99,9 @@ orui/
 - [x] Save/restore layout and open tabs per workspace
 - [x] Main menu, toolbar, status bar (connection, session, transaction state, cursor pos, encoding)
 - [x] Command palette (Ctrl+Shift+P) with fuzzy search over all commands
-- [ ] Configurable keybindings; ship a PL/SQL Developer compatible preset
+- [x] Configurable keybindings; ship a PL/SQL Developer compatible preset
 - [x] Light/dark themes, custom theme files (TOML) (no TOML theme files yet)
-- [ ] Font selection with ligatures off by default, HiDPI scaling
+- [x] Font selection with ligatures off by default, HiDPI scaling (code font from a font file; egui has no ligatures)
 - [x] Settings dialog (global, per connection, per project) (global settings; per-connection options live in the connection dialog; no per-project settings)
 - [x] Crash handler and panic logging
 - [ ] Single-instance mode with file open forwarding (optional)

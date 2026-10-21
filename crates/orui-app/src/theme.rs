@@ -66,15 +66,29 @@ const LIGHT: Palette = Palette {
 
 pub fn install(ctx: &egui::Context) {
     orui_ui::icons::install(ctx);
+    set_fonts(ctx, None);
+    ctx.style_mut_of(Theme::Dark, |s| apply(s, &DARK));
+    ctx.style_mut_of(Theme::Light, |s| apply(s, &LIGHT));
+}
+
+/// Installs the fonts, with `code_font` (font file bytes) first for code.
+pub fn set_fonts(ctx: &egui::Context, code_font: Option<Vec<u8>>) {
     // The UI font lacks arrows and some symbols; fall back to the
     // monospace font (Hack) before the emoji fonts.
     let mut fonts = egui::FontDefinitions::default();
     if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
         family.insert(1.min(family.len()), "Hack".to_owned());
     }
+    if let Some(bytes) = code_font {
+        fonts.font_data.insert(
+            "code".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            family.insert(0, "code".to_owned());
+        }
+    }
     ctx.set_fonts(fonts);
-    ctx.style_mut_of(Theme::Dark, |s| apply(s, &DARK));
-    ctx.style_mut_of(Theme::Light, |s| apply(s, &LIGHT));
 }
 
 fn apply(style: &mut Style, p: &Palette) {

@@ -22,6 +22,17 @@ macro_rules! commands {
                     $(Command::$variant => $label,)*
                 }
             }
+
+            /// Stable name for settings files.
+            pub fn id(self) -> &'static str {
+                match self {
+                    $(Command::$variant => stringify!($variant),)*
+                }
+            }
+
+            pub fn from_id(id: &str) -> Option<Command> {
+                Command::ALL.iter().copied().find(|c| c.id() == id)
+            }
         }
     };
 }
@@ -100,6 +111,32 @@ pub struct Keymap {
 }
 
 impl Keymap {
+    /// The preset with the user's overrides (command id → shortcut text).
+    pub fn with_overrides(
+        preset: KeymapPreset,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        let mut keymap = Self::new(preset);
+        for (id, text) in overrides {
+            let Some(command) = Command::from_id(id) else {
+                continue;
+            };
+            keymap.bindings.retain(|(c, _)| *c != command);
+            if let Some(shortcut) = parse_shortcut(text) {
+                keymap.bindings.push((command, shortcut));
+            }
+        }
+        keymap
+    }
+
+    /// The command a shortcut triggers, if any.
+    pub fn command_for(&self, shortcut: &KeyboardShortcut) -> Option<Command> {
+        self.bindings
+            .iter()
+            .find(|(_, s)| s == shortcut)
+            .map(|(c, _)| *c)
+    }
+
     pub fn new(preset: KeymapPreset) -> Self {
         let ctrl = Modifiers::COMMAND;
         let shift = Modifiers::SHIFT;
@@ -190,6 +227,53 @@ impl Keymap {
     }
 }
 
+/// Parses `Ctrl+Shift+F5`, `Alt+X`, `Shift+Esc` (case-insensitive; `Cmd`
+/// and `Ctrl` both mean the platform's command key).
+pub fn parse_shortcut(text: &str) -> Option<KeyboardShortcut> {
+    let mut modifiers = Modifiers::NONE;
+    let mut key = None;
+    for part in text.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "cmd" | "command" => modifiers = modifiers | Modifiers::COMMAND,
+            "shift" => modifiers = modifiers | Modifiers::SHIFT,
+            "alt" | "option" => modifiers = modifiers | Modifiers::ALT,
+            "esc" => key = Some(Key::Escape),
+            "del" => key = Some(Key::Delete),
+            "ins" => key = Some(Key::Insert),
+            "pgup" => key = Some(Key::PageUp),
+            "pgdn" => key = Some(Key::PageDown),
+            _ => {
+                key = Some(
+                    Key::from_name(part)
+                        .or_else(|| Key::from_name(&part.to_ascii_uppercase()))
+                        .or_else(|| {
+                            let mut c = part.chars();
+                            let first = c.next()?.to_ascii_uppercase();
+                            Key::from_name(&format!("{first}{}", c.as_str().to_ascii_lowercase()))
+                        })?,
+                )
+            }
+        }
+    }
+    Some(KeyboardShortcut::new(modifiers, key?))
+}
+
+/// The settings-file form of a shortcut, e.g. `Ctrl+Shift+F5`.
+pub fn shortcut_string(s: &KeyboardShortcut) -> String {
+    let mut parts = Vec::new();
+    if s.modifiers.command || s.modifiers.ctrl || s.modifiers.mac_cmd {
+        parts.push("Ctrl".to_owned());
+    }
+    if s.modifiers.alt {
+        parts.push("Alt".to_owned());
+    }
+    if s.modifiers.shift {
+        parts.push("Shift".to_owned());
+    }
+    parts.push(s.logical_key.name().to_owned());
+    parts.join("+")
+}
+
 fn modifier_count(m: Modifiers) -> u32 {
     u32::from(m.alt) + u32::from(m.ctrl || m.command) + u32::from(m.shift) + u32::from(m.mac_cmd)
 }
@@ -229,6 +313,48 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcuts_round_trip() {
+        for text in [
+            "Ctrl+Shift+F5",
+            "Alt+X",
+            "Shift+Escape",
+            "F8",
+            "Ctrl+Enter",
+            "Ctrl+0",
+        ] {
+            let s = parse_shortcut(text).unwrap();
+            assert_eq!(parse_shortcut(&shortcut_string(&s)), Some(s), "{text}");
+        }
+        assert_eq!(
+            parse_shortcut("ctrl+shift+f"),
+            Some(KeyboardShortcut::new(
+                Modifiers::COMMAND | Modifiers::SHIFT,
+                Key::F
+            ))
+        );
+        assert_eq!(
+            parse_shortcut("shift+esc").map(|s| s.logical_key),
+            Some(Key::Escape)
+        );
+        assert_eq!(parse_shortcut("Ctrl+"), None);
+        assert_eq!(parse_shortcut("Ctrl+Nope"), None);
+    }
+
+    #[test]
+    fn overrides_replace_and_remove() {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("Format".to_owned(), "Alt+F".to_owned());
+        overrides.insert("ExecuteAll".to_owned(), String::new());
+        overrides.insert("NoSuchCommand".to_owned(), "F1".to_owned());
+        let keymap = Keymap::with_overrides(KeymapPreset::PlsqlDeveloper, &overrides);
+        let alt_f = KeyboardShortcut::new(Modifiers::ALT, Key::F);
+        assert_eq!(keymap.shortcut(Command::Format), Some(&alt_f));
+        assert_eq!(keymap.shortcut(Command::ExecuteAll), None);
+        assert_eq!(keymap.command_for(&alt_f), Some(Command::Format));
+        assert_eq!(Command::from_id("Format"), Some(Command::Format));
+    }
 
     #[test]
     fn fuzzy() {

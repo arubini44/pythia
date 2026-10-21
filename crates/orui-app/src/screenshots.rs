@@ -1176,3 +1176,37 @@ end orui_proj_pkg;
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The keyboard settings list commands with their shortcuts.
+#[test]
+fn settings_keyboard() {
+    if out_dir().is_none() {
+        return;
+    }
+    let mut h = harness(true);
+    h.state_mut().test_settings_keyboard();
+    h.run_steps(3);
+    save(&mut h, "settings-keyboard");
+}
+
+/// A font file for code replaces Hack; a bad file is reported, not loaded.
+#[test]
+fn code_font() {
+    let font = "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf";
+    if !std::path::Path::new(font).exists() {
+        return;
+    }
+    let mut h = harness(false);
+    let ctx = h.ctx.clone();
+    h.state_mut().test_code_font(&ctx, font);
+    h.run_steps(3);
+    save(&mut h, "code-font");
+    h.state_mut().test_code_font(&ctx, "/etc/hostname");
+    h.run_steps(2);
+    assert!(
+        h.state()
+            .test_log()
+            .iter()
+            .any(|l| l.contains("is not a TrueType or OpenType font"))
+    );
+}

@@ -214,3 +214,5 @@ See [CONCEPT.md](CONCEPT.md) for the full plan and status.
 | Ctrl+Shift+[ / ] | Fold / unfold |
 | Ctrl+Shift+1..9, Ctrl+1..9 | Set / jump to bookmark |
 | Ctrl+, | Settings |
+
+All application shortcuts can be changed in Settings → Keyboard.
