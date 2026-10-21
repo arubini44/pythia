@@ -118,6 +118,8 @@ pub struct QueryResult {
     pub edit: Option<(String, String)>,
     /// Quick filter text.
     pub filter: String,
+    /// Shown as a chart instead of the grid.
+    pub chart: Option<crate::chart_view::ChartState>,
 }
 
 pub struct Plan {
@@ -819,6 +821,7 @@ impl SqlWindow {
                     grid: GridState::default(),
                     edit: None,
                     filter: String::new(),
+                    chart: None,
                 };
                 let mut replace = None;
                 if let Some(Internal::EditQuery {
@@ -1192,6 +1195,23 @@ impl SqlWindow {
                             }
                         }
                     }
+                    let charting = result.chart.is_some();
+                    let (icon, label, hint) = if charting {
+                        (Icon::Grid, "Grid", "Back to the rows")
+                    } else {
+                        (Icon::Chart, "Chart", "Show the fetched rows as a bar or line chart")
+                    };
+                    if result.grid.changes().is_none()
+                        && icon_text_button(ui, icon, label).on_hover_text(hint).clicked()
+                    {
+                        result.chart = match result.chart {
+                            Some(_) => None,
+                            None => Some(crate::chart_view::ChartState::guess(
+                                &result.columns,
+                                result.rows.len(),
+                            )),
+                        };
+                    }
                     let exporting = state.export.is_some();
                     ui.add_enabled_ui(!exporting, |ui| {
                         ui.menu_button("Export", |ui| {
@@ -1233,6 +1253,19 @@ impl SqlWindow {
         ui.separator();
 
         match state.bottom {
+            BottomTab::Result(i) if i < state.results.len() && state.results[i].chart.is_some() => {
+                let result = &mut state.results[i];
+                if let Some(chart) = result.chart.as_mut() {
+                    crate::chart_view::ui(
+                        ui,
+                        chart,
+                        &result.columns,
+                        &result.rows,
+                        &mut result.grid,
+                        egui::Id::new(("chart", cx.id, result.id)),
+                    );
+                }
+            }
             BottomTab::Result(i) if i < state.results.len() => {
                 let result = &mut state.results[i];
                 let out = ResultGrid::new(

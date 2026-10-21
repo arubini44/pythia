@@ -4,6 +4,7 @@ mod app;
 mod assist;
 mod browser;
 mod catalog;
+mod chart_view;
 mod commands;
 mod compare_window;
 mod connections;

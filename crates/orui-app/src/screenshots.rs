@@ -693,3 +693,35 @@ fn compile_conflict() {
         "{message:?}"
     );
 }
+
+/// A result shown as a bar chart and as a line chart.
+#[test]
+fn result_chart() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "-- Orders and returns per month
+select to_char(add_months(date '2025-01-01', level - 1), 'Mon YYYY') as month,
+       round(120 + 40 * sin(level / 2) + level * 6) as orders,
+       round(50 + 20 * cos(level / 3) + level * 2) as returns
+  from dual connect by level <= 12"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "query", |app| !app.test_focused_busy());
+    let w = h.state_mut().test_sql_window();
+    let result = &mut w.state.results[0];
+    let chart = crate::chart_view::ChartState::guess(&result.columns, result.rows.len());
+    assert_eq!(chart.x, Some(0));
+    assert_eq!(chart.series, vec![1, 2]);
+    result.chart = Some(chart);
+    save(&mut h, "result-chart-bars");
+    let w = h.state_mut().test_sql_window();
+    w.state.results[0].chart.as_mut().unwrap().kind = crate::chart_view::ChartKind::Line;
+    save(&mut h, "result-chart-lines");
+}

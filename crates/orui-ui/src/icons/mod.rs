@@ -71,7 +71,7 @@ icons! {
     Error, Warning, Info, Success, Lock, Production, Transaction,
     // generic ui
     Close, ChevronRight, ChevronDown, Plus, Minus, Sun, Moon, Bug, Breakpoint,
-    Output, Grid, Text, Log, Edit, Trash, Star, Bookmark,
+    Output, Grid, Text, Log, Edit, Trash, Star, Bookmark, Chart,
 }
 
 struct Rendered {

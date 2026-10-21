@@ -451,6 +451,12 @@ pub fn def(icon: Icon) -> Def {
             GOLD,
             r#"<path d="M8 1.9l1.85 3.85 4.2.55-3.08 2.92.78 4.18L8 11.35 4.25 13.4l.78-4.18L1.95 6.3l4.2-.55z" stroke="$A" fill="$A" fill-opacity=".35"/>"#,
         ),
+        Icon::Chart => color(
+            "chart",
+            BLUE,
+            ORANGE,
+            r#"<path d="M2 1.75v12.5h12.25" stroke="$A"/><rect x="4.25" y="8" width="2.25" height="4.5" rx=".6" fill="$A" fill-opacity=".85"/><rect x="7.75" y="4.75" width="2.25" height="7.75" rx=".6" fill="$B" fill-opacity=".85"/><rect x="11.25" y="6.5" width="2.25" height="6" rx=".6" fill="$A" fill-opacity=".85"/>"#,
+        ),
         Icon::Bookmark => color(
             "bookmark",
             BLUE,

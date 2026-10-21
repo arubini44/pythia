@@ -29,6 +29,9 @@ for Linux, Windows and macOS.
 - Results in a virtualized grid: sorting, rectangular selection, aggregates,
   record view, value viewer, copy and export (CSV, TSV, JSON, Excel,
   INSERT statements, Markdown, HTML).
+- **Chart any result** as bars or lines: the x axis defaults to the first text
+  or date column, numeric columns become series; the chart follows the grid's
+  filter and sort.
 - **Edit results in place** — no `FOR UPDATE` locks: changes are checked
   against the fetched values when applied, so concurrent modifications are
   reported instead of overwritten. "Show SQL" previews the DML.

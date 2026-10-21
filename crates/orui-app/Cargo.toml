@@ -18,6 +18,7 @@ eframe.workspace = true
 egui.workspace = true
 egui_dock.workspace = true
 egui_extras.workspace = true
+egui_plot = "0.37"
 keyring.workspace = true
 rfd = "0.17"
 orui-compare.workspace = true

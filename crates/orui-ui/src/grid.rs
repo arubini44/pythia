@@ -103,6 +103,12 @@ impl GridState {
         self.order.len()
     }
 
+    /// Indices of the fetched rows passing the filter, in display order.
+    pub fn view_order(&mut self, rows: &[Vec<Cell>], columns: &[Column]) -> &[usize] {
+        self.sync(rows, columns);
+        &self.order
+    }
+
     fn sync(&mut self, rows: &[Vec<Cell>], columns: &[Column]) {
         if self.ordered_rows == rows.len() {
             return;
