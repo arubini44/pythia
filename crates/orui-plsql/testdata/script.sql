@@ -1,0 +1,46 @@
+set serveroutput on
+prompt Running report
+
+with dept_totals (dept_id, total) as (
+  select department_id, sum(salary)
+    from employees
+   group by department_id
+), top_depts as (
+  select dept_id from dept_totals where total > 10000
+)
+select d.department_name, t.total, (select count(*) from employees x where x.department_id = d.department_id) cnt
+  from departments d
+  join dept_totals t on t.dept_id = d.department_id
+  left outer join locations l on l.location_id = d.location_id
+ where d.department_id in (select dept_id from top_depts)
+ order by t.total desc;
+
+select v.*, e.first_name
+  from (select employee_id, salary * 12 as annual from employees where salary > :min_sal) v,
+       hr.employees e
+ where v.employee_id = e.employee_id
+union all
+select null, 0, 'none' from dual;
+
+insert into salary_log (employee_id, old_salary, new_salary)
+select employee_id, salary, salary * 1.1 from employees where department_id = &dept;
+
+update employees e set e.salary = e.salary * 1.05 where exists (select 1 from departments d where d.manager_id = e.employee_id);
+
+delete from salary_log l where l.changed_at < add_months(sysdate, -12);
+
+create or replace view emp_v as
+  select e.employee_id, e.first_name || ' ' || e.last_name full_name, d.department_name
+    from employees e, departments d
+   where e.department_id = d.department_id (+);
+
+create table emp_copy as select * from employees where 1 = 0;
+
+begin
+  for r in (select * from emp_v) loop
+    dbms_output.put_line(r.full_name);
+  end loop;
+end;
+/
+exec emp_pkg.raise_salary(100, 5);
+select q'[it's]' quoted, "Mixed Case" from "Weird Table" w;
