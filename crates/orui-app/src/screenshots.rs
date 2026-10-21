@@ -160,6 +160,10 @@ fn screenshots() {
         let mut h = harness(dark);
         h.run_steps(3);
         save(&mut h, &format!("01-start-{suffix}"));
+        h.state_mut().test_settings(true);
+        h.run_steps(4);
+        save(&mut h, &format!("00-settings-formatter-{suffix}"));
+        h.state_mut().test_close_settings();
         let sample = |name: &str, folder: &str, color: Option<[u8; 3]>, production: bool| {
             ConnectionProfile {
                 name: name.into(),

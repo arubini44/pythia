@@ -901,6 +901,23 @@ impl OruiApp {
                 }
             }
             Command::History => self.history_dialog.toggle(),
+            Command::Format => {
+                let options = self.settings.format.clone();
+                let editor = match self
+                    .focused
+                    .and_then(|id| self.docs.get_mut(&id))
+                    .map(|d| &mut d.kind)
+                {
+                    Some(DocKind::Sql(w)) => Some(&mut w.editor),
+                    Some(DocKind::Program(w)) => w.active_editor(),
+                    _ => None,
+                };
+                let message = match editor {
+                    Some(editor) => format_editor(editor, &options),
+                    None => "Nothing to format".into(),
+                };
+                self.log(message);
+            }
             Command::ImportData => {
                 let connection = self.current_connection();
                 self.add_doc(connection, DocKind::Import(Default::default()));
@@ -1274,6 +1291,7 @@ impl OruiApp {
                 item(ui, Command::Quit);
             });
             ui.menu_button("Edit", |ui| {
+                item(ui, Command::Format);
                 item(ui, Command::History);
             });
             ui.menu_button("Session", |ui| {
@@ -1958,6 +1976,17 @@ impl OruiApp {
         self.debug_run.is_some()
     }
 
+    pub fn test_settings(&mut self, section_formatter: bool) {
+        self.settings_dialog.open = true;
+        if section_formatter {
+            self.settings_dialog.show_formatter();
+        }
+    }
+
+    pub fn test_close_settings(&mut self) {
+        self.settings_dialog.open = false;
+    }
+
     pub fn test_command(&mut self, command: Command) {
         let ctx = self.notify.0.clone();
         self.run_command(&ctx, command);
@@ -2106,6 +2135,52 @@ impl TabViewer for Viewer<'_> {
     }
 }
 
+/// Formats the selection (or the whole text) as one undo step.
+fn format_editor(
+    editor: &mut crate::editor::Editor,
+    options: &orui_plsql::FormatOptions,
+) -> String {
+    let text = editor.text().to_owned();
+    let line = editor.line_col().0;
+    let formatted = match editor.selection() {
+        Some(sel) => orui_plsql::format_range(&text, sel, options),
+        None => orui_plsql::format(&text, options),
+    };
+    if !formatted.changed {
+        return "Already formatted".into();
+    }
+    // Replace only the changed middle, so undo and markers stay precise.
+    let prefix = text
+        .bytes()
+        .zip(formatted.text.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let prefix = (0..=prefix)
+        .rev()
+        .find(|i| text.is_char_boundary(*i) && formatted.text.is_char_boundary(*i))
+        .unwrap_or(0);
+    let suffix = text[prefix..]
+        .bytes()
+        .rev()
+        .zip(formatted.text[prefix..].bytes().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix = (0..=suffix)
+        .rev()
+        .find(|s| {
+            text.is_char_boundary(text.len() - s)
+                && formatted.text.is_char_boundary(formatted.text.len() - s)
+        })
+        .unwrap_or(0);
+    let new_line_count = formatted.text.lines().count().max(1);
+    editor.replace(
+        prefix..text.len() - suffix,
+        &formatted.text[prefix..formatted.text.len() - suffix],
+        line.min(new_line_count),
+    );
+    "Formatted".into()
+}
+
 fn history_file(paths: &Paths) -> std::path::PathBuf {
     paths.data_dir.join("history.toml")
 }
@@ -2160,4 +2235,21 @@ fn is_query(sql: &str) -> bool {
             .any(|k| word.eq_ignore_ascii_case(k))
             || word == "("
     })
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn formats_editor_text() {
+        let mut editor = crate::editor::Editor::new("SELECT a,b FROM t WHERE x=1");
+        let message = format_editor(&mut editor, &orui_plsql::FormatOptions::default());
+        assert_eq!(message, "Formatted");
+        assert_eq!(editor.text(), "select a, b\nfrom t\nwhere x = 1");
+        assert_eq!(
+            format_editor(&mut editor, &orui_plsql::FormatOptions::default()),
+            "Already formatted"
+        );
+    }
 }

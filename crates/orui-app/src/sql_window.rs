@@ -11,7 +11,7 @@ use orui_ui::icons::{Icon, icon_text_button};
 use orui_ui::{GridState, ResultGrid, selection_data, to_tsv};
 use serde::{Deserialize, Serialize};
 
-use crate::documents::{DocContext, Effects, TableData, Target, request_id};
+use crate::documents::{DocContext, Effects, Target, request_id};
 use crate::editor::{Editor, Marker, MarkerKind};
 
 #[derive(Serialize, Deserialize)]

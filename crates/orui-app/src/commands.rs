@@ -46,6 +46,7 @@ commands! {
     Rollback => "Session: Rollback",
     ToggleAutocommit => "Session: Toggle Auto-Commit",
     History => "Edit: Recall Statement (history)",
+    Format => "Edit: Format Code",
     FindObject => "Tools: Find Database Object…",
     FindInSource => "Tools: Find in Database Source…",
     ImportData => "Tools: Import Data (CSV, Excel)…",
@@ -130,6 +131,7 @@ impl Keymap {
                 (Command::Commit, KeyboardShortcut::new(none, Key::F10)),
                 (Command::Rollback, KeyboardShortcut::new(shift, Key::F10)),
                 (Command::History, KeyboardShortcut::new(ctrl, Key::E)),
+                (Command::Format, KeyboardShortcut::new(ctrl | shift, Key::F)),
                 (
                     Command::FindObject,
                     KeyboardShortcut::new(ctrl | shift, Key::O),

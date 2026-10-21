@@ -30,6 +30,8 @@ pub struct Settings {
     /// Host name or address the database uses to reach orui's debugger
     /// (empty: this machine's host name).
     pub debug_host: String,
+    /// Code formatter rules.
+    pub format: orui_plsql::FormatOptions,
 }
 
 impl Default for Settings {
@@ -41,6 +43,7 @@ impl Default for Settings {
             fetch_size: 500,
             editor: EditorSettings::default(),
             debug_host: String::new(),
+            format: orui_plsql::FormatOptions::default(),
         }
     }
 }

@@ -89,6 +89,10 @@ impl ProgramWindow {
         }
     }
 
+    pub fn active_editor(&mut self) -> Option<&mut Editor> {
+        self.parts.get_mut(self.active).map(|p| &mut p.editor)
+    }
+
     /// Toggles a breakpoint on the cursor line of the active part.
     pub fn toggle_breakpoint(&self) -> Effects {
         let mut effects = Effects::default();

@@ -16,15 +16,17 @@ enum Section {
     Editor,
     CodeAssist,
     Query,
+    Formatter,
     Debugger,
 }
 
 impl Section {
-    const ALL: [Section; 5] = [
+    const ALL: [Section; 6] = [
         Section::Appearance,
         Section::Editor,
         Section::CodeAssist,
         Section::Query,
+        Section::Formatter,
         Section::Debugger,
     ];
 
@@ -34,6 +36,7 @@ impl Section {
             Section::Editor => "Editor",
             Section::CodeAssist => "Code assistance",
             Section::Query => "Queries",
+            Section::Formatter => "Formatter",
             Section::Debugger => "Debugger",
         }
     }
@@ -49,6 +52,11 @@ pub enum SettingsResult {
 }
 
 impl SettingsDialog {
+    #[cfg(test)]
+    pub fn show_formatter(&mut self) {
+        self.section = Section::Formatter;
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context, settings: &mut Settings) -> SettingsResult {
         if !self.open {
             return SettingsResult::None;
@@ -59,7 +67,9 @@ impl SettingsDialog {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size([620.0, 420.0])
+            .default_size([780.0, 600.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
@@ -77,6 +87,7 @@ impl SettingsDialog {
                             Section::Editor => editor(ui, settings),
                             Section::CodeAssist => code_assist(ui, settings),
                             Section::Query => query(ui, settings),
+                            Section::Formatter => formatter(ui, settings),
                             Section::Debugger => debugger(ui, settings),
                         }
                     });
@@ -211,4 +222,53 @@ fn debugger(ui: &mut Ui, s: &mut Settings) {
             );
         },
     );
+}
+
+const FORMAT_SAMPLE: &str = "select e.employee_id, e.last_name as name, d.department_name as dept from employees e join departments d on d.department_id = e.department_id where e.salary > 1000 and e.hire_date > sysdate - 30;\n\ncreate or replace procedure raise(p_id in number, p_pct in number default 5) is\n  l_old number; l_new_salary number;\nbegin\n  select salary into l_old from employees where employee_id = p_id;\n  l_new_salary := l_old * (1 + p_pct / 100);\n  if l_new_salary > 10000 then raise_application_error(-20001, 'too much'); end if;\nend;\n/\n";
+
+fn formatter(ui: &mut Ui, s: &mut Settings) {
+    use orui_plsql::{Case, CommaStyle};
+    let f = &mut s.format;
+    let case = |ui: &mut Ui, value: &mut Case| {
+        ui.selectable_value(value, Case::Lower, "lower");
+        ui.selectable_value(value, Case::Upper, "UPPER");
+        ui.selectable_value(value, Case::Preserve, "as written");
+    };
+    row(ui, "Keywords", "", |ui| case(ui, &mut f.keyword_case));
+    row(
+        ui,
+        "Identifiers",
+        "Quoted identifiers are never changed",
+        |ui| case(ui, &mut f.identifier_case),
+    );
+    row(ui, "Indent", "", |ui| {
+        ui.add(egui::Slider::new(&mut f.indent, 1..=8).suffix(" spaces"));
+    });
+    row(ui, "Line width", "", |ui| {
+        ui.add(egui::Slider::new(&mut f.max_width, 60..=200));
+    });
+    row(ui, "Commas", "", |ui| {
+        ui.selectable_value(&mut f.comma, CommaStyle::Trailing, "a,  b");
+        ui.selectable_value(&mut f.comma, CommaStyle::Leading, ", b");
+    });
+    row(ui, "Align", "", |ui| {
+        ui.checkbox(&mut f.align_declarations, "declarations");
+        ui.checkbox(&mut f.align_assignments, ":=");
+        ui.checkbox(&mut f.align_aliases, "aliases");
+    });
+    row(ui, "JOIN … ON", "", |ui| {
+        ui.checkbox(&mut f.on_new_line, "ON on its own line");
+    });
+    ui.add_space(6.0);
+    ui.label(RichText::new("Preview").strong());
+    let preview = orui_plsql::format(FORMAT_SAMPLE, f).text;
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .corner_radius(6.0)
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            egui::ScrollArea::both().max_height(360.0).show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(preview).monospace()).extend());
+            });
+        });
 }

@@ -159,6 +159,14 @@ impl Editor {
         }
     }
 
+    /// Replaces `range` with `text` as one undo step and puts the cursor on
+    /// `line` (1-based).
+    pub fn replace(&mut self, range: Range<usize>, text: &str, line: usize) {
+        self.inner.replace_range(range, text);
+        self.refresh();
+        self.inner.goto_line(line.max(1));
+    }
+
     /// Changes whenever the text changes.
     pub fn revision(&self) -> u64 {
         self.revision
