@@ -158,6 +158,7 @@ pub enum DocKind {
     TableEditor(crate::table_editor::TableEditor),
     Jobs(crate::jobs_window::JobsWindow),
     Diff(crate::text_diff::TextDiff),
+    ExportTables(crate::export_tables::ExportTables),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -199,6 +200,7 @@ impl Document {
             DocKind::TableEditor(t) => t.title(),
             DocKind::Jobs(j) => j.title(),
             DocKind::Diff(d) => d.title(),
+            DocKind::ExportTables(e) => e.title(),
         }
     }
 
@@ -225,6 +227,7 @@ impl Document {
             DocKind::TableEditor(t) => t.is_busy(),
             DocKind::Jobs(j) => j.is_busy(),
             DocKind::Diff(_) => false,
+            DocKind::ExportTables(e) => e.is_busy(),
         }
     }
 
@@ -258,6 +261,7 @@ impl Document {
             DocKind::TableEditor(t) => t.on_event(event),
             DocKind::Jobs(j) => j.on_event(event),
             DocKind::Diff(_) => Effects::default(),
+            DocKind::ExportTables(e) => e.on_event(event),
         }
     }
 
@@ -274,6 +278,7 @@ impl Document {
             DocKind::TableEditor(t) => t.ui(ui, cx),
             DocKind::Jobs(j) => j.ui(ui, cx),
             DocKind::Diff(d) => d.ui(ui, cx),
+            DocKind::ExportTables(e) => e.ui(ui, cx),
         }
     }
 

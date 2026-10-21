@@ -70,6 +70,10 @@ pub struct Options {
     pub table: String,
     /// Sheet name for XLSX.
     pub sheet: String,
+    /// CSV field separator (default `,`).
+    pub delimiter: Option<u8>,
+    /// How CSV/TSV write NULL (default: empty).
+    pub null_text: String,
 }
 
 impl Default for Options {
@@ -78,6 +82,8 @@ impl Default for Options {
             header: true,
             table: "my_table".into(),
             sheet: "Result".into(),
+            delimiter: None,
+            null_text: String::new(),
         }
     }
 }
@@ -105,7 +111,13 @@ pub fn export(
     out: &mut dyn Write,
 ) -> Result<()> {
     match format {
-        Format::Csv => delimited(b',', columns, rows, options, out),
+        Format::Csv => delimited(
+            options.delimiter.unwrap_or(b','),
+            columns,
+            rows,
+            options,
+            out,
+        ),
         Format::Tsv => delimited(b'\t', columns, rows, options, out),
         Format::Json => json(columns, rows, out),
         Format::Xlsx => xlsx(columns, rows, options, out),
@@ -156,7 +168,11 @@ impl<W: Write> StreamWriter<W> {
         );
         match format {
             Format::Csv | Format::Tsv if options.header => {
-                let delimiter = if format == Format::Csv { b',' } else { b'\t' };
+                let delimiter = if format == Format::Csv {
+                    options.delimiter.unwrap_or(b',')
+                } else {
+                    b'\t'
+                };
                 let mut writer = csv::WriterBuilder::new()
                     .delimiter(delimiter)
                     .from_writer(&mut out);
@@ -182,7 +198,13 @@ impl<W: Write> StreamWriter<W> {
             ..self.options.clone()
         };
         match self.format {
-            Format::Csv => delimited(b',', &self.columns, rows, &options, &mut self.out)?,
+            Format::Csv => delimited(
+                options.delimiter.unwrap_or(b','),
+                &self.columns,
+                rows,
+                &options,
+                &mut self.out,
+            )?,
             Format::Tsv => delimited(b'\t', &self.columns, rows, &options, &mut self.out)?,
             Format::Insert => inserts(&self.columns, rows, &options, &mut self.out)?,
             Format::Markdown => markdown_rows(rows, &mut self.out)?,
@@ -239,7 +261,10 @@ fn delimited(
         writer.write_record(columns.iter().map(|c| c.name.as_str()))?;
     }
     for row in rows {
-        writer.write_record(row.iter().map(|c| c.as_deref().unwrap_or("")))?;
+        writer.write_record(
+            row.iter()
+                .map(|c| c.as_deref().unwrap_or(&options.null_text)),
+        )?;
     }
     writer.flush()?;
     Ok(())

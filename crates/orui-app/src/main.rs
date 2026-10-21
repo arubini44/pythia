@@ -13,6 +13,7 @@ mod data_search;
 mod dialogs;
 mod documents;
 mod editor;
+mod export_tables;
 mod git;
 mod history;
 mod icons_ext;

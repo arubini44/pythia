@@ -313,8 +313,8 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.17 Data Export (M5)
 
 - [x] Export query result or tables to CSV, TSV, XLSX, JSON, XML, HTML, Markdown, SQL INSERT statements
-- [ ] Export tables tool: multiple tables, WHERE per table, include DDL
-- [ ] Options: delimiter, quoting, header, date/number formats, NULL representation, encoding
+- [x] Export tables tool: multiple tables, WHERE per table, include DDL
+- [x] Options: delimiter, quoting, header, date/number formats, NULL representation, encoding (delimiter, header, NULL text; UTF-8 only)
 - [x] Streaming export (no full result in memory) (Execute to file)
 - [ ] LOB handling: inline, separate files, skip
 - [x] Export user objects (DDL for a schema) to files, one file per object

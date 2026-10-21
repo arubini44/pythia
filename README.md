@@ -75,6 +75,8 @@ for Linux, Windows and macOS.
 **Data and schema tools**
 - Schema compare with structural table diffs and safe, ordered sync
   scripts; data compare by key with sync DML.
+- Export tables: pick tables, a WHERE per table, CSV/TSV/JSON/INSERT/
+  Markdown, one file per table plus DDL, streamed with progress.
 - Import CSV/Excel: drop a file, check inferred types (decimal commas,
   date formats), import into a new or existing table with array DML.
   Per column: trim, date format, SQL expression (`upper(:value)`,

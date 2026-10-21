@@ -1309,3 +1309,39 @@ fn save_as_report() {
     h.run_steps(3);
     save(&mut h, "save-as-report");
 }
+
+/// Export tables: pick tables, filters and format, export into a folder.
+#[test]
+fn export_tables() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut()
+        .test_command(crate::commands::Command::ExportTables);
+    h.run_steps(3);
+    wait_until(&mut h, "tables", |app| !app.test_focused_busy());
+    let dir = std::env::temp_dir().join(format!("orui-export-tables-{}", std::process::id()));
+    let export = h.state_mut().test_export_tables();
+    export.folder = Some(dir.clone());
+    export.include_ddl = true;
+    export.set_tables(&[
+        ("DEMO_DEPARTMENTS", ""),
+        ("DEMO_EMPLOYEES", "department_id = 20"),
+    ]);
+    h.run_steps(2);
+    save(&mut h, "export-tables");
+    let effects = h.state_mut().test_export_tables().start_now();
+    h.state_mut().test_apply(effects);
+    wait_until(&mut h, "export", |app| !app.test_focused_busy());
+    let message = h.state_mut().test_export_tables().message().cloned();
+    assert!(
+        matches!(&message, Some((false, m)) if m.starts_with("Exported ")),
+        "{message:?}"
+    );
+    assert!(dir.join("demo_employees.csv").exists());
+    assert!(dir.join("demo_departments.ddl.sql").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}

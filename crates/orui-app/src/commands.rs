@@ -69,6 +69,7 @@ commands! {
     SearchData => "Tools: Search Data in Tables…",
     SchedulerJobs => "Tools: Scheduler Jobs",
     ImportData => "Tools: Import Data (CSV, Excel)…",
+    ExportTables => "Tools: Export Tables…",
     CompareSchemas => "Tools: Compare Schemas…",
     CompareData => "Tools: Compare Table Data…",
     DebugStart => "Debug: Debug Block Under Cursor",

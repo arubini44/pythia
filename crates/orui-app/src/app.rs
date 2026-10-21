@@ -1179,6 +1179,10 @@ impl OruiApp {
                 };
                 self.log(message);
             }
+            Command::ExportTables => {
+                let connection = self.current_connection();
+                self.add_doc(connection, DocKind::ExportTables(Default::default()));
+            }
             Command::ImportData => {
                 let connection = self.current_connection();
                 self.add_doc(connection, DocKind::Import(Default::default()));
@@ -1639,6 +1643,7 @@ impl OruiApp {
                 item(ui, Command::SchedulerJobs);
                 ui.separator();
                 item(ui, Command::ImportData);
+                item(ui, Command::ExportTables);
                 ui.separator();
                 item(ui, Command::CompareSchemas);
                 item(ui, Command::CompareData);
@@ -2306,6 +2311,14 @@ impl OruiApp {
             .get_mut(&id)
             .and_then(Document::sql_window)
             .expect("SQL window")
+    }
+
+    pub fn test_export_tables(&mut self) -> &mut crate::export_tables::ExportTables {
+        let id = self.focused.expect("focused document");
+        match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+            Some(DocKind::ExportTables(e)) => e,
+            _ => panic!("not an export window"),
+        }
     }
 
     pub fn test_jobs_window(&mut self) -> &mut crate::jobs_window::JobsWindow {
