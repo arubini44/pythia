@@ -237,7 +237,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [ ] Filters: name pattern, status (invalid), modified since, custom saved filters
 - [x] Invalid objects highlighted
 - [x] Context menu: view, edit, compile, drop, rename, describe, query data, generate DDL, copy name, grant (no rename or grant)
-- [ ] Expand table → columns, indexes, constraints, triggers, FKs, references-by
+- [x] Expand table → columns, indexes, constraints, triggers, FKs, references-by
 - [x] Expand package → procedures/functions with parameters (outline from parser)
 - [x] Dependencies view (uses / used by)
 - [ ] Drag object name into the editor (with options: name, `SELECT`, column list, call template)

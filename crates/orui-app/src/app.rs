@@ -2202,6 +2202,11 @@ impl OruiApp {
         self.conns.any_pending_tx()
     }
 
+    pub fn test_expand_table(&mut self, table: ObjectRef) {
+        let effects = self.browser.expand_table(table);
+        self.apply_browser(effects);
+    }
+
     pub fn test_browser_loading(&self) -> bool {
         self.browser.is_loading()
     }

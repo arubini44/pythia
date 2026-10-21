@@ -14,6 +14,7 @@ use orui_db::{
 use orui_ui::icons::{Icon, IconSize, paint_invalid_badge};
 
 use crate::documents::{Effects, ObjectRef, OpenRequest, Target, request_id};
+use crate::table_parts::{Part, PartKind, TableParts};
 
 enum Loaded<T> {
     Loading,
@@ -30,12 +31,35 @@ enum Children {
 enum Node {
     Folder(String, ObjectType),
     Object(ObjectRef),
+    /// Indexes, constraints or triggers of a table.
+    Group(ObjectRef, Group),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Group {
+    Indexes,
+    Constraints,
+    Triggers,
+    ReferencedBy,
+}
+
+impl Group {
+    fn label(self) -> &'static str {
+        match self {
+            Group::Indexes => "Indexes",
+            Group::Constraints => "Constraints",
+            Group::Triggers => "Triggers",
+            Group::ReferencedBy => "Referenced by",
+        }
+    }
 }
 
 enum Pending {
     Schemas,
     Folder(String, ObjectType),
     Children(ObjectRef),
+    /// Indexes, constraints and triggers of a table.
+    Parts(ObjectRef),
     Action {
         object: ObjectRef,
         verb: &'static str,
@@ -66,7 +90,15 @@ enum Row<'a> {
         open: bool,
         expandable: bool,
     },
-    Column(&'a TableColumn),
+    /// A table column; whether it's part of a foreign key.
+    Column(&'a TableColumn, bool),
+    Group {
+        table: ObjectRef,
+        group: Group,
+        count: usize,
+        open: bool,
+    },
+    Part(&'a Part, ObjectRef),
     Member(&'a Member, ObjectRef),
     Message {
         depth: usize,
@@ -83,6 +115,7 @@ pub struct Browser {
     filter: String,
     folders: HashMap<(String, ObjectType), Loaded<Vec<DbObject>>>,
     children: HashMap<ObjectRef, Loaded<Children>>,
+    parts: HashMap<ObjectRef, TableParts>,
     expanded: HashSet<Node>,
     pending: HashMap<u64, Pending>,
     selected: Option<ObjectRef>,
@@ -121,6 +154,23 @@ impl Browser {
                 self.load_folder(&mut effects, &owner, *t);
             }
         }
+        effects
+    }
+
+    /// Expands a table with all its groups.
+    #[cfg(test)]
+    pub fn expand_table(&mut self, table: ObjectRef) -> Effects {
+        let mut effects = Effects::default();
+        self.load_children(&mut effects, &table);
+        for group in [
+            Group::Indexes,
+            Group::Constraints,
+            Group::Triggers,
+            Group::ReferencedBy,
+        ] {
+            self.expanded.insert(Node::Group(table.clone(), group));
+        }
+        self.expanded.insert(Node::Object(table));
         effects
     }
 
@@ -169,17 +219,28 @@ impl Browser {
         };
         self.children.insert(object.clone(), Loaded::Loading);
         self.meta(effects, Pending::Children(object.clone()), query);
+        if object.object_type == ObjectType::Table {
+            let id = request_id();
+            self.pending.insert(id, Pending::Parts(object.clone()));
+            let (owner, table) = (object.owner.clone(), object.name.clone());
+            let task: orui_db::TaskFn = Box::new(move |conn: &orui_db::oracle::Connection| {
+                let parts = crate::table_parts::load(conn, &owner, &table)?;
+                Ok(Box::new(parts) as Box<dyn std::any::Any + Send>)
+            });
+            effects.request(Target::Main, DbRequest::Task { id, task });
+        }
     }
 
     /// Reloads expanded folders (after compile/drop or on demand).
     fn refresh(&mut self, effects: &mut Effects) {
         self.children.clear();
+        self.parts.clear();
         let open: Vec<(String, ObjectType)> = self
             .expanded
             .iter()
             .filter_map(|n| match n {
                 Node::Folder(owner, t) => Some((owner.clone(), *t)),
-                Node::Object(_) => None,
+                Node::Object(_) | Node::Group(..) => None,
             })
             .collect();
         self.folders.clear();
@@ -191,7 +252,7 @@ impl Browser {
             .iter()
             .filter_map(|n| match n {
                 Node::Object(o) => Some(o.clone()),
-                Node::Folder(..) => None,
+                Node::Folder(..) | Node::Group(..) => None,
             })
             .collect();
         for o in objects {
@@ -236,6 +297,15 @@ impl Browser {
     pub fn on_event(&mut self, event: DbEvent, log: &mut Vec<String>) -> Effects {
         let mut effects = Effects::default();
         if let DbEvent::TaskDone { id, result } = event {
+            if let Some(Pending::Parts(object)) = self.pending.get(&id) {
+                let object = object.clone();
+                self.pending.remove(&id);
+                // Without the parts the table still shows its columns.
+                if let Ok(Ok(parts)) = result.map(|any| any.downcast::<TableParts>()) {
+                    self.parts.insert(object, *parts);
+                }
+                return effects;
+            }
             if let Some(Pending::Test { object, member }) = self.pending.remove(&id) {
                 match result.map(|any| any.downcast::<crate::catalog::Answer>()) {
                     Ok(Ok(answer)) => {
@@ -542,7 +612,33 @@ impl Browser {
                 }
                 match self.children.get(&r) {
                     Some(Loaded::Ready(Children::Columns(cols))) => {
-                        rows.extend(cols.iter().map(Row::Column))
+                        let parts = self.parts.get(&r);
+                        rows.extend(cols.iter().map(|c| {
+                            let fk = parts.is_some_and(|p| p.fk_columns.contains(&c.name));
+                            Row::Column(c, fk)
+                        }));
+                        if let Some(parts) = parts {
+                            for (group, items) in [
+                                (Group::Indexes, &parts.indexes),
+                                (Group::Constraints, &parts.constraints),
+                                (Group::Triggers, &parts.triggers),
+                                (Group::ReferencedBy, &parts.referenced_by),
+                            ] {
+                                if items.is_empty() {
+                                    continue;
+                                }
+                                let open = self.expanded.contains(&Node::Group(r.clone(), group));
+                                rows.push(Row::Group {
+                                    table: r.clone(),
+                                    group,
+                                    count: items.len(),
+                                    open,
+                                });
+                                if open {
+                                    rows.extend(items.iter().map(|p| Row::Part(p, r.clone())));
+                                }
+                            }
+                        }
                     }
                     Some(Loaded::Ready(Children::Members(members))) if members.is_empty() => rows
                         .push(Row::Message {
@@ -665,10 +761,12 @@ impl Browser {
                     }
                     response.context_menu(|ui| self.context_menu(ui, &r, actions));
                 }
-                Row::Column(c) => {
+                Row::Column(c, fk) => {
                     ui.add_space(INDENT * 2.0 + small.points());
                     let icon = if c.pk_position.is_some() {
                         Icon::PrimaryKey
+                    } else if *fk {
+                        Icon::ForeignKey
                     } else {
                         Icon::Column
                     };
@@ -679,6 +777,72 @@ impl Browser {
                     if let Some(comment) = &c.comment {
                         label.on_hover_text(comment);
                     }
+                }
+                Row::Group {
+                    table,
+                    group,
+                    count,
+                    open,
+                } => {
+                    ui.add_space(INDENT * 2.0);
+                    if chevron(ui, *open, true) {
+                        toggles.push(Node::Group(table.clone(), *group));
+                    }
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(group.label()).strong())
+                            .sense(Sense::click()),
+                    );
+                    if label.clicked() {
+                        toggles.push(Node::Group(table.clone(), *group));
+                    }
+                    ui.weak(count.to_string());
+                }
+                Row::Part(part, table) => {
+                    ui.add_space(INDENT * 3.0 + small.points());
+                    let icon = match part.kind {
+                        PartKind::Index { .. } => Icon::Index,
+                        PartKind::Constraint { kind: 'P' } => Icon::PrimaryKey,
+                        PartKind::Constraint { kind: 'R' } => Icon::ForeignKey,
+                        PartKind::Constraint { .. } => Icon::Constraint,
+                        PartKind::Trigger => Icon::Trigger,
+                    };
+                    ui.add(icon.sized(ui, small));
+                    let mut text = RichText::new(part.name.to_lowercase()).monospace();
+                    if !part.enabled {
+                        text = text.strikethrough().color(ui.visuals().weak_text_color());
+                    }
+                    let label = ui.add(egui::Label::new(text).sense(Sense::click()));
+                    let tag = match part.kind {
+                        PartKind::Index { unique: true } => "unique ",
+                        PartKind::Constraint { kind: 'U' } => "unique ",
+                        PartKind::Constraint { kind: 'C' } => "check ",
+                        _ => "",
+                    };
+                    ui.weak(format!("{tag}{}", part.detail));
+                    let state = if part.enabled { "" } else { " (disabled)" };
+                    let label = label.on_hover_text(format!(
+                        "{}{state}\n{tag}{}",
+                        part.name.to_lowercase(),
+                        part.detail
+                    ));
+                    let trigger = ObjectRef {
+                        owner: table.owner.clone(),
+                        name: part.name.clone(),
+                        object_type: ObjectType::Trigger,
+                    };
+                    if part.kind == PartKind::Trigger && label.double_clicked() {
+                        actions.push(Action::Edit(trigger.clone()));
+                    }
+                    label.context_menu(|ui| {
+                        if part.kind == PartKind::Trigger && ui.button("Edit trigger").clicked() {
+                            actions.push(Action::Edit(trigger.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Copy name").clicked() {
+                            ui.ctx().copy_text(part.name.to_lowercase());
+                            ui.close();
+                        }
+                    });
                 }
                 Row::Member(m, package) => {
                     ui.add_space(INDENT * 2.0 + small.points());

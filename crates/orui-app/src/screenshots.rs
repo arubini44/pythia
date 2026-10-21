@@ -930,3 +930,55 @@ fn execute_to_file() {
     assert!(!path.exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Tables in the browser show their indexes, constraints and triggers.
+#[test]
+fn browser_table_parts() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "begin
+  for t in (select table_name from user_tables where table_name in ('ORDER_LINES', 'ORDERS')) loop
+    execute immediate 'drop table ' || t.table_name || ' cascade constraints purge';
+  end loop;
+end;
+/
+create table orders (order_id number primary key, customer varchar2(40) not null,
+  ordered_at date default sysdate not null);
+create table order_lines (
+  order_id number not null constraint order_lines_order_fk references orders,
+  line_no number(4) not null,
+  product varchar2(40) not null,
+  quantity number(6) not null constraint order_lines_qty_ck check (quantity > 0),
+  price number(10,2),
+  constraint order_lines_pk primary key (order_id, line_no));
+create index order_lines_product_ix on order_lines (product);
+create or replace trigger order_lines_audit before insert or update on order_lines
+for each row begin :new.price := round(:new.price, 2); end;
+/"
+        .into(),
+        run: true,
+    });
+    wait_until(&mut h, "tables", |app| !app.test_focused_busy());
+    h.state_mut()
+        .test_expand_browser(&[orui_db::ObjectType::Table]);
+    wait_until(&mut h, "folder", |app| !app.test_browser_loading());
+    h.state_mut().test_expand_table(ObjectRef {
+        owner: "ORUI".into(),
+        name: "ORDER_LINES".into(),
+        object_type: orui_db::ObjectType::Table,
+    });
+    wait_until(&mut h, "parts", |app| !app.test_browser_loading());
+    save(&mut h, "browser-table-parts");
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "drop table order_lines purge;\ndrop table orders purge;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
