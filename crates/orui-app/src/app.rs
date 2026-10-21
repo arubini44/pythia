@@ -2343,7 +2343,7 @@ impl OruiApp {
         self.saved.profiles.clear();
     }
 
-    pub fn test_search_data(&mut self, value: &str) {
+    pub fn test_search_data(&mut self, value: &str, column_names: bool) {
         let id = self.focused.expect("focused");
         let cx = self.doc_context(id);
         let (settings, connection) = (cx.settings.clone(), cx.connection.clone());
@@ -2363,6 +2363,7 @@ impl OruiApp {
             panic!("not a data search");
         };
         s.value = value.to_owned();
+        s.column_names = column_names;
         let effects = s.start(&cx);
         self.apply(Some(id), effects);
     }

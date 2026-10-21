@@ -282,7 +282,7 @@ fn screenshots() {
             h.state_mut()
                 .test_command(crate::commands::Command::SearchData);
             h.run_steps(3);
-            h.state_mut().test_search_data("Basel");
+            h.state_mut().test_search_data("Basel", false);
             wait_until(&mut h, "data search", |app| !app.test_focused_busy());
             let hits = h.state().test_data_hits();
             assert!(
@@ -290,6 +290,13 @@ fn screenshots() {
                 "{hits:?}"
             );
             save(&mut h, "15-data-search-dark");
+            h.state_mut().test_search_data("sal", true);
+            wait_until(&mut h, "column search", |app| !app.test_focused_busy());
+            let hits = h.state().test_data_hits();
+            assert!(
+                hits.contains(&"DEMO_EMPLOYEES.SALARY=0".to_owned()),
+                "{hits:?}"
+            );
             h.state_mut().test_open(OpenRequest::EditTable {
                 connection: "orui@FREEPDB1".into(),
                 object: object("DEMO_EMPLOYEES", orui_db::ObjectType::Table),

@@ -33,6 +33,9 @@ pub struct DataSearch {
     pub owner: String,
     /// LIKE pattern on table names (empty: all).
     pub tables: String,
+    /// Find columns by name instead of values in the data.
+    #[serde(default)]
+    pub column_names: bool,
     #[serde(skip)]
     state: State,
 }
@@ -67,6 +70,8 @@ pub struct Hit {
     pub count: u64,
     /// WHERE condition selecting the matching rows (value inlined).
     pub condition: String,
+    /// Column type, for column name matches.
+    pub data_type: Option<String>,
 }
 
 /// What kind of columns a value can match.
@@ -171,8 +176,13 @@ impl DataSearch {
             }),
             ..State::default()
         };
+        let column_names = self.column_names;
         let task: orui_db::TaskFn = Box::new(move |conn: &Connection| {
-            search(conn, &owner, &tables, &value, mode, match_case, &progress)?;
+            if column_names {
+                find_columns(conn, &owner, &tables, &value, mode, match_case, &progress)?;
+            } else {
+                search(conn, &owner, &tables, &value, mode, match_case, &progress)?;
+            }
             Ok(Box::new(()) as Box<dyn std::any::Any + Send>)
         });
         effects.request(Target::Own, DbRequest::Task { id, task });
@@ -188,7 +198,9 @@ impl DataSearch {
             match result {
                 Ok(_) => {
                     let n = run.progress.done.load(Ordering::Relaxed);
-                    self.state.finished = Some(if stopped {
+                    self.state.finished = Some(if self.column_names {
+                        "Searched column names".to_owned()
+                    } else if stopped {
                         format!("Stopped after {n} tables")
                     } else {
                         format!("Searched {n} tables")
@@ -205,9 +217,17 @@ impl DataSearch {
         let mut effects = Effects::default();
         let mut run = false;
         ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.column_names, false, "Values");
+            ui.selectable_value(&mut self.column_names, true, "Column names");
+            ui.separator();
+            let hint = if self.column_names {
+                "Column name to find"
+            } else {
+                "Value to find"
+            };
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.value)
-                    .hint_text("Value to find")
+                    .hint_text(hint)
                     .desired_width(320.0),
             );
             run |= edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -286,7 +306,7 @@ impl DataSearch {
                         if !self.state.hits.is_empty() {
                             ui.strong("Table");
                             ui.strong("Column");
-                            ui.strong("Rows");
+                            ui.strong(if self.column_names { "Type" } else { "Rows" });
                             ui.end_row();
                         }
                         for hit in &self.state.hits {
@@ -300,25 +320,80 @@ impl DataSearch {
                                 open = Some(hit.clone());
                             }
                             ui.label(RichText::new(&hit.column).monospace());
-                            ui.label(RichText::new(hit.count.to_string()).monospace());
+                            match &hit.data_type {
+                                Some(t) => ui.label(RichText::new(t.to_lowercase()).monospace()),
+                                None => ui.label(RichText::new(hit.count.to_string()).monospace()),
+                            };
                             ui.end_row();
                         }
                     });
             });
         if let (Some(hit), Some(connection)) = (open, cx.connection.clone()) {
+            let table = format!(
+                "{}.{}",
+                quote_ident(&hit.owner).to_lowercase(),
+                quote_ident(&hit.table).to_lowercase()
+            );
+            let text = if hit.data_type.is_some() {
+                format!(
+                    "select {}, t.*\n  from {table} t",
+                    quote_ident(&hit.column).to_lowercase()
+                )
+            } else {
+                format!("select * from {table}\n where {}", hit.condition)
+            };
             effects.open.push(OpenRequest::Sql {
                 connection,
-                text: format!(
-                    "select * from {}.{}\n where {}",
-                    quote_ident(&hit.owner).to_lowercase(),
-                    quote_ident(&hit.table).to_lowercase(),
-                    hit.condition
-                ),
+                text,
                 run: true,
             });
         }
         effects
     }
+}
+
+/// Columns whose name matches, in tables and views of `owner`.
+fn find_columns(
+    conn: &Connection,
+    owner: &str,
+    tables: &str,
+    pattern: &str,
+    mode: Match,
+    match_case: bool,
+    progress: &Progress,
+) -> Result<(), DbError> {
+    let (condition, value) = match mode {
+        Match::Exact if match_case => ("c.column_name = :3", pattern.trim().to_owned()),
+        Match::Exact => ("c.column_name = upper(:3)", pattern.trim().to_owned()),
+        Match::Contains => (
+            "c.column_name like :3 escape '\\'",
+            orui_db::like_pattern(pattern.trim()),
+        ),
+        Match::Regex if match_case => ("regexp_like(c.column_name, :3)", pattern.to_owned()),
+        Match::Regex => ("regexp_like(c.column_name, :3, 'i')", pattern.to_owned()),
+    };
+    let sql = format!(
+        "select c.table_name, c.column_name, c.data_type
+           from all_tab_columns c
+          where c.owner = :1 and c.table_name like :2 and {condition}
+          order by c.table_name, c.column_id"
+    );
+    let tables = if tables.is_empty() { "%" } else { tables };
+    let mut hits = Vec::new();
+    for row in conn.query_as::<(String, String, String)>(&sql, &[&owner, &tables, &value])? {
+        let (table, column, data_type) = row?;
+        hits.push(Hit {
+            owner: owner.to_owned(),
+            table,
+            column,
+            count: 0,
+            condition: String::new(),
+            data_type: Some(data_type),
+        });
+    }
+    progress.done.store(1, Ordering::Relaxed);
+    *progress.hits.lock().expect("hits") = hits;
+    Ok(())
 }
 
 fn search(
@@ -390,6 +465,7 @@ fn search(
                                 column: column.clone(),
                                 count,
                                 condition: conditions[i].clone(),
+                                data_type: None,
                             });
                         }
                     }

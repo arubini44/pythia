@@ -289,7 +289,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Match modes: exact, contains, regex (`REGEXP_LIKE`), case-insensitive
 - [x] Run in parallel with throttling, show progress, cancellable (sequential, not parallel)
 - [x] Results: table, column, matching row count; click → open query with filter
-- [ ] Find columns by name across schemas
+- [x] Find columns by name across schemas
 
 ### 5.15 Data Compare (M7)
 
