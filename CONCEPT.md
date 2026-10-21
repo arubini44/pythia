@@ -234,14 +234,14 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Tree: connection → schema → object type → objects
 - [x] Object types: tables, views, materialized views, sequences, synonyms, packages, procedures, functions, types, triggers, indexes, constraints, DB links, jobs/scheduler, queues, directories, users, roles, profiles (no constraints, queues, directories, users, roles or profiles folders)
 - [x] "My objects" / all schemas / filter by schema
-- [ ] Filters: name pattern, status (invalid), modified since, custom saved filters
+- [x] Filters: name pattern, status (invalid), modified since, custom saved filters (no saved filters)
 - [x] Invalid objects highlighted
 - [x] Context menu: view, edit, compile, drop, rename, describe, query data, generate DDL, copy name, grant (no rename or grant)
 - [x] Expand table → columns, indexes, constraints, triggers, FKs, references-by
 - [x] Expand package → procedures/functions with parameters (outline from parser)
 - [x] Dependencies view (uses / used by)
 - [ ] Drag object name into the editor (with options: name, `SELECT`, column list, call template)
-- [ ] Recent objects and favorites
+- [x] Recent objects and favorites
 - [x] Quick object finder (Ctrl+Shift+O style fuzzy search)
 - [ ] Metadata cache with background refresh
 

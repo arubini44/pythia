@@ -34,6 +34,71 @@ enum Node {
     Object(ObjectRef),
     /// Indexes, constraints or triggers of a table.
     Group(ObjectRef, Group),
+    /// Favorites or recently opened objects.
+    Section(Section),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Section {
+    Favorites,
+    Recent,
+}
+
+/// Favorite and recently opened objects per connection; saved with the
+/// workspace.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Marks {
+    pub favorites: std::collections::BTreeMap<String, Vec<ObjectRef>>,
+    pub recent: std::collections::BTreeMap<String, Vec<ObjectRef>>,
+}
+
+impl Marks {
+    const RECENT: usize = 12;
+
+    /// Remembers an object as just opened.
+    pub fn touch(&mut self, connection: &str, object: ObjectRef) {
+        let list = self.recent.entry(connection.to_owned()).or_default();
+        list.retain(|o| *o != object);
+        list.insert(0, object);
+        list.truncate(Self::RECENT);
+    }
+
+    fn toggle_favorite(&mut self, connection: &str, object: ObjectRef) {
+        let list = self.favorites.entry(connection.to_owned()).or_default();
+        if let Some(i) = list.iter().position(|o| *o == object) {
+            list.remove(i);
+        } else {
+            list.push(object);
+            list.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+    }
+
+    fn is_favorite(&self, connection: &str, object: &ObjectRef) -> bool {
+        self.favorites
+            .get(connection)
+            .is_some_and(|l| l.contains(object))
+    }
+}
+
+/// Which objects the folders list besides the name filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Changed {
+    #[default]
+    Any,
+    Day,
+    Week,
+    Month,
+}
+
+impl Changed {
+    fn days(self) -> Option<i64> {
+        match self {
+            Changed::Any => None,
+            Changed::Day => Some(1),
+            Changed::Week => Some(7),
+            Changed::Month => Some(30),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,6 +166,13 @@ enum Row<'a> {
     },
     Part(&'a Part, ObjectRef),
     Member(&'a Member, ObjectRef),
+    Section {
+        section: Section,
+        count: usize,
+        open: bool,
+    },
+    /// An object listed under Favorites or Recent.
+    Shortcut(&'a ObjectRef),
     Message {
         depth: usize,
         text: String,
@@ -114,6 +186,9 @@ pub struct Browser {
     schema: Option<String>,
     schemas: Option<Loaded<Vec<String>>>,
     filter: String,
+    invalid_only: bool,
+    changed: Changed,
+    pub marks: Marks,
     folders: HashMap<(String, ObjectType), Loaded<Vec<DbObject>>>,
     children: HashMap<ObjectRef, Loaded<Children>>,
     parts: HashMap<ObjectRef, TableParts>,
@@ -126,9 +201,11 @@ pub struct Browser {
 impl Browser {
     /// Shows a (newly connected) connection, starting in its current schema.
     pub fn attach(&mut self, connection: String, schema: String) -> Effects {
+        let marks = std::mem::take(&mut self.marks);
         *self = Self {
             connection: Some(connection),
             schema: Some(schema),
+            marks,
             ..Self::default()
         };
         self.load_schemas()
@@ -156,6 +233,16 @@ impl Browser {
             }
         }
         effects
+    }
+
+    /// Opens Favorites and Recent, marks `favorite` and filters invalid objects.
+    #[cfg(test)]
+    pub fn test_marks(&mut self, favorite: ObjectRef) {
+        let connection = self.connection.clone().unwrap_or_default();
+        self.marks.toggle_favorite(&connection, favorite);
+        self.expanded.insert(Node::Section(Section::Favorites));
+        self.expanded.insert(Node::Section(Section::Recent));
+        self.invalid_only = true;
     }
 
     /// Expands a table with all its groups.
@@ -241,7 +328,7 @@ impl Browser {
             .iter()
             .filter_map(|n| match n {
                 Node::Folder(owner, t) => Some((owner.clone(), *t)),
-                Node::Object(_) | Node::Group(..) => None,
+                Node::Object(_) | Node::Group(..) | Node::Section(_) => None,
             })
             .collect();
         self.folders.clear();
@@ -253,7 +340,7 @@ impl Browser {
             .iter()
             .filter_map(|n| match n {
                 Node::Object(o) => Some(o.clone()),
-                Node::Folder(..) | Node::Group(..) => None,
+                Node::Folder(..) | Node::Group(..) | Node::Section(_) => None,
             })
             .collect();
         for o in objects {
@@ -508,11 +595,38 @@ impl Browser {
                 );
             }
         });
-        ui.add(
-            egui::TextEdit::singleline(&mut self.filter)
-                .hint_text("Filter objects…")
-                .desired_width(f32::INFINITY),
-        );
+        ui.horizontal(|ui| {
+            let filtered = self.invalid_only || self.changed != Changed::Any;
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .hint_text(if filtered {
+                        "Filter objects… (more filters on)"
+                    } else {
+                        "Filter objects…"
+                    })
+                    .desired_width(ui.available_width() - 34.0),
+            );
+            let icon = if filtered {
+                Icon::Filter.image(ui).tint(ui.visuals().hyperlink_color)
+            } else {
+                Icon::Filter.image(ui)
+            };
+            ui.menu_image_button(icon, |ui| {
+                ui.checkbox(&mut self.invalid_only, "Invalid objects only");
+                ui.separator();
+                ui.label(RichText::new("Changed").strong());
+                for (value, label) in [
+                    (Changed::Any, "Any time"),
+                    (Changed::Day, "Last 24 hours"),
+                    (Changed::Week, "Last 7 days"),
+                    (Changed::Month, "Last 30 days"),
+                ] {
+                    ui.radio_value(&mut self.changed, value, label);
+                }
+            })
+            .response
+            .on_hover_text("Filter by status and change date");
+        });
         ui.add_space(2.0);
 
         let owner = self.schema.clone().unwrap_or_default();
@@ -556,19 +670,53 @@ impl Browser {
     fn rows<'a>(&'a self, owner: &'a str) -> Vec<Row<'a>> {
         let filter = self.filter.trim().to_uppercase();
         let mut rows = Vec::new();
+        let connection = self.connection.as_deref().unwrap_or_default();
+        for (section, list) in [
+            (Section::Favorites, self.marks.favorites.get(connection)),
+            (Section::Recent, self.marks.recent.get(connection)),
+        ] {
+            let Some(list) = list.filter(|l| !l.is_empty()) else {
+                continue;
+            };
+            let matching: Vec<&ObjectRef> = list
+                .iter()
+                .filter(|o| filter.is_empty() || o.name.contains(&filter))
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            let open = self.expanded.contains(&Node::Section(section));
+            rows.push(Row::Section {
+                section,
+                count: matching.len(),
+                open,
+            });
+            if open {
+                rows.extend(matching.into_iter().map(Row::Shortcut));
+            }
+        }
+        // Change date cutoff, compared as text with LAST_DDL_TIME.
+        let cutoff = self.changed.days().map(|d| {
+            (chrono::Local::now() - chrono::Duration::days(d))
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        });
+        let shown = |o: &DbObject| {
+            (filter.is_empty() || o.name.contains(&filter))
+                && (!self.invalid_only || !o.valid)
+                && cutoff.as_deref().is_none_or(|c| o.last_ddl.as_str() >= c)
+        };
+        let filtering = !filter.is_empty() || self.invalid_only || cutoff.is_some();
         for &object_type in ObjectType::BROWSER {
             let node = Node::Folder(owner.to_owned(), object_type);
             let open = self.expanded.contains(&node);
             let folder = self.folders.get(&(owner.to_owned(), object_type));
             let matching: Vec<&DbObject> = match folder {
-                Some(Loaded::Ready(objects)) => objects
-                    .iter()
-                    .filter(|o| filter.is_empty() || o.name.contains(&filter))
-                    .collect(),
+                Some(Loaded::Ready(objects)) => objects.iter().filter(|o| shown(o)).collect(),
                 _ => Vec::new(),
             };
             let count = matches!(folder, Some(Loaded::Ready(_))).then_some(matching.len());
-            if !filter.is_empty() && count == Some(0) {
+            if filtering && count == Some(0) {
                 continue;
             }
             rows.push(Row::Folder {
@@ -882,6 +1030,57 @@ impl Browser {
                         }
                     });
                 }
+                Row::Section {
+                    section,
+                    count,
+                    open,
+                } => {
+                    if chevron(ui, *open, true) {
+                        toggles.push(Node::Section(*section));
+                    }
+                    let (icon, label) = match section {
+                        Section::Favorites => (Icon::Star, "Favorites"),
+                        Section::Recent => (Icon::History, "Recent"),
+                    };
+                    ui.add(icon.sized(ui, small));
+                    let r = ui
+                        .add(egui::Label::new(RichText::new(label).strong()).sense(Sense::click()));
+                    if r.clicked() {
+                        toggles.push(Node::Section(*section));
+                    }
+                    ui.weak(count.to_string());
+                }
+                Row::Shortcut(object) => {
+                    ui.add_space(INDENT);
+                    ui.add_space(small.points());
+                    let icon = Icon::for_object_type(object.object_type.dictionary_name())
+                        .unwrap_or(Icon::Text);
+                    ui.add(icon.sized(ui, small));
+                    let selected = self.selected.as_ref() == Some(*object);
+                    let mut text = RichText::new(object.name.to_lowercase()).monospace();
+                    if Some(object.owner.as_str()) != self.schema.as_deref() {
+                        text = RichText::new(format!(
+                            "{}.{}",
+                            object.owner.to_lowercase(),
+                            object.name.to_lowercase()
+                        ))
+                        .monospace();
+                    }
+                    let response =
+                        ui.add(egui::Button::selectable(selected, text).frame_when_inactive(false));
+                    let response = response.on_hover_text(format!(
+                        "{} {}",
+                        object.object_type.dictionary_name().to_lowercase(),
+                        object.qualified()
+                    ));
+                    if response.clicked() {
+                        actions.push(Action::Select((*object).clone()));
+                    }
+                    if response.double_clicked() {
+                        actions.push(Action::Default((*object).clone()));
+                    }
+                    response.context_menu(|ui| self.context_menu(ui, object, actions));
+                }
                 Row::Message { depth, text, error } => {
                     ui.add_space(INDENT * *depth as f32 + small.points());
                     if *error {
@@ -941,6 +1140,13 @@ impl Browser {
         if t.has_source() || matches!(t, ObjectType::View | ObjectType::MaterializedView) {
             item(ui, "Compile", Action::Compile(object.clone()));
         }
+        let connection = self.connection.as_deref().unwrap_or_default();
+        let favorite = if self.marks.is_favorite(connection, object) {
+            "Remove from favorites"
+        } else {
+            "Add to favorites"
+        };
+        item(ui, favorite, Action::ToggleFavorite(object.clone()));
         item(ui, "Copy name", Action::CopyName(object.clone()));
         item(
             ui,
@@ -1001,6 +1207,13 @@ impl Browser {
             Action::CopyName(o) => ctx.copy_text(o.name.clone()),
             Action::CopyQualified(o) => ctx.copy_text(o.qualified()),
             Action::Drop(o) => self.confirm_drop = Some(o),
+            Action::ToggleFavorite(o) => {
+                let opening = !self.marks.is_favorite(&connection, &o);
+                self.marks.toggle_favorite(&connection, o);
+                if opening {
+                    self.expanded.insert(Node::Section(Section::Favorites));
+                }
+            }
             Action::EditTable(object) => effects
                 .open
                 .push(OpenRequest::EditTable { connection, object }),
@@ -1103,6 +1316,7 @@ enum Action {
     New(String, ObjectType),
     EditObject(ObjectRef),
     Grants(ObjectRef),
+    ToggleFavorite(ObjectRef),
 }
 
 /// Statements generated from a table's columns.
@@ -1225,5 +1439,39 @@ mod tests {
             template(Template::Update, &object, &cols),
             "update hr.emp\n   set name = :name,\n       sal = :sal\n where id = :id"
         );
+    }
+}
+
+#[cfg(test)]
+mod marks_tests {
+    use super::*;
+
+    fn object(name: &str) -> ObjectRef {
+        ObjectRef {
+            owner: "HR".into(),
+            name: name.into(),
+            object_type: ObjectType::Table,
+        }
+    }
+
+    #[test]
+    fn recent_and_favorites() {
+        let mut marks = Marks::default();
+        for i in 0..20 {
+            marks.touch("db", object(&format!("T{i}")));
+        }
+        marks.touch("db", object("T5"));
+        let recent = &marks.recent["db"];
+        assert_eq!(recent.len(), Marks::RECENT);
+        assert_eq!(recent[0].name, "T5");
+        assert_eq!(recent.iter().filter(|o| o.name == "T5").count(), 1);
+
+        marks.toggle_favorite("db", object("B"));
+        marks.toggle_favorite("db", object("A"));
+        assert!(marks.is_favorite("db", &object("A")));
+        assert!(!marks.is_favorite("other", &object("A")));
+        assert_eq!(marks.favorites["db"][0].name, "A");
+        marks.toggle_favorite("db", object("A"));
+        assert!(!marks.is_favorite("db", &object("A")));
     }
 }

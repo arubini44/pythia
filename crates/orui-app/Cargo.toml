@@ -13,6 +13,7 @@ name = "orui"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 csv = "1"
 regex.workspace = true
 anyhow.workspace = true

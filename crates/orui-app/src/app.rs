@@ -58,6 +58,8 @@ struct Workspace {
     last_profile: Option<ConnectionProfile>,
     #[serde(default)]
     project: crate::project::Project,
+    #[serde(default)]
+    marks: crate::browser::Marks,
 }
 
 pub struct OruiApp {
@@ -186,6 +188,7 @@ impl OruiApp {
                 app.next_doc = ws.next_doc;
                 app.last_profile = ws.last_profile;
                 app.project = ws.project;
+                app.browser.marks = ws.marks;
                 let docs = &app.docs;
                 app.dock
                     .retain_tabs(|tab| !matches!(tab, Tab::Doc(id) if !docs.contains_key(id)));
@@ -425,6 +428,15 @@ impl OruiApp {
     }
 
     fn open(&mut self, request: OpenRequest) {
+        if let OpenRequest::Program { connection, object }
+        | OpenRequest::ProgramAt {
+            connection, object, ..
+        }
+        | OpenRequest::Object { connection, object }
+        | OpenRequest::EditTable { connection, object } = &request
+        {
+            self.browser.marks.touch(connection, object.clone());
+        }
         match request {
             OpenRequest::File { path, connection } => self.open_file(path, connection),
             OpenRequest::Sql {
@@ -2277,10 +2289,12 @@ impl eframe::App for OruiApp {
             next_doc: self.next_doc,
             last_profile: self.last_profile.clone(),
             project: std::mem::take(&mut self.project),
+            marks: std::mem::take(&mut self.browser.marks),
         };
         eframe::set_value(storage, WORKSPACE_KEY, &workspace);
         self.docs = workspace.docs;
         self.project = workspace.project;
+        self.browser.marks = workspace.marks;
         self.save_history();
     }
 
@@ -2554,6 +2568,10 @@ impl OruiApp {
         self.focused
             .and_then(|id| self.docs.get(&id))
             .map(|d| d.title())
+    }
+
+    pub fn test_browser(&mut self) -> &mut Browser {
+        &mut self.browser
     }
 
     pub fn test_browser_loading(&self) -> bool {

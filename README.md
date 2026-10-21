@@ -48,7 +48,11 @@ for Linux, Windows and macOS.
 
 **PL/SQL development**
 - Object browser with lazy, virtualized folders, invalid markers, compile,
-  drop, describe, query, test.
+  drop, describe, query, test; favorites and recently opened objects;
+  filters for invalid or recently changed objects; tables expand to
+  columns, indexes, constraints, triggers and referencing tables.
+- Form editors for sequences, views, synonyms, indexes and grants, with a
+  preview of the generated DDL.
 - Program windows with spec and body, compile with clickable errors
   (gutter markers and squiggles), unsaved-change tracking, save to file.
 - **Test…** generates a ready-to-run block for any procedure or function

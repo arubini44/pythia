@@ -1509,3 +1509,37 @@ drop table orui_oe_orders purge;"
     });
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }
+
+/// Favorites, recently opened objects and the invalid-only filter.
+#[test]
+fn browser_marks() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let object = |name: &str, t| ObjectRef {
+        owner: "ORUI".into(),
+        name: name.into(),
+        object_type: t,
+    };
+    h.state_mut().test_open(OpenRequest::Program {
+        connection: "orui@FREEPDB1".into(),
+        object: object("DEMO_PKG", orui_db::ObjectType::PackageBody),
+    });
+    wait_until(&mut h, "program", |app| !app.test_focused_busy());
+    h.state_mut()
+        .test_browser()
+        .test_marks(object("DEMO_EMPLOYEES", orui_db::ObjectType::Table));
+    h.state_mut().test_expand_browser(&[
+        orui_db::ObjectType::Procedure,
+        orui_db::ObjectType::Package,
+        orui_db::ObjectType::PackageBody,
+    ]);
+    wait_until(&mut h, "browser", |app| !app.test_browser_loading());
+    save(&mut h, "browser-marks");
+    let marks = &h.state_mut().test_browser().marks;
+    assert_eq!(marks.recent["orui@FREEPDB1"][0].name, "DEMO_PKG");
+    assert_eq!(marks.favorites["orui@FREEPDB1"][0].name, "DEMO_EMPLOYEES");
+}
