@@ -11,6 +11,7 @@ use orui_plsql::TokenKind;
 
 use super::assist::{self, CompletionTrigger};
 use super::find::FindAction;
+use super::fold::{DisplayMap, Region, RegionKind};
 use super::highlight::lex_line;
 use super::matching::pair_at;
 use super::selection::Selection;
@@ -45,6 +46,8 @@ struct Palette {
     execution: Color32,
     execution_line: Color32,
     link: Color32,
+    fold_pill: Color32,
+    snippet: Color32,
 }
 
 impl Palette {
@@ -95,6 +98,16 @@ impl Palette {
                 if dark { 38 } else { 60 },
             ),
             link: v.hyperlink_color,
+            fold_pill: if dark {
+                Color32::from_white_alpha(20)
+            } else {
+                Color32::from_black_alpha(16)
+            },
+            snippet: if dark {
+                Color32::from_rgb(0x5c, 0xa8, 0xe8)
+            } else {
+                Color32::from_rgb(0x1f, 0x6f, 0xc4)
+            },
         }
     }
 }
@@ -109,6 +122,10 @@ struct Layout {
     char_w: f32,
     gutter_w: f32,
     marker_w: f32,
+    /// Width of the fold chevron column at the right edge of the gutter.
+    fold_w: f32,
+    /// Lines hidden by folds.
+    map: DisplayMap,
 }
 
 impl Layout {
@@ -116,8 +133,25 @@ impl Layout {
         self.origin.x + self.gutter_w
     }
 
+    /// Top of the row showing `line` (a hidden line maps to its fold's row).
     fn row_y(&self, line: usize) -> f32 {
-        self.origin.y + line as f32 * self.row_h
+        self.origin.y + self.map.line_to_row(line) as f32 * self.row_h
+    }
+
+    /// Display row under a screen y (unclamped; may be past the last row).
+    fn row_at(&self, y: f32) -> usize {
+        ((y - self.origin.y) / self.row_h).floor().max(0.0) as usize
+    }
+
+    /// Visible line under a screen y, clamped to the text.
+    fn line_at(&self, y: f32) -> usize {
+        self.map
+            .row_to_line(self.row_at(y).min(self.map.rows().saturating_sub(1)))
+    }
+
+    fn fold_column(&self) -> Range<f32> {
+        let right = self.gutter_left() + self.gutter_w;
+        right - self.fold_w..right
     }
 
     fn gutter_left(&self) -> f32 {
@@ -128,10 +162,20 @@ impl Layout {
         self.viewport.translate(self.origin.to_vec2())
     }
 
-    fn visible_lines(&self, n_lines: usize) -> Range<usize> {
+    /// Document lines spanned by the visible rows (some may be hidden).
+    fn visible_lines(&self) -> Range<usize> {
+        let rows = self.map.rows();
         let first = (self.viewport.min.y / self.row_h).floor().max(0.0) as usize;
-        let last = ((self.viewport.max.y / self.row_h).ceil() as usize + 1).min(n_lines);
-        first.min(last)..last
+        let last = ((self.viewport.max.y / self.row_h).ceil() as usize + 1).min(rows);
+        if first >= last {
+            return 0..0;
+        }
+        self.map.row_to_line(first)..self.map.row_to_line(last - 1) + 1
+    }
+
+    /// Whether a line is in view and not folded away.
+    fn shows(&self, lines: &Range<usize>, line: usize) -> bool {
+        lines.contains(&line) && !self.map.is_hidden(line)
     }
 }
 
@@ -165,13 +209,15 @@ impl CodeEditor {
         let n_lines = self.state.rope.len_lines();
         let digits = n_lines.to_string().len().max(3);
         let marker_w = (row_h * 1.1).round();
+        let fold_w = (row_h * 0.85).round();
         let gutter_w = if config.show_line_numbers {
-            marker_w + (digits as f32 + 1.5) * char_w
+            marker_w + (digits as f32 + 0.75) * char_w + fold_w
         } else {
-            marker_w + char_w * 0.5
+            marker_w + fold_w
         };
         let content_w = gutter_w + (self.max_line_chars() as f32 + 4.0) * char_w;
-        let content_h = (n_lines as f32 + 3.0) * row_h;
+        let map = self.display_map();
+        let content_h = (map.rows() as f32 + 3.0) * row_h;
 
         let mut gutter_clicked = None;
         let scroll = egui::ScrollArea::both()
@@ -184,13 +230,15 @@ impl CodeEditor {
                 );
                 let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
                 let response = ui.interact(rect, id, Sense::click_and_drag());
-                let layout = Layout {
+                let mut layout = Layout {
                     origin: rect.min,
                     viewport,
                     row_h,
                     char_w,
                     gutter_w,
                     marker_w,
+                    fold_w,
+                    map,
                 };
                 self.page_rows = ((viewport.height() / row_h) as usize)
                     .saturating_sub(1)
@@ -224,10 +272,16 @@ impl CodeEditor {
                     let state = &self.state;
                     self.find.refresh(state.revision, || state.text());
                 }
+                // Carets never rest in hidden lines: whatever put one there
+                // (find, go to line, horizontal moves, edits) opens the fold.
+                self.state.check_snippet();
+                self.reveal_carets();
+                layout.map = self.display_map();
                 self.update_assist(ui, focused, time);
 
                 self.paint(ui, &layout, config, &pal, &theme, &font, focused, time);
                 self.marker_tooltip(ui, &response, &layout);
+                self.fold_tooltip(ui, &response, &font);
 
                 let caret_rect = self.caret_rect(&layout);
                 if layout.visible_rect().contains(caret_rect.center()) {
@@ -283,9 +337,7 @@ impl CodeEditor {
 
     /// Char position under a screen point: (line, visual column, char index).
     fn hit(&self, layout: &Layout, pos: Pos2) -> (usize, usize, usize) {
-        let n = self.state.rope.len_lines();
-        let line =
-            (((pos.y - layout.origin.y) / layout.row_h).floor().max(0.0) as usize).min(n - 1);
+        let line = layout.line_at(pos.y);
         let vcol = ((pos.x - layout.text_x()) / layout.char_w).round().max(0.0) as usize;
         let text = line_text(&self.state.rope, line);
         let char_pos = pos_of(
@@ -302,10 +354,10 @@ impl CodeEditor {
         if pos.x < layout.gutter_left() + layout.gutter_w || pos.y < layout.origin.y {
             return None;
         }
-        let line = ((pos.y - layout.origin.y) / layout.row_h).floor() as usize;
-        if line >= rope.len_lines() {
+        if layout.row_at(pos.y) >= layout.map.rows() {
             return None;
         }
+        let line = layout.line_at(pos.y);
         let vcol = ((pos.x - layout.text_x()) / layout.char_w).floor().max(0.0) as usize;
         let text = line_text(rope, line);
         let tw = self.state.tab_width;
@@ -345,7 +397,16 @@ impl CodeEditor {
             return;
         };
         let in_gutter = pos.x < layout.gutter_left() + layout.gutter_w;
-        let word = if response.hovered() {
+        let pill = response
+            .hovered()
+            .then(|| {
+                self.fold_pills
+                    .iter()
+                    .find(|(r, _)| r.contains(pos))
+                    .map(|(_, l)| *l)
+            })
+            .flatten();
+        let word = if response.hovered() && pill.is_none() {
             self.word_under(layout, pos)
         } else {
             None
@@ -355,7 +416,7 @@ impl CodeEditor {
             .filter(|_| mods.command && !down)
             .map(|(_, r)| r.clone());
         if response.hovered() && !in_gutter {
-            let icon = if self.link.is_some() {
+            let icon = if self.link.is_some() || pill.is_some() {
                 CursorIcon::PointingHand
             } else {
                 CursorIcon::Text
@@ -367,9 +428,19 @@ impl CodeEditor {
         if pressed && response.hovered() {
             response.request_focus();
             self.blink_epoch = time;
+            if let Some(line) = pill {
+                self.state.tracked.folds.retain(|(s, _)| *s != line);
+                self.drag = None;
+                return;
+            }
             let (line, vcol, char_pos) = self.hit(layout, pos);
             if in_gutter {
-                if pos.x < layout.gutter_left() + layout.marker_w {
+                if layout.fold_column().contains(&pos.x) {
+                    if layout.row_at(pos.y) < layout.map.rows() {
+                        self.toggle_fold_at(line + 1);
+                    }
+                    self.drag = None;
+                } else if pos.x < layout.gutter_left() + layout.marker_w {
                     *gutter_clicked = Some(line + 1);
                 } else {
                     self.state.select_line_at(char_pos);
@@ -432,7 +503,7 @@ impl CodeEditor {
             self.drag = None;
         }
 
-        if !in_gutter {
+        if !in_gutter && pill.is_none() {
             let (_, _, char_pos) = self.hit(layout, pos);
             if response.triple_clicked() {
                 self.state.select_line_at(char_pos);
@@ -478,11 +549,16 @@ impl CodeEditor {
                 Event::Paste(text) if !ro => self.state.paste(&text, time),
                 Event::Key {
                     key,
+                    physical_key,
                     pressed: true,
                     modifiers,
                     ..
                 } => {
-                    if let Some(action) = self.handle_key(key, modifiers, ro, time) {
+                    // Digits and brackets by position, so Ctrl+Shift+1 or
+                    // Ctrl+Shift+[ work whatever the layout shifts them to.
+                    let physical = physical_key.unwrap_or(key);
+                    if self.editor_key(key, physical, modifiers, ro, time) {
+                    } else if let Some(action) = self.handle_key(key, modifiers, ro, time) {
                         find = Some(action);
                     }
                 }
@@ -494,22 +570,80 @@ impl CodeEditor {
         find
     }
 
+    /// Folding, bookmark and snippet keys. Returns true if consumed.
+    fn editor_key(&mut self, key: Key, physical: Key, m: Modifiers, ro: bool, time: f64) -> bool {
+        let (ctrl, shift) = (m.command, m.shift);
+        // Second key of a Ctrl+K chord.
+        if self.chord.take().is_some_and(|t| time - t < 2.0) {
+            match physical {
+                Key::Num0 => self.fold_all(),
+                Key::J => self.unfold_all(),
+                _ => return false,
+            }
+            return true;
+        }
+        let caret_line = self.state.rope.char_to_line(self.state.primary().head);
+        match key {
+            Key::K if ctrl && !shift && !m.alt => self.chord = Some(time),
+            _ if ctrl && shift && matches!(physical, Key::OpenBracket | Key::OpenCurlyBracket) => {
+                self.fold_at_cursor()
+            }
+            _ if ctrl
+                && shift
+                && matches!(physical, Key::CloseBracket | Key::CloseCurlyBracket) =>
+            {
+                self.unfold_at_cursor()
+            }
+            _ if ctrl && !m.alt && digit(physical).is_some() => {
+                let n = digit(physical).expect("checked");
+                if shift {
+                    self.state.tracked.toggle_bookmark(caret_line, Some(n));
+                } else if let Some(b) = self
+                    .state
+                    .tracked
+                    .bookmarks
+                    .iter()
+                    .find(|b| b.number == Some(n))
+                {
+                    self.jump_to_line(b.line);
+                }
+            }
+            Key::F2 if ctrl => self.state.tracked.toggle_bookmark(caret_line, None),
+            Key::F2 if !m.alt => {
+                if let Some(line) = self.state.tracked.next_bookmark(caret_line, !shift) {
+                    self.jump_to_line(line);
+                }
+            }
+            Key::Tab if !ctrl && self.state.snippet.is_some() => {
+                self.state.snippet_step(!shift);
+            }
+            Key::Tab if !ro && !ctrl && !shift && self.expand_trigger(time) => {}
+            Key::Escape if self.state.snippet.is_some() => self.state.snippet = None,
+            _ => return false,
+        }
+        true
+    }
+
     fn handle_key(&mut self, key: Key, m: Modifiers, ro: bool, time: f64) -> Option<FindAction> {
         let (ctrl, shift, alt) = (m.command, m.shift, m.alt);
+        // Vertical moves step over folded lines.
+        let map = self.display_map();
+        let rows = |line: usize, delta: isize| map.offset_line(line, delta);
+        let page = self.page_rows as isize;
         let st = &mut self.state;
         match key {
             Key::ArrowLeft => st.move_left(shift, ctrl),
             Key::ArrowRight => st.move_right(shift, ctrl),
             Key::ArrowUp if alt && !ro => st.move_lines(true, time),
             Key::ArrowDown if alt && !ro => st.move_lines(false, time),
-            Key::ArrowUp => st.move_vertical(-1, shift),
-            Key::ArrowDown => st.move_vertical(1, shift),
+            Key::ArrowUp => st.move_vertical_mapped(-1, shift, &rows),
+            Key::ArrowDown => st.move_vertical_mapped(1, shift, &rows),
             Key::Home if ctrl => st.move_doc_start(shift),
             Key::Home => st.move_home(shift),
             Key::End if ctrl => st.move_doc_end(shift),
             Key::End => st.move_end(shift),
-            Key::PageUp => st.move_vertical(-(self.page_rows as isize), shift),
-            Key::PageDown => st.move_vertical(self.page_rows as isize, shift),
+            Key::PageUp => st.move_vertical_mapped(-page, shift, &rows),
+            Key::PageDown => st.move_vertical_mapped(page, shift, &rows),
             Key::Enter if !ro && !ctrl && !alt => st.newline(time),
             Key::Backspace if !ro => st.backspace(ctrl, time),
             Key::Delete if !ro => st.delete(ctrl, time),
@@ -928,6 +1062,9 @@ impl CodeEditor {
         };
         let rope = &self.state.rope;
         let (line, col) = super::text::line_col(rope, hover.range.start.min(rope.len_chars()));
+        if layout.map.is_hidden(line) {
+            return;
+        }
         let vcol = visual_col(&line_text(rope, line), col, self.state.tab_width);
         let pos = pos2(
             layout.text_x() + vcol as f32 * layout.char_w,
@@ -990,6 +1127,17 @@ impl CodeEditor {
         time: f64,
     ) {
         // Bracket / keyword pair under the caret (needs `&mut self` for the cache).
+        let lines = layout.visible_lines();
+        // Foldable regions starting in view (for chevrons and pill previews).
+        let regions: Vec<Region> = if self.state.rope.len_lines() > 1 {
+            self.regions()
+                .iter()
+                .filter(|r| lines.contains(&r.start))
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let pair = {
             let primary = self.state.primary();
             if primary.is_empty() && caret_on_pairable(&self.state.rope, primary.head) {
@@ -1006,8 +1154,17 @@ impl CodeEditor {
 
         let rope = &self.state.rope;
         let tw = self.state.tab_width;
-        let lines = layout.visible_lines(rope.len_lines());
-        let texts: Vec<String> = lines.clone().map(|l| line_text(rope, l)).collect();
+        let shown = |l: usize| layout.shows(&lines, l);
+        let texts: Vec<String> = lines
+            .clone()
+            .map(|l| {
+                if shown(l) {
+                    line_text(rope, l)
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
         let text_of = |l: usize| texts[l - lines.start].as_str();
         let full_row = |l: usize| {
             Rect::from_min_size(
@@ -1019,13 +1176,13 @@ impl CodeEditor {
         // Line backgrounds: debugger position, current line.
         for m in &self.markers {
             let l = m.line.wrapping_sub(1);
-            if m.kind == MarkerKind::ExecutionPoint && lines.contains(&l) {
+            if m.kind == MarkerKind::ExecutionPoint && shown(l) {
                 painter.rect_filled(full_row(l), 0.0, pal.execution_line);
             }
         }
         let primary = self.state.primary();
         let caret_line = rope.char_to_line(primary.head);
-        if config.highlight_current_line && lines.contains(&caret_line) {
+        if config.highlight_current_line && shown(caret_line) {
             painter.rect_filled(full_row(caret_line), 0.0, pal.current_line);
         }
 
@@ -1037,7 +1194,7 @@ impl CodeEditor {
             }
             let (l0, l1) = (rope.char_to_line(range.start), rope.char_to_line(range.end));
             for l in l0.max(lines.start)..=l1.min(lines.end.saturating_sub(1)) {
-                if !lines.contains(&l) {
+                if !shown(l) {
                     continue;
                 }
                 let (ls, le) = (line_start(rope, l), line_end(rope, l));
@@ -1109,6 +1266,42 @@ impl CodeEditor {
             }
         }
 
+        // Snippet placeholders: the active one framed, the others hinted.
+        if let Some(session) = &self.state.snippet {
+            for (i, stop) in session.stops.iter().enumerate() {
+                let active = i == session.current;
+                let color = pal.snippet.gamma_multiply(if active { 0.9 } else { 0.4 });
+                for r in stop {
+                    let rects = range_rects(r.clone());
+                    if rects.is_empty() {
+                        // Empty stop: a short bar where the caret will land.
+                        let (line, col) = super::text::line_col(rope, r.start);
+                        if shown(line) {
+                            let x = layout.text_x()
+                                + visual_col(text_of(line), col, tw) as f32 * layout.char_w;
+                            let y = layout.row_y(line);
+                            painter.vline(
+                                x,
+                                y + 2.0..=y + layout.row_h - 2.0,
+                                Stroke::new(1.5, color),
+                            );
+                        }
+                    }
+                    for rect in rects {
+                        if active {
+                            painter.rect_filled(rect, 2.0, pal.snippet.gamma_multiply(0.12));
+                        }
+                        painter.rect_stroke(
+                            rect.expand(0.5),
+                            2.0,
+                            Stroke::new(1.0, color),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
+            }
+        }
+
         if let Some(pair) = pair {
             for r in [pair.open, pair.close] {
                 let chars = rope.byte_to_char(r.start)..rope.byte_to_char(r.end);
@@ -1125,11 +1318,7 @@ impl CodeEditor {
         }
 
         // Text.
-        for l in lines.clone() {
-            let text = text_of(l);
-            if text.is_empty() {
-                continue;
-            }
+        let highlighted = |text: &str, l: usize| {
             let (tokens, _) = lex_line(text, self.state.highlighter.state(l));
             let mut job = LayoutJob::default();
             let mut vcol = 0;
@@ -1164,8 +1353,83 @@ impl CodeEditor {
                 };
                 job.append(&piece, 0.0, format);
             }
-            let galley = ui.fonts_mut(|f| f.layout_job(job));
-            painter.galley(pos2(layout.text_x(), layout.row_y(l)), galley, pal.text);
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
+        for l in lines.clone() {
+            let text = text_of(l);
+            if !text.is_empty() {
+                painter.galley(
+                    pos2(layout.text_x(), layout.row_y(l)),
+                    highlighted(text, l),
+                    pal.text,
+                );
+            }
+        }
+
+        // Folded lines end in a "⋯" pill, followed by the closing line of
+        // a block (`end if;`, `)`) so the structure stays readable.
+        let mut pills = Vec::new();
+        for &(start, end) in &self.state.tracked.folds {
+            if !shown(start) {
+                continue;
+            }
+            let text = text_of(start);
+            let width = visual_col(text, text.chars().count(), tw);
+            let y = layout.row_y(start);
+            let x = layout.text_x() + (width as f32 + 0.6) * layout.char_w;
+            let pill = Rect::from_min_size(
+                pos2(x, y + 2.0),
+                vec2(layout.char_w * 2.6, layout.row_h - 4.0),
+            );
+            let hovered = ui
+                .ctx()
+                .pointer_hover_pos()
+                .is_some_and(|p| pill.contains(p));
+            let has_error = self
+                .markers
+                .iter()
+                .any(|m| m.kind == MarkerKind::Error && m.line > start + 1 && m.line <= end + 1);
+            let fill = if hovered {
+                pal.fold_pill.gamma_multiply(2.0)
+            } else {
+                pal.fold_pill
+            };
+            painter.rect_filled(pill, pill.height() * 0.5, fill);
+            if has_error {
+                painter.rect_stroke(
+                    pill,
+                    pill.height() * 0.5,
+                    Stroke::new(1.0, pal.error),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let dot = if has_error {
+                pal.error
+            } else {
+                pal.line_number
+            };
+            for i in -1..=1 {
+                painter.circle_filled(
+                    pill.center() + vec2(i as f32 * layout.char_w * 0.55, 0.0),
+                    1.4,
+                    dot,
+                );
+            }
+            pills.push((pill, start));
+            let closes = regions.iter().find(|r| r.start == start).is_some_and(|r| {
+                matches!(
+                    r.kind,
+                    RegionKind::Unit | RegionKind::Block | RegionKind::Paren
+                )
+            });
+            if closes {
+                let closing = line_text(rope, end);
+                let closing = closing.trim();
+                if !closing.is_empty() && closing.chars().count() <= 40 {
+                    let galley = highlighted(closing, end);
+                    painter.galley(pos2(pill.max.x + layout.char_w * 0.6, y), galley, pal.text);
+                }
+            }
         }
 
         // Ctrl+hover link underline.
@@ -1183,7 +1447,7 @@ impl CodeEditor {
                 MarkerKind::Warning => pal.warning,
                 _ => continue,
             };
-            if !lines.contains(&l) {
+            if !shown(l) {
                 continue;
             }
             let text = text_of(l);
@@ -1216,7 +1480,7 @@ impl CodeEditor {
             if blink_on {
                 for s in &self.state.sels {
                     let (line, col) = super::text::line_col(rope, s.head);
-                    if !lines.contains(&line) {
+                    if !shown(line) {
                         continue;
                     }
                     let vcol = visual_col(text_of(line), col, tw);
@@ -1238,7 +1502,8 @@ impl CodeEditor {
                 .request_repaint_after(std::time::Duration::from_secs_f64(next.max(0.01)));
         }
 
-        self.paint_gutter(ui, layout, config, pal, font, &lines, caret_line);
+        self.paint_gutter(ui, layout, config, pal, font, &lines, caret_line, &regions);
+        self.fold_pills = pills;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1251,6 +1516,7 @@ impl CodeEditor {
         font: &FontId,
         lines: &Range<usize>,
         caret_line: usize,
+        regions: &[Region],
     ) {
         let painter = ui.painter();
         let visible = layout.visible_rect();
@@ -1266,9 +1532,10 @@ impl CodeEditor {
             Stroke::new(1.0, pal.gutter_line),
         );
 
+        let shown = |l: usize| layout.shows(lines, l);
         if config.show_line_numbers {
-            let right = gutter.max.x - layout.char_w * 0.75;
-            for l in lines.clone() {
+            let right = gutter.max.x - layout.fold_w;
+            for l in lines.clone().filter(|l| shown(*l)) {
                 let color = if l == caret_line {
                     pal.line_number_current
                 } else {
@@ -1284,9 +1551,47 @@ impl CodeEditor {
             }
         }
 
+        // Bookmarks: a ribbon in the marker column, numbered ones labelled.
+        for b in &self.state.tracked.bookmarks {
+            if !shown(b.line) {
+                continue;
+            }
+            let center = pos2(
+                x0 + layout.marker_w * 0.5,
+                layout.row_y(b.line) + layout.row_h * 0.5,
+            );
+            let (w, h) = (layout.row_h * 0.62, layout.row_h * 0.82);
+            let rect = Rect::from_center_size(center, vec2(w, h));
+            painter.rect_filled(
+                rect,
+                egui::CornerRadius {
+                    nw: 2,
+                    ne: 2,
+                    sw: 0,
+                    se: 0,
+                },
+                pal.bookmark,
+            );
+            let notch = vec![
+                pos2(rect.min.x - 0.5, rect.max.y + 0.5),
+                pos2(rect.max.x + 0.5, rect.max.y + 0.5),
+                pos2(rect.center().x, rect.max.y - h * 0.24),
+            ];
+            painter.add(Shape::convex_polygon(notch, pal.gutter_bg, Stroke::NONE));
+            if let Some(n) = b.number {
+                painter.text(
+                    pos2(rect.center().x, rect.min.y + h * 0.38),
+                    egui::Align2::CENTER_CENTER,
+                    n.to_string(),
+                    FontId::monospace((layout.row_h * 0.56).round()),
+                    Color32::WHITE,
+                );
+            }
+        }
+
         for m in &self.markers {
             let l = m.line.wrapping_sub(1);
-            if !lines.contains(&l) {
+            if !shown(l) {
                 continue;
             }
             let center = pos2(
@@ -1331,6 +1636,146 @@ impl CodeEditor {
                 }
             }
         }
+
+        self.paint_fold_chevrons(ui, layout, pal, gutter, regions, &shown);
+    }
+
+    /// Chevrons in the fold column: always for folded lines, for every
+    /// region while the pointer is over the gutter. The hovered region's
+    /// extent is traced next to the text.
+    fn paint_fold_chevrons(
+        &self,
+        ui: &Ui,
+        layout: &Layout,
+        pal: &Palette,
+        gutter: Rect,
+        regions: &[Region],
+        shown: &dyn Fn(usize) -> bool,
+    ) {
+        let painter = ui.painter();
+        let hover = ui.ctx().pointer_hover_pos().filter(|p| gutter.contains(*p));
+        let hover_line = hover
+            .filter(|p| layout.row_at(p.y) < layout.map.rows())
+            .map(|p| layout.line_at(p.y));
+        let cx = (layout.fold_column().start + layout.fold_column().end) * 0.5;
+        let s = (layout.row_h * 0.17).round();
+        let folds = &self.state.tracked.folds;
+        for r in regions {
+            if !shown(r.start) {
+                continue;
+            }
+            let folded = folds.iter().any(|(f, _)| *f == r.start);
+            if !folded && hover.is_none() {
+                continue;
+            }
+            let hot = hover_line == Some(r.start);
+            let color = if hot {
+                pal.line_number_current
+            } else if folded {
+                pal.line_number.gamma_multiply(1.3)
+            } else {
+                pal.line_number.gamma_multiply(0.8)
+            };
+            let c = pos2(cx, layout.row_y(r.start) + layout.row_h * 0.5);
+            if hot || folded {
+                let bg = Rect::from_center_size(c, vec2(layout.fold_w - 4.0, layout.row_h - 4.0));
+                painter.rect_filled(
+                    bg,
+                    3.0,
+                    pal.fold_pill.gamma_multiply(if hot { 1.5 } else { 0.8 }),
+                );
+            }
+            let stroke = Stroke::new(1.4, color);
+            let pts = if folded {
+                vec![
+                    c + vec2(-s * 0.5, -s),
+                    c + vec2(s * 0.5, 0.0),
+                    c + vec2(-s * 0.5, s),
+                ]
+            } else {
+                vec![
+                    c + vec2(-s, -s * 0.5),
+                    c + vec2(0.0, s * 0.5),
+                    c + vec2(s, -s * 0.5),
+                ]
+            };
+            painter.add(Shape::line(pts, stroke));
+            if hot {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                if !folded {
+                    let y0 = layout.row_y(r.start) + layout.row_h;
+                    let y1 = layout.row_y(r.end) + layout.row_h * 0.5;
+                    let x = gutter.max.x - 1.5;
+                    painter.vline(
+                        x,
+                        y0..=y1,
+                        Stroke::new(2.0, pal.line_number.gamma_multiply(0.7)),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Hovering a "⋯" pill previews the hidden lines.
+    fn fold_tooltip(&self, ui: &Ui, response: &egui::Response, font: &FontId) {
+        let Some(pos) = ui.ctx().pointer_hover_pos().filter(|_| response.hovered()) else {
+            return;
+        };
+        let Some(&(_, start)) = self.fold_pills.iter().find(|(r, _)| r.contains(pos)) else {
+            return;
+        };
+        let Some(&(_, end)) = self.state.tracked.folds.iter().find(|(s, _)| *s == start) else {
+            return;
+        };
+        let rope = &self.state.rope;
+        const PREVIEW: usize = 12;
+        let shown_end = end.min(start + PREVIEW);
+        let body: Vec<String> = (start + 1..=shown_end)
+            .map(|l| line_text(rope, l))
+            .collect();
+        let indent = body
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| super::text::indent_of(l).len())
+            .min()
+            .unwrap_or(0);
+        let theme = SyntaxTheme::for_visuals(ui.visuals());
+        let font = FontId::monospace(font.size * 0.9);
+        response.clone().on_hover_ui_at_pointer(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (i, l) in body.iter().enumerate() {
+                let text = l.get(indent..).unwrap_or(l).replace('\t', "    ");
+                let (tokens, _) = lex_line(&text, self.state.highlighter.state(start + 1 + i));
+                let mut job = LayoutJob::default();
+                for token in tokens {
+                    let format = TextFormat {
+                        font_id: font.clone(),
+                        color: theme.color(token.kind),
+                        italics: matches!(
+                            token.kind,
+                            TokenKind::LineComment | TokenKind::BlockComment
+                        ),
+                        ..Default::default()
+                    };
+                    job.append(&text[token.range], 0.0, format);
+                }
+                ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
+            }
+            ui.add_space(4.0);
+            let more = if end > shown_end {
+                format!(" ({} more)", end - shown_end)
+            } else {
+                String::new()
+            };
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} hidden lines{more} · click to unfold",
+                    end - start
+                ))
+                .small()
+                .weak(),
+            );
+        });
     }
 
     fn marker_tooltip(&self, ui: &Ui, response: &egui::Response, layout: &Layout) {
@@ -1340,7 +1785,10 @@ impl CodeEditor {
         let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
             return;
         };
-        let line = ((pos.y - layout.origin.y) / layout.row_h).floor() as usize + 1;
+        if layout.row_at(pos.y) >= layout.map.rows() {
+            return;
+        }
+        let line = layout.line_at(pos.y) + 1;
         let messages: Vec<&str> = self
             .markers
             .iter()
@@ -1400,6 +1848,22 @@ impl CodeEditor {
             }
         }
     }
+}
+
+fn digit(key: Key) -> Option<u8> {
+    let n = match key {
+        Key::Num1 => 1,
+        Key::Num2 => 2,
+        Key::Num3 => 3,
+        Key::Num4 => 4,
+        Key::Num5 => 5,
+        Key::Num6 => 6,
+        Key::Num7 => 7,
+        Key::Num8 => 8,
+        Key::Num9 => 9,
+        _ => return None,
+    };
+    Some(n)
 }
 
 /// Whether the caret touches a bracket or a block keyword (avoids computing
