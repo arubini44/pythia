@@ -13,6 +13,7 @@ mod documents;
 mod editor;
 mod history;
 mod icons_ext;
+mod import_window;
 mod monitor_window;
 mod object_view;
 mod program_window;

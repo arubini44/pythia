@@ -137,6 +137,7 @@ pub enum DocKind {
     Monitor(crate::monitor_window::MonitorWindow),
     Compare(crate::compare_window::CompareWindow),
     Search(crate::source_search::SourceSearch),
+    Import(crate::import_window::ImportWindow),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -171,6 +172,7 @@ impl Document {
             DocKind::Monitor(m) => m.title(),
             DocKind::Compare(c) => c.title(),
             DocKind::Search(s) => s.title(),
+            DocKind::Import(i) => i.title(),
         }
     }
 
@@ -192,6 +194,7 @@ impl Document {
             DocKind::Monitor(m) => m.is_busy(),
             DocKind::Compare(c) => c.is_busy(),
             DocKind::Search(s) => s.is_busy(),
+            DocKind::Import(i) => i.is_busy(),
         }
     }
 
@@ -218,6 +221,7 @@ impl Document {
             DocKind::Monitor(m) => m.on_event(event),
             DocKind::Compare(c) => c.on_event(event),
             DocKind::Search(s) => s.on_event(event),
+            DocKind::Import(i) => i.on_event(event),
         }
     }
 
@@ -229,6 +233,7 @@ impl Document {
             DocKind::Monitor(m) => m.ui(ui, cx),
             DocKind::Compare(c) => c.ui(ui, cx),
             DocKind::Search(s) => s.ui(ui, cx),
+            DocKind::Import(i) => i.ui(ui, cx),
         }
     }
 
@@ -238,7 +243,9 @@ impl Document {
             DocKind::Sql(_) => Effects::default(),
             DocKind::Program(w) => w.load(),
             DocKind::Object(v) => v.load(),
-            DocKind::Monitor(_) | DocKind::Compare(_) | DocKind::Search(_) => Effects::default(),
+            DocKind::Monitor(_) | DocKind::Compare(_) | DocKind::Search(_) | DocKind::Import(_) => {
+                Effects::default()
+            }
         }
     }
 
@@ -247,9 +254,11 @@ impl Document {
         match &self.kind {
             DocKind::Sql(w) => (Some(w.state.line_col), w.result_status()),
             DocKind::Program(w) => (Some(w.line_col()), None),
-            DocKind::Object(_) | DocKind::Monitor(_) | DocKind::Compare(_) | DocKind::Search(_) => {
-                (None, None)
-            }
+            DocKind::Object(_)
+            | DocKind::Monitor(_)
+            | DocKind::Compare(_)
+            | DocKind::Search(_)
+            | DocKind::Import(_) => (None, None),
         }
     }
 }

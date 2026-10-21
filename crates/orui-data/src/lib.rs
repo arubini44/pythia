@@ -7,6 +7,8 @@
 
 use std::io::Write;
 
+pub mod import;
+
 use orui_db::{Cell, Column};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

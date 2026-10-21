@@ -43,6 +43,7 @@ commands! {
     History => "Edit: Recall Statement (history)",
     FindObject => "Tools: Find Database Object…",
     FindInSource => "Tools: Find in Database Source…",
+    ImportData => "Tools: Import Data (CSV, Excel)…",
     CompareSchemas => "Tools: Compare Schemas…",
     CompareData => "Tools: Compare Table Data…",
     MonitorDashboard => "Monitor: Dashboard",

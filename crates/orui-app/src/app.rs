@@ -673,6 +673,10 @@ impl OruiApp {
                 }
             }
             Command::History => self.history_dialog.toggle(),
+            Command::ImportData => {
+                let connection = self.current_connection();
+                self.add_doc(connection, DocKind::Import(Default::default()));
+            }
             Command::FindInSource => {
                 let connection = self.current_connection();
                 self.add_doc(
@@ -1015,6 +1019,8 @@ impl OruiApp {
                 item(ui, Command::FindObject);
                 item(ui, Command::FindInSource);
                 ui.separator();
+                item(ui, Command::ImportData);
+                ui.separator();
                 item(ui, Command::CompareSchemas);
                 item(ui, Command::CompareData);
             });
@@ -1178,6 +1184,53 @@ impl OruiApp {
         });
     }
 
+    /// Data files go to an import window, SQL and PL/SQL files open in a
+    /// SQL window.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let paths: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        for path in paths {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default();
+            match ext.as_str() {
+                "csv" | "tsv" | "txt" | "xlsx" | "xls" | "xlsb" | "xlsm" | "ods" => {
+                    let focused_import = self.focused.filter(|id| {
+                        matches!(self.docs.get(id).map(|d| &d.kind), Some(DocKind::Import(_)))
+                    });
+                    let id = match focused_import {
+                        Some(id) => id,
+                        None => {
+                            let connection = self.current_connection();
+                            self.add_doc(connection, DocKind::Import(Default::default()))
+                        }
+                    };
+                    if let Some(DocKind::Import(w)) = self.docs.get_mut(&id).map(|d| &mut d.kind) {
+                        w.load(path);
+                    }
+                }
+                _ => match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        let title = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let connection = self.current_connection();
+                        self.add_doc(connection, DocKind::Sql(SqlWindow::new(title, text)));
+                    }
+                    Err(e) => self.log(format!("Could not open {}: {e}", path.display())),
+                },
+            }
+        }
+    }
+
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         let close_requested = ctx.input(|i| i.viewport().close_requested());
         if close_requested && !self.quit_confirmed && self.conns.any_pending_tx() {
@@ -1328,6 +1381,7 @@ impl eframe::App for OruiApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.pump_events();
+        self.handle_dropped_files(&ctx);
         self.handle_close_request(&ctx);
 
         let modal_open = self.connect_dialog.open
@@ -1515,6 +1569,24 @@ impl OruiApp {
         s.query = query.to_owned();
         let effects = s.search();
         self.apply(Some(id), effects);
+    }
+
+    pub fn test_import(&mut self, path: std::path::PathBuf, table: &str) {
+        let connection = self.current_connection();
+        let id = self.add_doc(connection, DocKind::Import(Default::default()));
+        let Some(DocKind::Import(w)) = self.docs.get_mut(&id).map(|d| &mut d.kind) else {
+            unreachable!()
+        };
+        w.load(path);
+        let effects = w.test_new_table(table, true);
+        self.apply(Some(id), effects);
+    }
+
+    pub fn test_import_message(&self) -> Option<(bool, String)> {
+        match &self.docs.get(&self.focused?)?.kind {
+            DocKind::Import(w) => w.test_message(),
+            _ => None,
+        }
     }
 
     pub fn test_command(&mut self, command: Command) {

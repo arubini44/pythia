@@ -423,3 +423,59 @@ fn completion_popup() {
         );
     }
 }
+
+/// Imports a CSV with a decimal comma, European dates and NULLs into a new
+/// table and checks the converted values in the database.
+#[test]
+fn import_csv() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("orui-import-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("orders 2024.csv");
+    std::fs::write(&path, "Order id;Customer;Amount;Order date\n1;Acme;1.234,50;31.12.2024\n2;;7;01.01.2025\n3;Globex;-0,5;15.06.2024\n").unwrap();
+
+    let mut h = harness(true);
+    h.state_mut()
+        .test_connect(profile.clone(), password.clone());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "begin execute immediate 'drop table orui_import_t purge'; exception when others then null; end;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+
+    h.state_mut().test_import(path, "orui_import_t");
+    wait_until(&mut h, "import", |app| !app.test_focused_busy());
+    let message = h.state().test_import_message();
+    assert!(
+        matches!(&message, Some((false, m)) if m.starts_with("Imported 3 rows")),
+        "{message:?}"
+    );
+    save(&mut h, "11-import-dark");
+
+    let (cred, db) = std::env::var("ORUI_TEST_DB")
+        .unwrap()
+        .rsplit_once('@')
+        .map(|(c, d)| (c.to_owned(), d.to_owned()))
+        .unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let conn = orui_db::oracle::Connection::connect(user, pw, &db).unwrap();
+    let rows: Vec<(i64, Option<String>, f64, String)> = conn
+        .query_as("select order_id, customer, amount, to_char(order_date, 'YYYY-MM-DD') from orui_import_t order by order_id", &[])
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (1, Some("Acme".into()), 1234.5, "2024-12-31".into()),
+            (2, None, 7.0, "2025-01-01".into()),
+            (3, Some("Globex".into()), -0.5, "2024-06-15".into()),
+        ]
+    );
+    conn.execute("drop table orui_import_t purge", &[]).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}

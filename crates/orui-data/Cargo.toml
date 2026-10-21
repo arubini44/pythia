@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+calamine = "0.37"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 csv = "1"
 orui-db.workspace = true
 rust_xlsxwriter = "0.101"
