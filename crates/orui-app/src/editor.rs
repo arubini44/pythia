@@ -273,6 +273,54 @@ impl Editor {
     }
 }
 
+/// The dotted path ending with the word at `offset`, e.g. `l_rec.name` when
+/// hovering `name` (or `l_rec` when hovering `l_rec`), with its byte range.
+pub fn path_at(text: &str, offset: usize) -> Option<(Range<usize>, &str)> {
+    let word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '#');
+    let offset = offset.min(text.len());
+    if !text.is_char_boundary(offset) {
+        return None;
+    }
+    let end = text[offset..]
+        .find(|c: char| !word(c))
+        .map_or(text.len(), |i| offset + i);
+    // Back over the word and any `name.` / `name(1).` before it.
+    let mut start = text[..offset]
+        .rfind(|c: char| !word(c))
+        .map_or(0, |i| i + 1);
+    loop {
+        let before = &text[..start];
+        let Some(head) = before.strip_suffix('.') else {
+            break;
+        };
+        let head = head.trim_end_matches(|c: char| c.is_ascii_digit() || c == '(' || c == ')');
+        let begin = head.rfind(|c: char| !word(c)).map_or(0, |i| i + 1);
+        if begin == head.len() {
+            break;
+        }
+        start = begin;
+    }
+    (start < end).then(|| (start..end, &text[start..end]))
+}
+
+/// Answers a hover request with the debugger's value of the path under the
+/// mouse, if stopped in `unit`. Returns whether it did.
+pub fn debug_hover(
+    editor: &mut Editor,
+    offset: usize,
+    debug: &orui_debugger::ui::DebugSession,
+    unit: &orui_debugger::Unit,
+) -> bool {
+    let Some((range, path)) = path_at(editor.text(), offset) else {
+        return false;
+    };
+    let Some((title, body)) = debug.hover(unit, path) else {
+        return false;
+    };
+    editor.inner().show_hover(range, title, body);
+    true
+}
+
 /// Byte offset of the start of a 1-based line (end of text if out of range).
 pub fn line_start(text: &str, line: usize) -> usize {
     if line <= 1 {
@@ -286,6 +334,17 @@ pub fn line_start(text: &str, line: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_under_the_mouse() {
+        let text = "x := l_rec.items(2).name + l_total;";
+        let at = |word: &str| path_at(text, text.find(word).unwrap() + 1).map(|(_, p)| p);
+        assert_eq!(at("name"), Some("l_rec.items(2).name"));
+        assert_eq!(at("items"), Some("l_rec.items"));
+        assert_eq!(at("l_rec"), Some("l_rec"));
+        assert_eq!(at("l_total"), Some("l_total"));
+        assert_eq!(path_at(text, text.find(":=").unwrap()), None);
+    }
 
     #[test]
     fn lines() {

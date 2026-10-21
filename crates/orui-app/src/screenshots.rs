@@ -535,13 +535,30 @@ fn debugger_session() {
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
     let unit = Unit::new("ORUI", "DEMO_PKG", UnitType::PackageBody);
-    // Line 4 of the body: the UPDATE inside raise_salary.
+    // Line 4 of the body: the UPDATE inside raise_salary. It only stops for
+    // employee 1 (the condition skips the first call).
     h.state_mut().test_debug_setup(&host, unit.clone(), 4);
+    let bp = orui_debugger::Breakpoint {
+        unit: unit.clone(),
+        line: 4,
+    };
+    {
+        let debug = h.state_mut().test_debug_mut();
+        debug.set_options(
+            &bp,
+            orui_debugger::BreakpointOptions {
+                condition: Some("p_employee_id = 1".into()),
+                hit_count: None,
+            },
+        );
+        debug.add_watch("p_percent");
+        debug.add_watch("p_employee_id * 2");
+    }
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "orui@FREEPDB1".into(),
-        text:
-            "begin\n  demo_pkg.raise_salary(p_employee_id => 1, p_percent => 0);\n  rollback;\nend;"
-                .into(),
+        text: "begin\n  demo_pkg.raise_salary(p_employee_id => 2, p_percent => 0);\n  \
+               demo_pkg.raise_salary(p_employee_id => 1, p_percent => 0);\n  rollback;\nend;"
+            .into(),
         run: false,
     });
     h.run_steps(2);
@@ -561,8 +578,50 @@ fn debugger_session() {
     assert!(
         vars.iter()
             .any(|v| v.eq_ignore_ascii_case("p_employee_id=1")),
-        "{vars:?}"
+        "condition skipped employee 2: {vars:?}"
     );
+    let debug = h.state().test_debug();
+    assert_eq!(debug.hits.get(&bp), Some(&1));
+    let watches: Vec<(String, Result<Option<String>, String>)> = debug
+        .watch_values
+        .iter()
+        .map(|w| (w.expression.clone(), w.value.clone().map(|v| v.value)))
+        .collect();
+    assert_eq!(watches[0], ("p_percent".into(), Ok(Some("0".into()))));
+    assert!(
+        watches[1].1.is_err(),
+        "expressions aren't evaluated: {watches:?}"
+    );
+    // Hovering a parameter in the stopped package body shows its value
+    // (once the body's source has loaded).
+    let needle = "where employee_id = p_employee_id";
+    let start = Instant::now();
+    let offset = loop {
+        let program = h.state_mut().test_program();
+        let editor = program.active_editor().expect("package body editor");
+        if let Some(at) = editor.text().find(needle) {
+            break at + "where employee_id = ".len() + 3;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "raise_salary body not shown: {:?}",
+            editor.text()
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    };
+    let debug = h.state().test_debug();
+    assert_eq!(
+        debug.hover(&unit, "P_EMPLOYEE_ID").map(|(_, v)| v),
+        Some("1".into())
+    );
+    // The app borrows both; take the session out for the call.
+    let mut session = orui_debugger::ui::DebugSession::default();
+    std::mem::swap(&mut session, h.state_mut().test_debug_mut());
+    let program = h.state_mut().test_program();
+    let editor = program.active_editor().unwrap();
+    assert!(crate::editor::debug_hover(editor, offset, &session, &unit));
+    std::mem::swap(&mut session, h.state_mut().test_debug_mut());
     h.run_steps(6);
     save(&mut h, "12-debugger-dark");
 

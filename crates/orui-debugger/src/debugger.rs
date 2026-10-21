@@ -11,9 +11,11 @@ use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
+use crate::condition;
 use crate::jdwp::{self, Event, Jdwp, JdwpError, Value};
 use crate::types::{
-    Breakpoint, DebugCommand, DebugEvent, Frame, Location, StopReason, Unit, Variable,
+    Breakpoint, BreakpointOptions, DebugCommand, DebugEvent, Frame, Location, StopReason, Unit,
+    UnitType, Variable, Watch,
 };
 
 /// Handle to a debugger worker.
@@ -144,6 +146,20 @@ struct Session {
     /// Classes whose line tables were cached: (class, method) → lines.
     lines: HashMap<(u64, u64), Vec<(u64, i32)>>,
     method_names: HashMap<(u64, u64), String>,
+    /// Conditions and hit counts, and hits so far (condition true).
+    options: HashMap<Breakpoint, BreakpointOptions>,
+    hits: HashMap<Breakpoint, u32>,
+    watches: Vec<String>,
+    /// The JDWP request for exception events, when breaking on exceptions.
+    exception_request: Option<i32>,
+    /// The innermost frame while suspended, for evaluating watches.
+    top: Option<TopFrame>,
+}
+
+/// The stopped thread's innermost frame and its variables.
+struct TopFrame {
+    class: u64,
+    variables: Vec<Variable>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -165,6 +181,11 @@ impl Session {
             stopped: None,
             lines: HashMap::new(),
             method_names: HashMap::new(),
+            options: HashMap::new(),
+            hits: HashMap::new(),
+            watches: Vec::new(),
+            exception_request: None,
+            top: None,
         };
         for (_, id, signature) in session.jdwp.all_classes()? {
             if let Some(unit) = Unit::from_class_signature(&signature) {
@@ -197,6 +218,40 @@ impl Session {
                     }
                     false
                 }
+                DebugCommand::SetBreakpointOptions(bp, options) => {
+                    if options.is_empty() {
+                        self.options.remove(&bp);
+                    } else {
+                        self.options.insert(bp, options);
+                    }
+                    false
+                }
+                DebugCommand::SetWatches(watches) => {
+                    self.watches = watches;
+                    if self.top.is_some() {
+                        let values = self.evaluate_watches();
+                        events.send(DebugEvent::Watches(values));
+                    }
+                    false
+                }
+                DebugCommand::BreakOnException(on) => {
+                    match (on, self.exception_request) {
+                        (true, None) => {
+                            let modifier = self.jdwp.modifier_exception(true, true);
+                            self.exception_request = Some(self.jdwp.set_event(
+                                jdwp::kind::EXCEPTION,
+                                jdwp::suspend::ALL,
+                                vec![modifier],
+                            )?);
+                        }
+                        (false, Some(request)) => {
+                            self.exception_request = None;
+                            self.jdwp.clear_event(jdwp::kind::EXCEPTION, request)?;
+                        }
+                        _ => {}
+                    }
+                    false
+                }
                 DebugCommand::Resume => self.stopped.is_some(),
                 DebugCommand::StepOver | DebugCommand::StepInto | DebugCommand::StepOut => {
                     let Some(thread) = self.stopped else {
@@ -219,7 +274,7 @@ impl Session {
                     if self.stopped.is_none() {
                         self.jdwp.suspend_vm()?;
                         if let Some(thread) = self.jdwp.all_threads()?.first().copied() {
-                            self.suspended(thread, StopReason::Pause, events)?;
+                            self.suspended(thread, StopReason::Pause, None, events)?;
                         }
                     }
                     false
@@ -238,6 +293,7 @@ impl Session {
 
     fn resume(&mut self, events: &Events) -> Result<(), JdwpError> {
         self.stopped = None;
+        self.top = None;
         self.jdwp.resume_vm()?;
         events.send(DebugEvent::Resumed);
         Ok(())
@@ -277,8 +333,10 @@ impl Session {
                 continue;
             };
             let mut flow = Flow::Continue;
-            // A breakpoint and a step can report the same stop; handle it once.
-            let mut stopped_here = false;
+            // A breakpoint and a step can report the same stop; handle it
+            // once. A step always stops; breakpoints only when their
+            // condition and hit count say so.
+            let mut stop: Option<(u64, StopReason, Option<String>)> = None;
             for event in batch {
                 debug!(?event, "debug event");
                 match event {
@@ -299,20 +357,28 @@ impl Session {
                             }
                         }
                     }
-                    Event::Breakpoint { thread, .. } | Event::SingleStep { thread, .. }
-                        if !stopped_here =>
-                    {
-                        let reason = if matches!(event, Event::Breakpoint { .. }) {
-                            StopReason::Breakpoint
-                        } else {
-                            StopReason::Step
-                        };
-                        stopped_here = true;
-                        self.suspended(thread, reason, events)?;
-                        flow = Flow::Stop;
+                    Event::SingleStep { thread, .. } => {
+                        stop = Some((thread, StopReason::Step, None));
+                    }
+                    Event::Breakpoint {
+                        request, thread, ..
+                    } if stop.is_none() => {
+                        if self.breakpoint_stops(request, thread, events)? {
+                            stop = Some((thread, StopReason::Breakpoint, None));
+                        }
+                    }
+                    Event::Exception {
+                        thread, exception, ..
+                    } if stop.is_none() => {
+                        let text = self.exception_text(exception);
+                        stop = Some((thread, StopReason::Exception, Some(text)));
                     }
                     _ => {}
                 }
+            }
+            if let Some((thread, reason, exception)) = stop {
+                self.suspended(thread, reason, exception, events)?;
+                flow = Flow::Stop;
             }
             if flow == Flow::Continue && policy != jdwp::suspend::NONE {
                 self.jdwp.resume_vm()?;
@@ -418,6 +484,7 @@ impl Session {
         &mut self,
         thread: u64,
         reason: StopReason,
+        exception: Option<String>,
         events: &Events,
     ) -> Result<(), JdwpError> {
         self.stopped = Some(thread);
@@ -436,6 +503,11 @@ impl Session {
             Some((frame, loc)) => self.frame_variables(thread, *frame, loc)?,
             None => Vec::new(),
         };
+        self.top = frames.first().map(|(_, loc)| TopFrame {
+            class: loc.class,
+            variables: variables.clone(),
+        });
+        let watches = self.evaluate_watches();
         let location = stack
             .first()
             .map(|f| f.location.clone())
@@ -448,8 +520,201 @@ impl Session {
             location,
             stack,
             variables,
+            watches,
+            exception,
         });
         Ok(())
+    }
+
+    /// Whether a breakpoint event should stop: counts the hit when the
+    /// condition holds and compares with the hit count. A condition that
+    /// can't be evaluated stops (and says why).
+    fn breakpoint_stops(
+        &mut self,
+        request: i32,
+        thread: u64,
+        events: &Events,
+    ) -> Result<bool, JdwpError> {
+        let Some(bp) = self
+            .bound
+            .iter()
+            .find(|(_, r)| **r == request)
+            .map(|(b, _)| b.clone())
+        else {
+            return Ok(true);
+        };
+        let options = self.options.get(&bp).cloned().unwrap_or_default();
+        if let Some(condition) = &options.condition {
+            let frames = self.jdwp.frames(thread)?;
+            let Some((frame, loc)) = frames.first() else {
+                return Ok(true);
+            };
+            let variables = self.frame_variables(thread, *frame, loc)?;
+            let class = loc.class;
+            let result = condition::evaluate(condition, &mut |path| {
+                self.resolve(path, &variables, Some(class)).map(|v| v.value)
+            });
+            match result {
+                Ok(true) => {}
+                Ok(false) => return Ok(false),
+                Err(e) => {
+                    events.send(DebugEvent::Error(format!(
+                        "Breakpoint condition at {} line {}: {e}",
+                        bp.unit, bp.line
+                    )));
+                    return Ok(true);
+                }
+            }
+        }
+        let hits = self.hits.entry(bp.clone()).or_default();
+        *hits += 1;
+        let hits = *hits;
+        events.send(DebugEvent::BreakpointHit {
+            breakpoint: bp,
+            hits,
+        });
+        Ok(hits >= options.hit_count.unwrap_or(1))
+    }
+
+    fn evaluate_watches(&mut self) -> Vec<Watch> {
+        let Some(top) = self.top.take() else {
+            return Vec::new();
+        };
+        let watches = self.watches.clone();
+        let out = watches
+            .into_iter()
+            .map(|expression| {
+                let value = self.resolve(&expression, &top.variables, Some(top.class));
+                Watch { expression, value }
+            })
+            .collect();
+        self.top = Some(top);
+        out
+    }
+
+    /// Resolves a watch path: a variable of the innermost frame, a global of
+    /// its package, or `package.variable`, followed by fields and elements.
+    fn resolve(
+        &mut self,
+        expression: &str,
+        variables: &[Variable],
+        class: Option<u64>,
+    ) -> Result<Variable, String> {
+        let path = condition::parse_path(expression)
+            .ok_or_else(|| format!("not a variable: {}", expression.trim()))?;
+        let (first, rest) = path.split_first().expect("non-empty path");
+        if let Some(var) = variables
+            .iter()
+            .find(|v| v.name.eq_ignore_ascii_case(first))
+        {
+            return condition::descend(var, rest).cloned();
+        }
+        // Globals of the unit we're in (package body and spec).
+        let current = class.and_then(|c| {
+            self.classes
+                .iter()
+                .find(|(_, id)| **id == c)
+                .map(|(u, _)| u.clone())
+        });
+        if let Some(unit) = &current {
+            for class in self.package_classes(&unit.owner, &unit.name) {
+                if let Some(var) = self
+                    .static_variable(class, first)
+                    .map_err(|e| e.to_string())?
+                {
+                    return condition::descend(&var, rest).cloned();
+                }
+            }
+        }
+        // `package.variable`, preferring the current unit's schema.
+        if let Some((name, rest)) = rest.split_first() {
+            let owner = current
+                .as_ref()
+                .map(|u| u.owner.clone())
+                .unwrap_or_default();
+            let mut classes = self.package_classes(&owner, first);
+            if classes.is_empty() {
+                classes = self.package_classes("", first);
+            }
+            if classes.is_empty() {
+                return Err(format!(
+                    "{} is unknown (or its package isn't loaded yet)",
+                    expression.trim()
+                ));
+            }
+            for class in classes {
+                if let Some(var) = self
+                    .static_variable(class, name)
+                    .map_err(|e| e.to_string())?
+                {
+                    return condition::descend(&var, rest).cloned();
+                }
+            }
+            return Err(format!(
+                "{} has no {}",
+                first.to_lowercase(),
+                name.to_lowercase()
+            ));
+        }
+        Err(format!("{} is unknown here", expression.trim()))
+    }
+
+    /// Loaded classes of a package (body first, then spec), or of the unit
+    /// itself for other kinds. An empty `owner` matches any schema.
+    fn package_classes(&self, owner: &str, name: &str) -> Vec<u64> {
+        let mut found: Vec<(&Unit, u64)> = self
+            .classes
+            .iter()
+            .filter(|(u, _)| {
+                u.name.eq_ignore_ascii_case(name)
+                    && (owner.is_empty() || u.owner == owner)
+                    && u.unit_type != UnitType::Block
+            })
+            .map(|(u, c)| (u, *c))
+            .collect();
+        found.sort_by_key(|(u, _)| match u.unit_type {
+            UnitType::PackageBody => 0,
+            UnitType::Package => 1,
+            _ => 2,
+        });
+        found.into_iter().map(|(_, c)| c).collect()
+    }
+
+    /// A static field (package global) of a class, by name.
+    fn static_variable(&mut self, class: u64, name: &str) -> Result<Option<Variable>, JdwpError> {
+        let fields = match self.jdwp.fields(class) {
+            Ok(f) => f,
+            Err(JdwpError::Reply { .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let Some(field) = fields
+            .into_iter()
+            .find(|f| f.modifiers & STATIC != 0 && f.name.eq_ignore_ascii_case(name))
+        else {
+            return Ok(None);
+        };
+        let value = match self.jdwp.static_values(class, &[field.id]) {
+            Ok(mut v) => v.pop(),
+            Err(JdwpError::Reply { .. }) => None,
+            Err(e) => return Err(e),
+        };
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        self.variable(field.name, &field.signature, &value, 0)
+            .map(Some)
+    }
+
+    /// A readable description of a raised exception object.
+    fn exception_text(&mut self, exception: u64) -> String {
+        let value = Value::Object {
+            tag: b'L',
+            id: exception,
+        };
+        match self.variable(String::new(), "", &value, 0) {
+            Ok(var) => describe_exception(&var),
+            Err(e) => format!("exception ({e})"),
+        }
     }
 
     fn frame_variables(
@@ -596,6 +861,69 @@ impl Session {
     }
 }
 
+/// `ACC_STATIC` in JDWP field modifiers.
+const STATIC: i32 = 0x0008;
+
+/// Builds a one-line description from an exception object. Oracle names
+/// the class of `ORA-n` exceptions `EXCEPTION_ORA_n`.
+fn describe_exception(var: &Variable) -> String {
+    if let Some(code) = var
+        .type_name
+        .strip_prefix("EXCEPTION_ORA_")
+        .and_then(|c| c.parse::<u32>().ok())
+    {
+        return match predefined_exception(code) {
+            Some(name) => format!("ORA-{code:05} ({name})"),
+            None => format!("ORA-{code:05}"),
+        };
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = &var.value {
+        parts.push(v.clone());
+    }
+    for child in &var.children {
+        if let Some(v) = &child.value
+            && !v.is_empty()
+        {
+            parts.push(format!("{}={v}", child.name.to_lowercase()));
+        }
+    }
+    if parts.is_empty() {
+        var.type_name.clone()
+    } else {
+        format!("{} {}", var.type_name, parts.join(", "))
+            .trim()
+            .to_owned()
+    }
+}
+
+/// Names of PL/SQL's predefined exceptions.
+fn predefined_exception(code: u32) -> Option<&'static str> {
+    Some(match code {
+        1 => "dup_val_on_index",
+        51 => "timeout_on_resource",
+        1001 => "invalid_cursor",
+        1012 => "not_logged_on",
+        1017 => "login_denied",
+        1403 => "no_data_found",
+        1422 => "too_many_rows",
+        1476 => "zero_divide",
+        1722 => "invalid_number",
+        6500 => "storage_error",
+        6501 => "program_error",
+        6502 => "value_error",
+        6504 => "rowtype_mismatch",
+        6511 => "cursor_already_open",
+        6530 => "access_into_null",
+        6531 => "collection_is_null",
+        6532 => "subscript_outside_limit",
+        6533 => "subscript_beyond_count",
+        6592 => "case_not_found",
+        30625 => "self_is_null",
+        _ => return None,
+    })
+}
+
 /// Nesting limit for records/collections (each PL/SQL level is ~2 objects).
 const MAX_DEPTH: usize = 8;
 /// Collection elements read per variable.
@@ -631,5 +959,24 @@ mod tests {
             "T_ARR"
         );
         assert_eq!(type_name(""), "");
+    }
+
+    #[test]
+    fn exception_descriptions() {
+        let exception = |type_name: &str| Variable {
+            name: String::new(),
+            type_name: type_name.into(),
+            value: None,
+            children: Vec::new(),
+        };
+        assert_eq!(
+            describe_exception(&exception("EXCEPTION_ORA_1476")),
+            "ORA-01476 (zero_divide)"
+        );
+        assert_eq!(
+            describe_exception(&exception("EXCEPTION_ORA_20001")),
+            "ORA-20001"
+        );
+        assert_eq!(describe_exception(&exception("E_MINE")), "E_MINE");
     }
 }

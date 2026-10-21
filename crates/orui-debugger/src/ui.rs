@@ -1,5 +1,5 @@
 //! Debugger UI: a session driver the app hosts, plus an egui panel with
-//! toolbar, call stack, variables and breakpoints.
+//! toolbar, call stack, variables, watches and breakpoints.
 //!
 //! Keys (chosen not to clash with orui's PL/SQL Developer keymap, where F5 is
 //! explain plan, F8 execute and F10/Shift+F10 commit/rollback):
@@ -19,8 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, RichText, Ui};
 
 use crate::Debugger;
+use crate::condition;
 use crate::types::{
-    Breakpoint, DebugCommand, DebugEvent, Frame, Location, StopReason, Unit, Variable,
+    Breakpoint, BreakpointOptions, DebugCommand, DebugEvent, Frame, Location, StopReason, Unit,
+    UnitType, Variable, Watch,
 };
 
 pub const CONTINUE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F9);
@@ -65,13 +67,30 @@ pub enum State {
 pub struct DebugSession {
     debugger: Option<Debugger>,
     pub state: State,
-    /// Breakpoints, kept across sessions.
+    /// Breakpoints, kept across sessions (including disabled ones).
     pub breakpoints: BTreeSet<Breakpoint>,
+    /// Breakpoints kept in the list but not set.
+    pub disabled: BTreeSet<Breakpoint>,
+    /// Conditions and hit counts.
+    pub options: BTreeMap<Breakpoint, BreakpointOptions>,
+    /// Hits (condition true) in the current session.
+    pub hits: BTreeMap<Breakpoint, u32>,
     /// Line a breakpoint actually bound to (or an error), per breakpoint.
     bound: BTreeMap<Breakpoint, Result<u32, String>>,
     pub stack: Vec<Frame>,
     pub variables: Vec<Variable>,
+    /// Watched expressions, kept across sessions, and their last values.
+    pub watches: Vec<String>,
+    pub watch_values: Vec<Watch>,
+    pub break_on_exception: bool,
+    /// The exception execution stopped at.
+    pub exception: Option<String>,
     pub log: Vec<String>,
+    /// Text of the "add watch" field.
+    new_watch: String,
+    /// The breakpoint whose condition is being edited, with the draft
+    /// condition and hit count.
+    editing: Option<(Breakpoint, String, u32)>,
 }
 
 impl DebugSession {
@@ -97,12 +116,27 @@ impl DebugSession {
         self.stop();
         self.stack.clear();
         self.variables.clear();
+        self.watch_values.clear();
+        self.exception = None;
         self.bound.clear();
+        self.hits.clear();
         self.log.clear();
         match Debugger::listen("0.0.0.0:0", notify) {
             Ok(debugger) => {
-                for bp in &self.breakpoints {
+                for bp in self.breakpoints.difference(&self.disabled) {
                     debugger.send(DebugCommand::SetBreakpoint(bp.clone()));
+                }
+                for (bp, options) in &self.options {
+                    debugger.send(DebugCommand::SetBreakpointOptions(
+                        bp.clone(),
+                        options.clone(),
+                    ));
+                }
+                if !self.watches.is_empty() {
+                    debugger.send(DebugCommand::SetWatches(self.watches.clone()));
+                }
+                if self.break_on_exception {
+                    debugger.send(DebugCommand::BreakOnException(true));
                 }
                 let port = debugger.port();
                 self.debugger = Some(debugger);
@@ -140,15 +174,21 @@ impl DebugSession {
                     | DebugCommand::StepOut
             ) {
                 self.state = State::Running;
+                self.exception = None;
             }
             d.send(command);
         }
     }
 
+    /// Adds a breakpoint, enables a disabled one, or removes it.
     pub fn toggle_breakpoint(&mut self, unit: Unit, line: u32) {
         let bp = Breakpoint { unit, line };
-        if self.breakpoints.remove(&bp) {
+        if self.disabled.contains(&bp) {
+            self.set_enabled(&bp, true);
+        } else if self.breakpoints.remove(&bp) {
             self.bound.remove(&bp);
+            self.hits.remove(&bp);
+            self.options.remove(&bp);
             self.command(DebugCommand::ClearBreakpoint(bp));
         } else {
             self.breakpoints.insert(bp.clone());
@@ -156,13 +196,68 @@ impl DebugSession {
         }
     }
 
-    /// Breakpoint lines and the current execution line for a unit, for
-    /// editor gutter markers.
+    /// Enables or disables a breakpoint without forgetting it.
+    pub fn set_enabled(&mut self, bp: &Breakpoint, enabled: bool) {
+        if !self.breakpoints.contains(bp) {
+            return;
+        }
+        if enabled {
+            if self.disabled.remove(bp) {
+                self.command(DebugCommand::SetBreakpoint(bp.clone()));
+                if let Some(options) = self.options.get(bp).cloned() {
+                    self.command(DebugCommand::SetBreakpointOptions(bp.clone(), options));
+                }
+            }
+        } else if self.disabled.insert(bp.clone()) {
+            self.bound.remove(bp);
+            self.command(DebugCommand::ClearBreakpoint(bp.clone()));
+        }
+    }
+
+    /// Sets a breakpoint's condition and hit count.
+    pub fn set_options(&mut self, bp: &Breakpoint, options: BreakpointOptions) {
+        if options.is_empty() {
+            self.options.remove(bp);
+        } else {
+            self.options.insert(bp.clone(), options.clone());
+        }
+        self.command(DebugCommand::SetBreakpointOptions(bp.clone(), options));
+    }
+
+    pub fn add_watch(&mut self, expression: &str) {
+        let expression = expression.trim();
+        if expression.is_empty()
+            || self
+                .watches
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case(expression))
+        {
+            return;
+        }
+        self.watches.push(expression.to_owned());
+        self.command(DebugCommand::SetWatches(self.watches.clone()));
+    }
+
+    pub fn remove_watch(&mut self, index: usize) {
+        if index < self.watches.len() {
+            let removed = self.watches.remove(index);
+            self.watch_values.retain(|w| w.expression != removed);
+            self.command(DebugCommand::SetWatches(self.watches.clone()));
+        }
+    }
+
+    pub fn set_break_on_exception(&mut self, on: bool) {
+        self.break_on_exception = on;
+        self.command(DebugCommand::BreakOnException(on));
+    }
+
+    /// Enabled breakpoint lines and the current execution line for a unit,
+    /// for editor gutter markers.
     pub fn markers(&self, unit: &Unit) -> (Vec<u32>, Option<u32>) {
         let lines = self
             .breakpoints
             .iter()
-            .filter(|b| &b.unit == unit)
+            .filter(|b| &b.unit == unit && !self.disabled.contains(b))
             .map(|b| b.line)
             .collect();
         let current = match (&self.state, self.stack.first()) {
@@ -170,6 +265,31 @@ impl DebugSession {
             _ => None,
         };
         (lines, current)
+    }
+
+    /// The value of `expression` (a variable, `record.field`, …) while
+    /// stopped in `unit`, as hover text. Anonymous blocks match any block.
+    pub fn hover(&self, unit: &Unit, expression: &str) -> Option<(String, String)> {
+        if !self.is_suspended() {
+            return None;
+        }
+        let top = &self.stack.first()?.location.unit;
+        let same =
+            top == unit || (top.unit_type == UnitType::Block && unit.unit_type == UnitType::Block);
+        if !same {
+            return None;
+        }
+        let path = condition::parse_path(expression)?;
+        let var = condition::lookup(&self.variables, &path).or_else(|| {
+            self.watch_values
+                .iter()
+                .find(|w| condition::parse_path(&w.expression).as_ref() == Some(&path))
+                .and_then(|w| w.value.as_ref().ok())
+        })?;
+        let title = format!("{} {}", expression.trim(), var.type_name)
+            .trim()
+            .to_owned();
+        Some((title, describe(var)))
     }
 
     /// Drains debugger events; call every frame.
@@ -206,17 +326,28 @@ impl DebugSession {
                     }
                     self.bound.insert(breakpoint, entry);
                 }
+                DebugEvent::BreakpointHit { breakpoint, hits } => {
+                    self.hits.insert(breakpoint, hits);
+                }
                 DebugEvent::Suspended {
                     reason,
                     location,
                     stack,
                     variables,
+                    watches,
+                    exception,
                 } => {
                     self.state = State::Suspended { reason };
                     self.stack = stack;
                     self.variables = variables;
+                    self.watch_values = watches;
+                    if let Some(e) = &exception {
+                        self.log.push(format!("Exception: {e}"));
+                    }
+                    self.exception = exception;
                     actions.push(DebugAction::ShowLocation(location));
                 }
+                DebugEvent::Watches(values) => self.watch_values = values,
                 DebugEvent::Resumed => {
                     if !self.is_suspended() {
                         self.state = State::Running;
@@ -226,6 +357,7 @@ impl DebugSession {
                     self.state = State::Finished;
                     self.debugger = None;
                     self.stack.clear();
+                    self.exception = None;
                     self.log.push("Debug session ended".into());
                     actions.push(DebugAction::Finished);
                 }
@@ -258,6 +390,54 @@ impl DebugSession {
     /// The debugger panel. Returns actions (e.g. jumping to a stack frame).
     pub fn ui(&mut self, ui: &mut Ui) -> Vec<DebugAction> {
         let mut actions = Vec::new();
+        self.toolbar(ui);
+        ui.separator();
+        ui.columns(4, |cols| {
+            cols[0].strong("Call stack");
+            egui::ScrollArea::vertical()
+                .id_salt("dbg-stack")
+                .show(&mut cols[0], |ui| {
+                    for (i, frame) in self.stack.iter().enumerate() {
+                        let text = RichText::new(frame_label(frame)).monospace();
+                        if ui.selectable_label(i == 0, text).clicked() {
+                            actions.push(DebugAction::ShowLocation(frame.location.clone()));
+                        }
+                    }
+                    if self.stack.is_empty() {
+                        ui.weak("—");
+                    }
+                    if !self.log.is_empty() {
+                        ui.add_space(6.0);
+                        for line in self.log.iter().rev().take(5) {
+                            ui.add(egui::Label::new(RichText::new(line).small().weak()).truncate())
+                                .on_hover_text(line);
+                        }
+                    }
+                });
+
+            cols[1].strong("Variables");
+            let mut watch = None;
+            egui::ScrollArea::vertical()
+                .id_salt("dbg-vars")
+                .show(&mut cols[1], |ui| {
+                    for (i, var) in self.variables.iter().enumerate() {
+                        variable_ui(ui, var, "", i, &mut watch);
+                    }
+                    if self.variables.is_empty() {
+                        ui.weak("—");
+                    }
+                });
+            if let Some(expression) = watch {
+                self.add_watch(&expression);
+            }
+
+            self.watches_ui(&mut cols[2]);
+            self.breakpoints_ui(&mut cols[3]);
+        });
+        actions
+    }
+
+    fn toolbar(&mut self, ui: &mut Ui) {
         let suspended = self.is_suspended();
         let active = self.is_active();
         ui.horizontal(|ui| {
@@ -287,6 +467,15 @@ impl DebugSession {
                 self.stop();
             }
             ui.separator();
+            let mut on = self.break_on_exception;
+            if ui
+                .checkbox(&mut on, "Break on exceptions")
+                .on_hover_text("Stop where an exception is raised, handled or not")
+                .changed()
+            {
+                self.set_break_on_exception(on);
+            }
+            ui.separator();
             let (text, color) = match &self.state {
                 State::Idle => ("Not debugging".to_owned(), ui.visuals().weak_text_color()),
                 State::Waiting => (
@@ -295,97 +484,247 @@ impl DebugSession {
                 ),
                 State::Running => ("Running".to_owned(), Color32::from_rgb(0x3f, 0xb9, 0x50)),
                 State::Suspended { reason } => {
-                    let why = match reason {
-                        StopReason::Breakpoint => "breakpoint",
-                        StopReason::Step => "step",
-                        StopReason::Pause => "pause",
-                    };
                     let at = self.stack.first().map(frame_label).unwrap_or_default();
-                    (
-                        format!("Suspended ({why}) at {at}"),
-                        ui.visuals().warn_fg_color,
-                    )
+                    let text = match reason {
+                        StopReason::Breakpoint => format!("Stopped at breakpoint, {at}"),
+                        StopReason::Step => format!("Stopped after step, {at}"),
+                        StopReason::Pause => format!("Paused at {at}"),
+                        StopReason::Exception => format!(
+                            "Exception at {at}: {}",
+                            self.exception.as_deref().unwrap_or("raised")
+                        ),
+                    };
+                    let color = if *reason == StopReason::Exception {
+                        ui.visuals().error_fg_color
+                    } else {
+                        ui.visuals().warn_fg_color
+                    };
+                    (text, color)
                 }
                 State::Finished => ("Finished".to_owned(), ui.visuals().weak_text_color()),
             };
-            ui.label(RichText::new(text).color(color));
+            ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
         });
-        ui.separator();
+    }
 
-        ui.columns(3, |cols| {
-            cols[0].strong("Call stack");
-            egui::ScrollArea::vertical()
-                .id_salt("dbg-stack")
-                .show(&mut cols[0], |ui| {
-                    for (i, frame) in self.stack.iter().enumerate() {
-                        let text = RichText::new(frame_label(frame)).monospace();
-                        if ui.selectable_label(i == 0, text).clicked() {
-                            actions.push(DebugAction::ShowLocation(frame.location.clone()));
+    fn watches_ui(&mut self, ui: &mut Ui) {
+        ui.strong("Watches");
+        let mut remove = None;
+        let stale = !self.is_suspended();
+        egui::ScrollArea::vertical()
+            .id_salt("dbg-watches")
+            .max_height((ui.available_height() - 28.0).max(40.0))
+            .show(ui, |ui| {
+                for (i, expression) in self.watches.iter().enumerate() {
+                    let value = self
+                        .watch_values
+                        .iter()
+                        .find(|w| &w.expression == expression);
+                    ui.horizontal(|ui| {
+                        if ui.small_button("×").on_hover_text("Remove watch").clicked() {
+                            remove = Some(i);
                         }
-                    }
-                    if self.stack.is_empty() {
-                        ui.weak("—");
-                    }
-                });
+                        match value.map(|w| &w.value) {
+                            Some(Ok(var)) if var.children.is_empty() => {
+                                ui.label(RichText::new(expression).monospace().strong());
+                                ui.label(value_text(ui, var, stale));
+                            }
+                            Some(Ok(var)) => {
+                                let mut named = var.clone();
+                                named.name = expression.clone();
+                                ui.vertical(|ui| {
+                                    let mut ignore = None;
+                                    variable_ui(ui, &named, "", 1000 + i, &mut ignore);
+                                });
+                            }
+                            Some(Err(e)) => {
+                                ui.label(RichText::new(expression).monospace().strong());
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(e).small().color(ui.visuals().warn_fg_color),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(e);
+                            }
+                            None => {
+                                ui.label(RichText::new(expression).monospace().strong());
+                                ui.weak("—");
+                            }
+                        }
+                    });
+                }
+                if self.watches.is_empty() {
+                    ui.weak("Right-click a variable or type an expression below");
+                }
+            });
+        if let Some(i) = remove {
+            self.remove_watch(i);
+        }
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.new_watch)
+                .hint_text("Add watch: l_rec.name, pkg.g_var")
+                .desired_width(f32::INFINITY),
+        );
+        if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            let expression = std::mem::take(&mut self.new_watch);
+            self.add_watch(&expression);
+            response.request_focus();
+        }
+    }
 
-            cols[1].strong("Variables");
-            egui::ScrollArea::vertical()
-                .id_salt("dbg-vars")
-                .show(&mut cols[1], |ui| {
-                    for (i, var) in self.variables.iter().enumerate() {
-                        variable_ui(ui, var, i);
-                    }
-                    if self.variables.is_empty() {
-                        ui.weak("—");
-                    }
-                });
-
-            cols[2].strong("Breakpoints");
-            egui::ScrollArea::vertical()
-                .id_salt("dbg-bps")
-                .show(&mut cols[2], |ui| {
-                    let mut remove = None;
-                    for bp in &self.breakpoints {
-                        ui.horizontal(|ui| {
+    fn breakpoints_ui(&mut self, ui: &mut Ui) {
+        ui.strong("Breakpoints");
+        let mut remove = None;
+        let mut enable = None;
+        let mut edit = None;
+        let mut apply = None;
+        egui::ScrollArea::vertical()
+            .id_salt("dbg-bps")
+            .show(ui, |ui| {
+                for bp in &self.breakpoints {
+                    let enabled = !self.disabled.contains(bp);
+                    ui.horizontal(|ui| {
+                        let mut on = enabled;
+                        if ui.checkbox(&mut on, "").on_hover_text("Enabled").changed() {
+                            enable = Some((bp.clone(), on));
+                        }
+                        let label = match self.bound.get(bp) {
+                            Some(Ok(line)) if *line != bp.line => {
+                                format!("{} : {} → {line}", unit_label(&bp.unit), bp.line)
+                            }
+                            _ => format!("{} : {}", unit_label(&bp.unit), bp.line),
+                        };
+                        let mut text = RichText::new(label).monospace();
+                        if !enabled {
+                            text = text.color(ui.visuals().weak_text_color());
+                        }
+                        let response = if let Some(Err(e)) = self.bound.get(bp) {
+                            ui.label(text.color(ui.visuals().warn_fg_color))
+                                .on_hover_text(e)
+                        } else {
+                            ui.label(text)
+                        };
+                        if let Some(hits) = self.hits.get(bp) {
+                            ui.weak(format!("{hits}×"))
+                                .on_hover_text("Hits in this session");
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("×").on_hover_text("Remove").clicked() {
                                 remove = Some(bp.clone());
                             }
-                            let label = match self.bound.get(bp) {
-                                Some(Ok(line)) if *line != bp.line => {
-                                    format!("{} : {} → {line}", unit_label(&bp.unit), bp.line)
-                                }
-                                _ => format!("{} : {}", unit_label(&bp.unit), bp.line),
-                            };
-                            let mut text = RichText::new(label).monospace();
-                            if let Some(Err(e)) = self.bound.get(bp) {
-                                text = text.color(ui.visuals().warn_fg_color);
-                                ui.label(text).on_hover_text(e);
-                            } else {
-                                ui.label(text);
+                            if ui
+                                .small_button("if…")
+                                .on_hover_text("Condition and hit count")
+                                .clicked()
+                            {
+                                edit = Some(bp.clone());
                             }
                         });
-                    }
-                    if let Some(bp) = remove {
-                        self.toggle_breakpoint(bp.unit, bp.line);
-                    }
-                    if self.breakpoints.is_empty() {
-                        ui.weak("Click the editor gutter or press Ctrl+B");
-                    }
-                    if !self.log.is_empty() {
-                        ui.separator();
-                        for line in self.log.iter().rev().take(6) {
-                            ui.weak(line);
+                        response.context_menu(|ui| {
+                            if ui.button("Condition…").clicked() {
+                                edit = Some(bp.clone());
+                                ui.close();
+                            }
+                            if ui
+                                .button(if enabled { "Disable" } else { "Enable" })
+                                .clicked()
+                            {
+                                enable = Some((bp.clone(), !enabled));
+                                ui.close();
+                            }
+                            if ui.button("Remove").clicked() {
+                                remove = Some(bp.clone());
+                                ui.close();
+                            }
+                        });
+                    });
+                    let editing = self.editing.as_mut().filter(|(b, ..)| b == bp);
+                    if let Some((_, condition, hit_count)) = editing {
+                        ui.indent(("bp-edit", bp.line, &bp.unit.name), |ui| {
+                            let r = ui.add(
+                                egui::TextEdit::singleline(condition)
+                                    .hint_text("Condition, e.g. l_total > 3")
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                            ui.horizontal(|ui| {
+                                ui.label("Stop from hit");
+                                ui.add(egui::DragValue::new(hit_count).range(0..=100_000))
+                                    .on_hover_text("0 or 1: every hit");
+                                if ui.button("Apply").clicked() || enter {
+                                    let condition = condition.trim();
+                                    apply = Some((
+                                        bp.clone(),
+                                        BreakpointOptions {
+                                            condition: (!condition.is_empty())
+                                                .then(|| condition.to_owned()),
+                                            hit_count: (*hit_count > 1).then_some(*hit_count),
+                                        },
+                                    ));
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    edit = Some(bp.clone());
+                                }
+                            });
+                        });
+                    } else if let Some(options) = self.options.get(bp) {
+                        let mut parts = Vec::new();
+                        if let Some(c) = &options.condition {
+                            parts.push(format!("if {c}"));
                         }
+                        if let Some(n) = options.hit_count {
+                            parts.push(format!("from hit {n}"));
+                        }
+                        ui.indent(("bp-opts", bp.line, &bp.unit.name), |ui| {
+                            let text = parts.join(" · ");
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&text)
+                                        .monospace()
+                                        .color(ui.visuals().hyperlink_color),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(text);
+                        });
                     }
-                });
-        });
-        actions
+                }
+                if self.breakpoints.is_empty() {
+                    ui.weak("Click the editor gutter or press Ctrl+B");
+                }
+            });
+        if let Some((bp, on)) = enable {
+            self.set_enabled(&bp, on);
+        }
+        if let Some(bp) = remove {
+            self.editing = None;
+            self.disabled.remove(&bp);
+            self.toggle_breakpoint(bp.unit, bp.line);
+        }
+        if let Some((bp, options)) = apply {
+            self.editing = None;
+            self.set_options(&bp, options);
+        } else if let Some(bp) = edit {
+            self.editing = match self.editing.take() {
+                Some((b, ..)) if b == bp => None,
+                _ => {
+                    let options = self.options.get(&bp).cloned().unwrap_or_default();
+                    Some((
+                        bp,
+                        options.condition.unwrap_or_default(),
+                        options.hit_count.unwrap_or(0),
+                    ))
+                }
+            };
+        }
     }
 }
 
 fn unit_label(unit: &Unit) -> String {
     match unit.unit_type {
-        crate::types::UnitType::Block => "anonymous block".into(),
+        UnitType::Block => "anonymous block".into(),
         _ => unit.name.to_lowercase(),
     }
 }
@@ -399,41 +738,112 @@ fn frame_label(frame: &Frame) -> String {
     format!("{}{line}", unit_label(&frame.location.unit))
 }
 
-fn variable_ui(ui: &mut Ui, var: &Variable, index: usize) {
-    let value = match &var.value {
+fn value_text(ui: &Ui, var: &Variable, stale: bool) -> RichText {
+    let text = match &var.value {
         Some(v) => RichText::new(v).monospace(),
         None => RichText::new("NULL")
             .monospace()
             .italics()
             .color(ui.visuals().weak_text_color()),
     };
+    if stale {
+        text.color(ui.visuals().weak_text_color())
+    } else {
+        text
+    }
+}
+
+/// A variable and its fields/elements; right-click offers "Add watch" with
+/// the variable's full path (`parent` is the path of the enclosing one).
+fn variable_ui(
+    ui: &mut Ui,
+    var: &Variable,
+    parent: &str,
+    index: usize,
+    watch: &mut Option<String>,
+) {
+    let name = var.name.to_lowercase();
+    let path = if parent.is_empty() {
+        name.clone()
+    } else if name.starts_with('(') {
+        format!("{parent}{name}")
+    } else {
+        format!("{parent}.{name}")
+    };
+    let menu = |ui: &mut Ui, watch: &mut Option<String>| {
+        if ui.button(format!("Watch {path}")).clicked() {
+            *watch = Some(path.clone());
+            ui.close();
+        }
+        if let Some(v) = &var.value
+            && ui.button("Copy value").clicked()
+        {
+            ui.ctx().copy_text(v.clone());
+            ui.close();
+        }
+    };
     if var.children.is_empty() {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(var.name.to_lowercase()).monospace().strong());
-            ui.label(value);
-            ui.weak(&var.type_name);
-        });
+        let response = ui
+            .horizontal(|ui| {
+                ui.label(RichText::new(&name).monospace().strong());
+                ui.label(value_text(ui, var, false));
+                ui.weak(&var.type_name);
+            })
+            .response
+            .interact(egui::Sense::click());
+        response.context_menu(|ui| menu(ui, watch));
     } else {
         let summary = var
             .value
             .as_deref()
             .map(|v| format!("  {v}"))
             .unwrap_or_default();
-        let header = format!("{}  {}{summary}", var.name.to_lowercase(), var.type_name);
-        egui::CollapsingHeader::new(RichText::new(header).monospace())
-            .id_salt(("var", index, &var.name))
+        let header = format!("{name}  {}{summary}", var.type_name);
+        let response = egui::CollapsingHeader::new(RichText::new(header).monospace())
+            .id_salt(("var", index, &var.name, parent))
             .show(ui, |ui| {
                 for (i, child) in var.children.iter().enumerate() {
-                    variable_ui(ui, child, i);
+                    variable_ui(ui, child, &path, i, watch);
                 }
             });
+        response.header_response.context_menu(|ui| menu(ui, watch));
     }
+}
+
+/// Hover text for a variable: its value, or its fields/elements.
+fn describe(var: &Variable) -> String {
+    const MAX: usize = 12;
+    let value = |v: &Variable| v.value.clone().unwrap_or_else(|| "NULL".into());
+    if var.children.is_empty() {
+        return value(var);
+    }
+    let mut lines: Vec<String> = var.value.iter().cloned().collect();
+    for child in var.children.iter().take(MAX) {
+        let shown = if child.children.is_empty() {
+            value(child)
+        } else {
+            format!("{} …", child.type_name)
+        };
+        lines.push(format!("{} = {shown}", child.name.to_lowercase()));
+    }
+    if var.children.len() > MAX {
+        lines.push(format!("… {} more", var.children.len() - MAX));
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::UnitType;
+
+    fn var(name: &str, value: Option<&str>, children: Vec<Variable>) -> Variable {
+        Variable {
+            name: name.into(),
+            type_name: "NUMBER".into(),
+            value: value.map(Into::into),
+            children,
+        }
+    }
 
     #[test]
     fn markers_follow_breakpoints() {
@@ -454,5 +864,64 @@ mod tests {
             method: "P".into(),
         }];
         assert_eq!(s.markers(&unit).1, Some(9));
+    }
+
+    #[test]
+    fn disabled_breakpoints_stay_listed() {
+        let mut s = DebugSession::default();
+        let unit = Unit::new("ORUI", "P", UnitType::Procedure);
+        s.toggle_breakpoint(unit.clone(), 5);
+        let bp = Breakpoint {
+            unit: unit.clone(),
+            line: 5,
+        };
+        s.set_enabled(&bp, false);
+        assert_eq!(s.markers(&unit).0, Vec::<u32>::new());
+        assert!(s.breakpoints.contains(&bp));
+        // Toggling a disabled breakpoint enables it again.
+        s.toggle_breakpoint(unit.clone(), 5);
+        assert_eq!(s.markers(&unit).0, vec![5]);
+        s.set_options(
+            &bp,
+            BreakpointOptions {
+                condition: Some("x > 1".into()),
+                hit_count: None,
+            },
+        );
+        assert!(s.options.contains_key(&bp));
+        s.toggle_breakpoint(unit, 5);
+        assert!(s.breakpoints.is_empty() && s.options.is_empty());
+    }
+
+    #[test]
+    fn hover_values_while_stopped() {
+        let mut s = DebugSession::default();
+        let unit = Unit::new("ORUI", "P", UnitType::Procedure);
+        s.stack = vec![Frame {
+            location: Location {
+                unit: unit.clone(),
+                line: Some(3),
+            },
+            method: "P".into(),
+        }];
+        s.variables = vec![
+            var("L_TOTAL", Some("6"), vec![]),
+            var("L_REC", None, vec![var("A", Some("7"), vec![])]),
+        ];
+        s.watch_values = vec![Watch {
+            expression: "pkg.g_count".into(),
+            value: Ok(var("G_COUNT", Some("2"), vec![])),
+        }];
+        assert_eq!(s.hover(&unit, "l_total"), None, "only while suspended");
+        s.state = State::Suspended {
+            reason: StopReason::Step,
+        };
+        assert_eq!(s.hover(&unit, "L_Total").unwrap().1, "6");
+        assert_eq!(s.hover(&unit, "l_rec.a").unwrap().1, "7");
+        assert_eq!(s.hover(&unit, "l_rec").unwrap().1, "a = 7");
+        assert_eq!(s.hover(&unit, "PKG.G_COUNT").unwrap().1, "2");
+        assert_eq!(s.hover(&unit, "l_other"), None);
+        let other = Unit::new("ORUI", "Q", UnitType::Procedure);
+        assert_eq!(s.hover(&other, "l_total"), None, "other unit");
     }
 }

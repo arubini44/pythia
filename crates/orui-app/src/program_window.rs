@@ -547,14 +547,20 @@ impl ProgramWindow {
                 });
         }
         egui::CentralPanel::default().show(ui, |ui| {
-            let out = part.editor.ui(
+            let mut out = part.editor.ui(
                 ui,
                 ("program-editor", cx.id, self.active),
                 &cx.settings.editor,
             );
+            let unit = debug_unit(&self.object, part.object_type);
+            // While debugging, hovering a variable shows its value.
+            if let (Some(offset), Some(debug)) = (out.hover_request, cx.debug)
+                && crate::editor::debug_hover(&mut part.editor, offset, debug, &unit)
+            {
+                out.hover_request = None;
+            }
             effects.extend(part.assist.handle(&mut part.editor, &out, cx));
             part.assist.background(&mut part.editor, ui);
-            let unit = debug_unit(&self.object, part.object_type);
             if let Some(line) = out.gutter_clicked {
                 effects.breakpoints.push((unit.clone(), line as u32));
             }

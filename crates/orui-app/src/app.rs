@@ -1224,9 +1224,22 @@ impl OruiApp {
                         if self.debug_run.is_some_and(|(_, t)| t == task) =>
                     {
                         self.debug_run = None;
-                        match result {
-                            Ok(_) => self.log("Debugged block finished"),
-                            Err(e) => {
+                        let outcome = result.and_then(|any| {
+                            any.downcast::<orui_debugger::target::DebugOutcome>()
+                                .map_err(|_| orui_db::DbError::new("unexpected debug result"))
+                        });
+                        let error = match outcome {
+                            Ok(outcome) => {
+                                if !outcome.output.is_empty() {
+                                    self.deliver(id, DbEvent::Output(outcome.output));
+                                }
+                                outcome.error
+                            }
+                            Err(e) => Some(e),
+                        };
+                        match error {
+                            None => self.log("Debugged block finished"),
+                            Some(e) => {
                                 self.log(format!("Debugged block failed: {e}"));
                                 self.deliver(id, DbEvent::Error(e));
                             }

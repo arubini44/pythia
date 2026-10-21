@@ -125,6 +125,28 @@ pub struct Breakpoint {
     pub line: u32,
 }
 
+/// When a breakpoint actually stops execution.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BreakpointOptions {
+    /// Stop only while this holds, e.g. `l_total > 3 and l_name is not null`.
+    pub condition: Option<String>,
+    /// Stop from this hit on (hits are counted while the condition holds).
+    pub hit_count: Option<u32>,
+}
+
+impl BreakpointOptions {
+    pub fn is_empty(&self) -> bool {
+        self.condition.is_none() && self.hit_count.is_none()
+    }
+}
+
+/// A watched expression and its value at the current stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Watch {
+    pub expression: String,
+    pub value: Result<Variable, String>,
+}
+
 /// Where execution stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
@@ -155,12 +177,20 @@ pub enum StopReason {
     Breakpoint,
     Step,
     Pause,
+    Exception,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DebugCommand {
     SetBreakpoint(Breakpoint),
     ClearBreakpoint(Breakpoint),
+    /// Condition and hit count of a breakpoint (evaluated by the debugger).
+    SetBreakpointOptions(Breakpoint, BreakpointOptions),
+    /// Expressions evaluated at every stop (and right away when stopped):
+    /// variables, `record.field`, `collection(n)`, `package.variable`.
+    SetWatches(Vec<String>),
+    /// Stop when an exception is raised.
+    BreakOnException(bool),
     Resume,
     StepOver,
     StepInto,
@@ -194,6 +224,17 @@ pub enum DebugEvent {
         location: Location,
         stack: Vec<Frame>,
         variables: Vec<Variable>,
+        watches: Vec<Watch>,
+        /// The raised exception, for [`StopReason::Exception`].
+        exception: Option<String>,
+    },
+    /// Watches were changed while stopped: their values.
+    Watches(Vec<Watch>),
+    /// A breakpoint was reached with its condition true; `hits` counts
+    /// these since the session started.
+    BreakpointHit {
+        breakpoint: Breakpoint,
+        hits: u32,
     },
     Resumed,
     /// The target finished, detached or was terminated.
