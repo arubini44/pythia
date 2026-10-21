@@ -26,6 +26,8 @@ pub struct Part {
     pub saved: String,
     #[serde(skip)]
     pub errors: Vec<CompileError>,
+    #[serde(skip)]
+    assist: crate::assist::Assist,
 }
 
 #[derive(Default)]
@@ -291,11 +293,12 @@ impl ProgramWindow {
                 });
         }
         egui::CentralPanel::default().show(ui, |ui| {
-            part.editor.ui(
+            let out = part.editor.ui(
                 ui,
                 ("program-editor", cx.id, self.active),
                 &cx.settings.editor,
             );
+            effects.extend(part.assist.handle(&mut part.editor, &out, cx));
         });
         effects
     }
@@ -308,6 +311,7 @@ impl Part {
             editor: Editor::default(),
             saved: String::new(),
             errors: Vec::new(),
+            assist: Default::default(),
         }
     }
 

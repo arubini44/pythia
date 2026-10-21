@@ -274,6 +274,8 @@ fn data_editing() {
             connected: true,
             fetch_size: 100,
             connection,
+            catalog: None,
+            catalog_revision: 0,
         };
         let effects = app.test_sql_window().start_editing(0, &cx);
         app.test_apply(effects);
@@ -300,6 +302,8 @@ fn data_editing() {
             connected: true,
             fetch_size: 100,
             connection,
+            catalog: None,
+            catalog_revision: 0,
         };
         let effects = app.test_sql_window().apply_changes(0, &cx);
         app.test_apply(effects);

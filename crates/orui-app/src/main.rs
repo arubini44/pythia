@@ -1,7 +1,9 @@
 //! orui – a fast, native Oracle PL/SQL IDE.
 
 mod app;
+mod assist;
 mod browser;
+mod catalog;
 mod commands;
 mod connections;
 mod data_edit;

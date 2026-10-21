@@ -2848,6 +2848,7 @@ dependencies = [
  "orui-config",
  "orui-data",
  "orui-db",
+ "orui-lsp-core",
  "orui-monitor",
  "orui-plsql",
  "orui-ui",

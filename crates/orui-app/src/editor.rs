@@ -104,6 +104,11 @@ impl Editor {
         self.refresh();
     }
 
+    /// The underlying widget, for code assistance popups.
+    pub fn inner(&mut self) -> &mut CodeEditor {
+        &mut self.inner
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut Ui,

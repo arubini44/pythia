@@ -19,6 +19,7 @@ rfd = "0.17"
 orui-config.workspace = true
 orui-data.workspace = true
 orui-db.workspace = true
+orui-lsp-core.workspace = true
 orui-monitor.workspace = true
 orui-plsql.workspace = true
 orui-ui.workspace = true

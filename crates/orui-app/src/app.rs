@@ -70,6 +70,13 @@ pub struct OruiApp {
     connecting: Option<String>,
 
     history: History,
+    /// Dictionary caches for code assistance, by connection.
+    catalogs: HashMap<String, orui_lsp_core::CatalogCache>,
+    catalog_revision: u64,
+    /// Catalog task request id → connection.
+    catalog_inflight: HashMap<u64, String>,
+    /// Requests already sent (or answered) per connection, to avoid repeats.
+    catalog_requested: std::collections::HashSet<(String, orui_lsp_core::CatalogRequest)>,
     log: Vec<String>,
     connect_dialog: ConnectDialog,
     palette: CommandPalette,
@@ -114,6 +121,10 @@ impl OruiApp {
             last_profile: None,
             connecting: None,
             history,
+            catalogs: HashMap::new(),
+            catalog_revision: 0,
+            catalog_inflight: HashMap::new(),
+            catalog_requested: std::collections::HashSet::new(),
             log: Vec::new(),
             connect_dialog: ConnectDialog::default(),
             palette: CommandPalette::default(),
@@ -226,6 +237,8 @@ impl OruiApp {
             connected,
             fetch_size: self.settings.fetch_size,
             connection: self.docs.get(&id).and_then(|d| d.connection.clone()),
+            catalog: None,
+            catalog_revision: self.catalog_revision,
         }
     }
 
@@ -427,16 +440,62 @@ impl OruiApp {
             s.session.cancel();
         }
         if let Some(name) = &connection {
+            let mut ddl = false;
             for sql in effects.executed {
+                let first = sql
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
+                ddl |= matches!(
+                    first.as_str(),
+                    "CREATE" | "ALTER" | "DROP" | "RENAME" | "COMMENT" | "TRUNCATE"
+                );
                 self.history.add(name, &sql);
+            }
+            if ddl {
+                self.invalidate_catalog(name);
             }
         }
         for line in effects.log {
             self.log(line);
         }
+        if let Some(name) = &connection {
+            self.fetch_catalog(name, effects.catalog_requests);
+        }
         for request in effects.open {
             self.open(request);
         }
+    }
+
+    /// Fetches dictionary data for code assistance in the background.
+    fn fetch_catalog(&mut self, connection: &str, requests: Vec<orui_lsp_core::CatalogRequest>) {
+        for request in requests {
+            if !self
+                .catalog_requested
+                .insert((connection.to_owned(), request.clone()))
+            {
+                continue;
+            }
+            let id = request_id();
+            self.catalog_inflight.insert(id, connection.to_owned());
+            self.conns.send_main(
+                connection,
+                DbRequest::Task {
+                    id,
+                    task: crate::catalog::task(request),
+                },
+            );
+        }
+    }
+
+    /// Forgets cached dictionary data (after DDL, or on demand).
+    fn invalidate_catalog(&mut self, connection: &str) {
+        if let Some(cache) = self.catalogs.get_mut(connection) {
+            cache.clear();
+        }
+        self.catalog_requested.retain(|(c, _)| c != connection);
+        self.catalog_revision += 1;
     }
 
     fn apply_browser(&mut self, effects: Effects) {
@@ -471,12 +530,15 @@ impl OruiApp {
         let Some(doc) = self.docs.get_mut(&id) else {
             return;
         };
+        let catalog = connection.as_ref().and_then(|c| self.catalogs.get(c));
         let cx = DocContext {
             id,
             settings: &settings,
             connected,
             fetch_size,
             connection,
+            catalog,
+            catalog_revision: self.catalog_revision,
         };
         let effects = doc.on_event(event, &cx);
         self.apply(Some(id), effects);
@@ -668,12 +730,15 @@ impl OruiApp {
         let Some(doc) = self.docs.get_mut(&id) else {
             return;
         };
+        let catalog = connection.as_ref().and_then(|c| self.catalogs.get(c));
         let cx = DocContext {
             id,
             settings: &settings,
             connected,
             fetch_size,
             connection,
+            catalog,
+            catalog_revision: self.catalog_revision,
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
@@ -772,6 +837,11 @@ impl OruiApp {
                     server.version, server.current_schema
                 );
                 let schema = server.current_schema.clone();
+                self.catalogs.insert(
+                    name.to_owned(),
+                    orui_lsp_core::CatalogCache::new(schema.clone()),
+                );
+                self.catalog_requested.retain(|(c, _)| c != name);
                 if let Some(conn) = self.conns.get_mut(name) {
                     conn.status = crate::connections::Status::Connected(server);
                 }
@@ -813,6 +883,19 @@ impl OruiApp {
                     self.connect_dialog.failed(message);
                 } else {
                     self.log(format!("{name}: {message}"));
+                }
+            }
+            DbEvent::TaskDone { id, result } if self.catalog_inflight.contains_key(&id) => {
+                let connection = self.catalog_inflight.remove(&id).unwrap_or_default();
+                match result.map(|any| any.downcast::<crate::catalog::Answer>()) {
+                    Ok(Ok(answer)) => {
+                        if let Some(cache) = self.catalogs.get_mut(&connection) {
+                            answer.apply(cache);
+                            self.catalog_revision += 1;
+                        }
+                    }
+                    Ok(Err(_)) => warn!("unexpected catalog task result"),
+                    Err(e) => warn!("catalog lookup failed: {e}"),
                 }
             }
             DbEvent::Meta { id, result } if self.finder.pending == Some(id) => match result {
@@ -1203,6 +1286,8 @@ impl eframe::App for OruiApp {
             connections: &connections,
             colors: &colors,
             connected: &connected,
+            catalogs: &self.catalogs,
+            catalog_revision: self.catalog_revision,
             effects: Vec::new(),
             browser_effects: Effects::default(),
             closed: Vec::new(),
@@ -1345,6 +1430,8 @@ struct Viewer<'a> {
     connections: &'a [String],
     colors: &'a HashMap<String, Color32>,
     connected: &'a HashMap<String, bool>,
+    catalogs: &'a HashMap<String, orui_lsp_core::CatalogCache>,
+    catalog_revision: u64,
     effects: Vec<(DocId, Effects)>,
     browser_effects: Effects,
     closed: Vec<DocId>,
@@ -1427,6 +1514,8 @@ impl TabViewer for Viewer<'_> {
                     connected,
                     fetch_size: self.settings.fetch_size,
                     connection: doc.connection.clone(),
+                    catalog: doc.connection.as_ref().and_then(|c| self.catalogs.get(c)),
+                    catalog_revision: self.catalog_revision,
                 };
                 let effects = doc.ui(ui, &cx);
                 self.effects.push((*id, effects));

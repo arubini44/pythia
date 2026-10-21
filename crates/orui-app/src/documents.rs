@@ -69,6 +69,8 @@ pub struct Effects {
     pub cancel: bool,
     /// Lines for the application log.
     pub log: Vec<String>,
+    /// Dictionary data code assistance is waiting for.
+    pub catalog_requests: Vec<orui_lsp_core::CatalogRequest>,
 }
 
 impl Effects {
@@ -82,6 +84,7 @@ impl Effects {
         self.executed.extend(other.executed);
         self.cancel |= other.cancel;
         self.log.extend(other.log);
+        self.catalog_requests.extend(other.catalog_requests);
     }
 }
 
@@ -139,6 +142,10 @@ pub struct DocContext<'a> {
     pub fetch_size: usize,
     /// Display name of the document's connection.
     pub connection: Option<String>,
+    /// Dictionary cache of the connection, for code assistance.
+    pub catalog: Option<&'a orui_lsp_core::CatalogCache>,
+    /// Bumped whenever new dictionary data arrived.
+    pub catalog_revision: u64,
 }
 
 impl Document {

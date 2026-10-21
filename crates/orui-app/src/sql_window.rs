@@ -28,6 +28,8 @@ pub struct SqlWindow {
     pub substitution: bool,
     #[serde(skip)]
     pub state: RunState,
+    #[serde(skip)]
+    assist: crate::assist::Assist,
 }
 
 fn yes() -> bool {
@@ -147,6 +149,7 @@ impl SqlWindow {
             defines: BTreeMap::new(),
             substitution: true,
             state: RunState::default(),
+            assist: Default::default(),
         }
     }
 
@@ -772,8 +775,10 @@ impl SqlWindow {
             .min_size(80.0)
             .show(ui, |ui| effects.extend(self.bottom_ui(ui, cx)));
         egui::CentralPanel::default().show(ui, |ui| {
-            self.editor
+            let out = self
+                .editor
                 .ui(ui, ("sql-editor", cx.id), &cx.settings.editor);
+            effects.extend(self.assist.handle(&mut self.editor, &out, cx));
             self.state.line_col = self.editor.line_col();
         });
         effects.extend(self.prompt_ui(ui.ctx(), cx));
