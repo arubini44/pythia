@@ -21,7 +21,39 @@ fn out_dir() -> Option<PathBuf> {
     std::env::var_os("ORUI_SCREENSHOT_DIR").map(PathBuf::from)
 }
 
-fn harness(dark: bool) -> Harness<'static, OruiApp> {
+/// One app harness at a time: many wgpu renderers and OCI sessions in one
+/// test process crash intermittently (SIGSEGV) when they run in parallel.
+static UI_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A harness holding the UI lock for the test's duration.
+struct Ui {
+    harness: Harness<'static, OruiApp>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for Ui {
+    type Target = Harness<'static, OruiApp>;
+    fn deref(&self) -> &Self::Target {
+        &self.harness
+    }
+}
+
+impl std::ops::DerefMut for Ui {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.harness
+    }
+}
+
+fn harness(dark: bool) -> Ui {
+    // A failed test poisons the lock; the next one can still run.
+    let lock = UI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    Ui {
+        harness: new_harness(dark),
+        _lock: lock,
+    }
+}
+
+fn new_harness(dark: bool) -> Harness<'static, OruiApp> {
     let harness = Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
         .with_pixels_per_point(1.5)
@@ -1344,4 +1376,136 @@ fn export_tables() {
     assert!(dir.join("demo_employees.csv").exists());
     assert!(dir.join("demo_departments.ddl.sql").exists());
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The object editors: a new sequence applied through the form, then each
+/// editor on existing objects.
+#[test]
+fn object_editors() {
+    use crate::object_editor::EditTarget;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "begin
+  for o in (select object_name, object_type from user_objects
+             where object_name like 'ORUI\\_OE\\_%' escape '\\'
+               and object_type in ('TABLE', 'VIEW', 'SEQUENCE', 'SYNONYM')) loop
+    execute immediate 'drop ' || o.object_type || ' ' || o.object_name
+      || case o.object_type when 'TABLE' then ' purge' end;
+  end loop;
+end;
+/
+create table orui_oe_orders (order_id number primary key, customer varchar2(40) not null,
+  status varchar2(10), ordered_at date default sysdate not null);
+create index orui_oe_orders_ix on orui_oe_orders (customer, ordered_at desc);
+create or replace view orui_oe_open_orders as
+  select order_id, customer, ordered_at from orui_oe_orders where status = 'OPEN'
+  with check option;
+create synonym orui_oe_ord for orui_oe_orders;
+grant select, insert on orui_oe_orders to public;"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "objects", |app| !app.test_focused_busy());
+    let object = |name: &str, t| ObjectRef {
+        owner: "ORUI".into(),
+        name: name.into(),
+        object_type: t,
+    };
+    let open = |h: &mut Harness<'_, OruiApp>, target: EditTarget| {
+        h.state_mut().test_open(OpenRequest::EditObject {
+            connection: "orui@FREEPDB1".into(),
+            target,
+        });
+        h.run_steps(2);
+        wait_until(h, "editor", |app| !app.test_focused_busy());
+    };
+
+    // A new sequence, created through the form.
+    open(
+        &mut h,
+        EditTarget::New {
+            owner: "ORUI".into(),
+            object_type: orui_db::ObjectType::Sequence,
+        },
+    );
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d
+            .downcast_mut::<crate::object_editor::SequenceDef>()
+            .unwrap();
+        d.name = "orui_oe_invoice_seq".into();
+        d.start = "1000".into();
+        d.cache = 50;
+    });
+    h.run_steps(2);
+    save(&mut h, "editor-sequence-new");
+    let effects = h.state_mut().test_object_editor().apply_for_test();
+    h.state_mut().test_apply_focused(effects);
+    wait_until(&mut h, "apply", |app| !app.test_focused_busy());
+    let editor = h.state_mut().test_object_editor();
+    assert_eq!(editor.outcome(), Some(("Applied", true)));
+    assert_eq!(editor.title(), "orui_oe_invoice_seq (sequence)");
+    // Reloaded from the database: nothing left to apply.
+    assert_eq!(editor.statements_for_test(), Ok(Vec::new()));
+    save(&mut h, "editor-sequence");
+
+    open(
+        &mut h,
+        EditTarget::Edit(object("ORUI_OE_OPEN_ORDERS", orui_db::ObjectType::View)),
+    );
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d.downcast_mut::<crate::object_editor::ViewDef>().unwrap();
+        d.query = "select order_id, customer, ordered_at, status\n  from orui_oe_orders\n where status in ('OPEN', 'HOLD')".into();
+    });
+    h.run_steps(3);
+    save(&mut h, "editor-view");
+    let s = h
+        .state_mut()
+        .test_object_editor()
+        .statements_for_test()
+        .unwrap();
+    assert!(s[0].ends_with("with check option"), "{s:?}");
+
+    open(
+        &mut h,
+        EditTarget::Edit(object("ORUI_OE_ORD", orui_db::ObjectType::Synonym)),
+    );
+    save(&mut h, "editor-synonym");
+
+    open(
+        &mut h,
+        EditTarget::Edit(object("ORUI_OE_ORDERS_IX", orui_db::ObjectType::Index)),
+    );
+    h.run_steps(3);
+    wait_until(&mut h, "columns", |app| !app.test_focused_busy());
+    save(&mut h, "editor-index");
+
+    open(
+        &mut h,
+        EditTarget::Grants(object("ORUI_OE_ORDERS", orui_db::ObjectType::Table)),
+    );
+    save(&mut h, "editor-grants");
+    assert!(
+        h.state_mut()
+            .test_object_editor()
+            .statements_for_test()
+            .unwrap()
+            .is_empty()
+    );
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "drop synonym orui_oe_ord;
+drop view orui_oe_open_orders;
+drop sequence orui_oe_invoice_seq;
+drop table orui_oe_orders purge;"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }

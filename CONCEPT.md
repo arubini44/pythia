@@ -249,8 +249,8 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 - [x] View and generate DDL (`DBMS_METADATA`) with options (storage, tablespace, constraints)
 - [x] Table editor: columns, keys, indexes, checks, comments, partitions → generates `ALTER` script (no partitions)
-- [ ] Sequence, synonym, view, index, user, role editors
-- [ ] Grants editor
+- [x] Sequence, synonym, view, index, user, role editors (no user or role editors)
+- [x] Grants editor
 - [x] Preview generated DDL before applying
 
 ### 5.12 Debugger (M6)

@@ -117,6 +117,11 @@ pub enum OpenRequest {
         connection: String,
         object: ObjectRef,
     },
+    /// Open a form editor (sequence, view, synonym, index, grants).
+    EditObject {
+        connection: String,
+        target: crate::object_editor::EditTarget,
+    },
     /// Edit a table's structure.
     EditTable {
         connection: String,
@@ -159,6 +164,7 @@ pub enum DocKind {
     Jobs(crate::jobs_window::JobsWindow),
     Diff(crate::text_diff::TextDiff),
     ExportTables(crate::export_tables::ExportTables),
+    ObjectEditor(crate::object_editor::ObjectEditor),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -201,6 +207,7 @@ impl Document {
             DocKind::Jobs(j) => j.title(),
             DocKind::Diff(d) => d.title(),
             DocKind::ExportTables(e) => e.title(),
+            DocKind::ObjectEditor(e) => e.title(),
         }
     }
 
@@ -228,6 +235,7 @@ impl Document {
             DocKind::Jobs(j) => j.is_busy(),
             DocKind::Diff(_) => false,
             DocKind::ExportTables(e) => e.is_busy(),
+            DocKind::ObjectEditor(e) => e.is_busy(),
         }
     }
 
@@ -236,6 +244,7 @@ impl Document {
             DocKind::Program(w) => w.is_dirty(),
             DocKind::Sql(w) => w.is_dirty(),
             DocKind::TableEditor(t) => t.is_dirty(),
+            DocKind::ObjectEditor(e) => e.is_dirty(),
             _ => false,
         }
     }
@@ -262,6 +271,7 @@ impl Document {
             DocKind::Jobs(j) => j.on_event(event),
             DocKind::Diff(_) => Effects::default(),
             DocKind::ExportTables(e) => e.on_event(event),
+            DocKind::ObjectEditor(e) => e.on_event(event),
         }
     }
 
@@ -279,6 +289,7 @@ impl Document {
             DocKind::Jobs(j) => j.ui(ui, cx),
             DocKind::Diff(d) => d.ui(ui, cx),
             DocKind::ExportTables(e) => e.ui(ui, cx),
+            DocKind::ObjectEditor(e) => e.ui(ui, cx),
         }
     }
 
@@ -289,6 +300,7 @@ impl Document {
             DocKind::Program(w) => w.load(),
             DocKind::Object(v) => v.load(),
             DocKind::TableEditor(t) => t.load(),
+            DocKind::ObjectEditor(e) => e.load(),
             _ => Effects::default(),
         }
     }
