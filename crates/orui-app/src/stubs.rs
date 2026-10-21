@@ -115,6 +115,73 @@ pub fn package_body(spec: &str, body: Option<&str>) -> Option<Stubs> {
     Some(Stubs { body, added })
 }
 
+/// Result of updating a specification from its body.
+pub struct SpecSync {
+    pub spec: String,
+    pub updated: Vec<String>,
+}
+
+/// Updates spec declarations whose signature changed in the body. A spec
+/// declaration without an identical body header takes the header of the one
+/// body subprogram with its name that matches nothing in the spec; anything
+/// ambiguous (several changed overloads) is left alone.
+pub fn sync_spec(spec: &str, body: &str) -> Option<SpecSync> {
+    let spec_outline = Analysis::new(spec).outline();
+    spec_outline
+        .iter()
+        .find(|i| i.kind == OutlineKind::PackageSpec)?;
+    let body_outline = Analysis::new(body).outline();
+    let decls: Vec<(&OutlineItem, String)> = subprograms(&spec_outline, OutlineKind::PackageSpec)
+        .into_iter()
+        .map(|i| {
+            let decl = spec[i.span.clone()].trim().trim_end_matches(';').trim_end();
+            (i, key(decl))
+        })
+        .collect();
+    let headers: Vec<(&OutlineItem, &str, String)> =
+        subprograms(&body_outline, OutlineKind::PackageBody)
+            .into_iter()
+            .map(|i| {
+                let header = body_header(&body[i.span.clone()]).trim_end();
+                (i, header, key(header))
+            })
+            .collect();
+    let spec_keys: Vec<&String> = decls.iter().map(|(_, k)| k).collect();
+    let body_keys: Vec<&String> = headers.iter().map(|(_, _, k)| k).collect();
+    let mut replacements = Vec::new();
+    for (item, k) in &decls {
+        if body_keys.contains(&k) {
+            continue;
+        }
+        let same_name = |i: &OutlineItem| i.name.eq_ignore_ascii_case(&item.name);
+        let unmatched_decls = decls
+            .iter()
+            .filter(|(i, k)| same_name(i) && !body_keys.contains(&k))
+            .count();
+        let candidates: Vec<&&str> = headers
+            .iter()
+            .filter(|(i, _, k)| same_name(i) && !spec_keys.contains(&k))
+            .map(|(_, h, _)| h)
+            .collect();
+        if unmatched_decls == 1 && candidates.len() == 1 {
+            // Keep everything up to the declaration's `;`.
+            let text = &spec[item.span.clone()];
+            let start = item.span.start + (text.len() - text.trim_start().len());
+            let decl = text.trim().trim_end_matches(';').trim_end();
+            replacements.push((start..start + decl.len(), (*candidates[0]).to_owned()));
+        }
+    }
+    let updated = replacements
+        .iter()
+        .map(|(_, h)| h.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
+        .collect();
+    let mut spec = spec.to_owned();
+    for (range, header) in replacements.into_iter().rev() {
+        spec.replace_range(range, &header);
+    }
+    Some(SpecSync { spec, updated })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +209,35 @@ mod tests {
         assert!(stubs.body.contains("procedure a(x in varchar2) is"));
         assert!(!stubs.body.contains("procedure a(x in number) is\n"));
         assert!(stubs.body.trim_end().ends_with("end p;"));
+    }
+
+    #[test]
+    fn spec_follows_changed_signatures() {
+        let body = "create or replace package body p as
+  procedure a(x in number, y in date default sysdate) is begin null; end a;
+  function b(y varchar2) return number is begin return 1; end b;
+  procedure a(x in varchar2) is begin null; end a;
+  procedure private_one is begin null; end;
+end p;";
+        let sync = sync_spec(SPEC, body).unwrap();
+        assert_eq!(sync.updated, ["procedure a(x"]);
+        assert!(
+            sync.spec
+                .contains("  procedure a(x in number, y in date default sysdate);\n"),
+            "{}",
+            sync.spec
+        );
+        assert!(sync.spec.contains("  procedure a(x in varchar2);"));
+        assert!(!sync.spec.contains("private_one"));
+
+        // Two changed overloads of the same name are ambiguous: untouched.
+        let body = "create or replace package body p as
+  procedure a(x in integer) is begin null; end a;
+  procedure a(x in clob) is begin null; end a;
+  function b(y varchar2) return number is begin return 1; end b;
+end p;";
+        let sync = sync_spec(SPEC, body).unwrap();
+        assert!(sync.updated.is_empty());
+        assert_eq!(sync.spec, SPEC);
     }
 }

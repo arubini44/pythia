@@ -442,6 +442,32 @@ impl ProgramWindow {
                     None => (true, "Couldn't read the package specification".into()),
                 });
             }
+            if self.parts.len() == 2
+                && self.parts[0].object_type == ObjectType::Package
+                && ui
+                    .button("Update spec")
+                    .on_hover_text("Copy changed subprogram signatures from the body into the specification")
+                    .clicked()
+            {
+                let spec = self.parts[0].editor.text().to_owned();
+                let body = self.parts[1].editor.text().to_owned();
+                self.state.message = Some(match crate::stubs::sync_spec(&spec, &body) {
+                    Some(sync) if !sync.updated.is_empty() => {
+                        let len = spec.len();
+                        self.parts[0].editor.replace(0..len, &sync.spec, 1);
+                        self.active = 0;
+                        (
+                            false,
+                            format!(
+                                "Updated {} in the spec — compile to save",
+                                sync.updated.join(", ")
+                            ),
+                        )
+                    }
+                    Some(_) => (false, "The spec matches the body".into()),
+                    None => (true, "Couldn't read the package specification".into()),
+                });
+            }
             ui.toggle_value(&mut self.show_outline, "Outline");
             if busy {
                 ui.spinner();

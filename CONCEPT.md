@@ -355,7 +355,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [ ] Extract procedure from selection
 - [x] Generate: column list, `INSERT`/`UPDATE` template for table, record type, `%ROWTYPE` declarations (column list and SELECT/INSERT/UPDATE from the object browser; no record type or `%ROWTYPE` declarations)
 - [x] Generate package body stubs from spec
-- [ ] Synchronize spec and body signatures
+- [x] Synchronize spec and body signatures (body → spec for changed signatures; Generate body for the other direction)
 - [ ] Macro recorder (replay command sequences)
 - [x] Editor tabs: pin, reorder, close others, reopen closed (no pinning)
 - [ ] Project / workspace: group files, objects, and connections
