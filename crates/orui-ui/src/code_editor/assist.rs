@@ -216,6 +216,12 @@ impl Completion {
         let tail = (0..self.tail)
             .take_while(|i| caret + i < state.len() && is_word_char(state.rope.char(caret + i)))
             .count();
+        if entry.kind == CompletionKind::Snippet
+            && super::snippet::has_tab_stops(&entry.insert_text)
+        {
+            state.expand_snippet(self.start..caret + tail, &entry.insert_text, time);
+            return true;
+        }
         state.history.seal();
         let inserted = state.apply_changes(
             vec![(self.start..caret + tail, entry.insert_text.clone())],
@@ -382,6 +388,27 @@ mod tests {
         // One undo step back to before the accept.
         s.undo();
         assert_eq!(s.text(), "select empxx from t");
+    }
+
+    #[test]
+    fn accepting_a_snippet_expands_it() {
+        let mut s = state("x := nv", 7);
+        let snippet = CompletionEntry {
+            insert_text: "nvl(${1:expr}, ${2:0})".into(),
+            ..entry("nvl", CompletionKind::Snippet)
+        };
+        let c = Completion::new(&s, 5..7, vec![snippet]).unwrap();
+        assert!(c.accept(&mut s, 1.0));
+        assert_eq!(s.text(), "x := nvl(expr, 0)");
+        assert_eq!(s.rope.slice(s.primary().range()).to_string(), "expr");
+        assert!(s.snippet_step(true));
+        assert_eq!(s.rope.slice(s.primary().range()).to_string(), "0");
+        // Plain snippet entries without tab stops insert verbatim.
+        let mut s = state("x", 1);
+        let c = Completion::new(&s, 0..1, vec![entry("xyz", CompletionKind::Snippet)]).unwrap();
+        assert!(c.accept(&mut s, 1.0));
+        assert_eq!(s.text(), "xyz");
+        assert!(s.snippet.is_none());
     }
 
     #[test]

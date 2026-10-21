@@ -7,13 +7,16 @@
 
 mod assist;
 mod find;
+mod fold;
 mod highlight;
 mod history;
 mod matching;
 mod search;
 mod selection;
+mod snippet;
 mod state;
 mod text;
+mod tracked;
 mod view;
 
 use std::ops::Range;
@@ -26,7 +29,9 @@ use self::selection::Selection;
 use self::state::EditorState;
 
 pub use self::assist::{CompletionEntry, CompletionKind, CompletionTrigger};
+pub use self::fold::{Region as FoldRegion, RegionKind as FoldKind};
 pub use self::search::SearchQuery;
+pub use self::snippet::{Snippet, default_snippets};
 
 /// Display settings, typically from the user's settings.
 #[derive(Debug, Clone, PartialEq)]
@@ -181,6 +186,13 @@ pub struct CodeEditor {
     /// Hover delay from the config, in seconds.
     hover_delay: f64,
     requests: Requests,
+    /// Foldable regions, computed lazily per revision.
+    regions_cache: Option<(u64, Vec<fold::Region>)>,
+    /// Screen rects of the "⋯" pills of folded lines (from the last frame).
+    fold_pills: Vec<(egui::Rect, usize)>,
+    /// Time Ctrl+K was pressed, waiting for the second key of a chord.
+    chord: Option<f64>,
+    snippets: Vec<Snippet>,
 }
 
 impl Default for CodeEditor {
@@ -214,6 +226,10 @@ impl CodeEditor {
             link: None,
             hover_delay: 0.4,
             requests: Requests::default(),
+            regions_cache: None,
+            fold_pills: Vec::new(),
+            chord: None,
+            snippets: default_snippets(),
         }
     }
 
@@ -426,6 +442,279 @@ impl CodeEditor {
         self.references = None;
     }
 
+    // ----- folding ----------------------------------------------------------
+
+    /// Foldable regions (0-based lines), cached per revision.
+    fn regions(&mut self) -> &[fold::Region] {
+        let rev = self.state.revision;
+        if self.regions_cache.as_ref().is_none_or(|(r, _)| *r != rev) {
+            self.regions_cache = Some((rev, fold::regions(&self.state.text())));
+        }
+        &self.regions_cache.as_ref().expect("just set").1
+    }
+
+    /// Foldable regions with 1-based lines.
+    pub fn fold_regions(&mut self) -> Vec<FoldRegion> {
+        self.regions()
+            .iter()
+            .map(|r| FoldRegion {
+                start: r.start + 1,
+                end: r.end + 1,
+                ..*r
+            })
+            .collect()
+    }
+
+    fn display_map(&self) -> fold::DisplayMap {
+        fold::DisplayMap::new(
+            self.state.rope.len_lines(),
+            self.state.tracked.folds.iter().copied(),
+        )
+    }
+
+    fn add_fold(&mut self, start: usize, end: usize) {
+        let folds = &mut self.state.tracked.folds;
+        if folds.iter().any(|(s, _)| *s == start) {
+            return;
+        }
+        folds.push((start, end));
+        folds.sort_unstable();
+        // Carets inside the hidden lines move to the end of the first line.
+        let rope = &self.state.rope;
+        let line_end = text::line_end(rope, start);
+        let mut moved = false;
+        let sels: Vec<Selection> = self
+            .state
+            .sels
+            .iter()
+            .map(|s| {
+                let line = rope.char_to_line(s.head);
+                if line > start && line <= end {
+                    moved = true;
+                    Selection::caret(line_end)
+                } else {
+                    *s
+                }
+            })
+            .collect();
+        if moved {
+            let primary = self.state.primary;
+            self.state.set_selections(sels, primary);
+        }
+    }
+
+    /// Folds or unfolds the region starting on a 1-based line. Returns false
+    /// if no region starts there.
+    pub fn toggle_fold_at(&mut self, line: usize) -> bool {
+        let l = line.saturating_sub(1);
+        if let Some(i) = self.state.tracked.folds.iter().position(|(s, _)| *s == l) {
+            self.state.tracked.folds.remove(i);
+            return true;
+        }
+        let Some(region) = self.regions().iter().find(|r| r.start == l).copied() else {
+            return false;
+        };
+        self.add_fold(region.start, region.end);
+        true
+    }
+
+    /// Folds the innermost unfolded region around the caret.
+    pub fn fold_at_cursor(&mut self) {
+        let line = self.state.rope.char_to_line(self.state.primary().head);
+        let folded: Vec<usize> = self.state.tracked.folds.iter().map(|(s, _)| *s).collect();
+        let region = self
+            .regions()
+            .iter()
+            .filter(|r| r.start <= line && line <= r.end && !folded.contains(&r.start))
+            .max_by_key(|r| r.start)
+            .copied();
+        if let Some(r) = region {
+            self.add_fold(r.start, r.end);
+        }
+    }
+
+    /// Unfolds the fold on the caret's line (or the ones around it).
+    pub fn unfold_at_cursor(&mut self) {
+        let line = self.state.rope.char_to_line(self.state.primary().head);
+        let folds = &mut self.state.tracked.folds;
+        if let Some(i) = folds.iter().position(|(s, _)| *s == line) {
+            folds.remove(i);
+        } else {
+            self.state.tracked.reveal(line);
+        }
+    }
+
+    /// Folds every block, subprogram, comment and multi-line statement
+    /// (not parenthesized lists, and not a file-wide package body).
+    pub fn fold_all(&mut self) {
+        let regions = self.regions().to_vec();
+        for r in &regions {
+            let outermost_unit = r.depth == 0
+                && r.kind == fold::RegionKind::Unit
+                && regions.iter().any(|o| {
+                    o.kind == fold::RegionKind::Unit && o.start > r.start && o.end <= r.end
+                });
+            if r.kind != fold::RegionKind::Paren && !outermost_unit {
+                self.add_fold(r.start, r.end);
+            }
+        }
+    }
+
+    pub fn unfold_all(&mut self) {
+        self.state.tracked.folds.clear();
+    }
+
+    /// First lines (1-based) of the folded regions, e.g. to persist them.
+    pub fn folded_lines(&self) -> Vec<usize> {
+        self.state
+            .tracked
+            .folds
+            .iter()
+            .map(|(s, _)| s + 1)
+            .collect()
+    }
+
+    /// Folds the regions starting on these 1-based lines (others are ignored).
+    pub fn set_folded_lines(&mut self, lines: &[usize]) {
+        self.state.tracked.folds.clear();
+        let regions = self.regions().to_vec();
+        for line in lines {
+            if let Some(r) = regions.iter().find(|r| r.start + 1 == *line) {
+                self.add_fold(r.start, r.end);
+            }
+        }
+    }
+
+    /// Unfolds whatever hides a caret (after search, go to line, edits…).
+    fn reveal_carets(&mut self) {
+        if self.state.tracked.folds.is_empty() {
+            return;
+        }
+        let lines: Vec<usize> = self
+            .state
+            .sels
+            .iter()
+            .map(|s| self.state.rope.char_to_line(s.head))
+            .collect();
+        for line in lines {
+            self.state.tracked.reveal(line);
+        }
+    }
+
+    // ----- bookmarks --------------------------------------------------------
+
+    /// Bookmarks as (number 1–9 or none, 1-based line), sorted by line.
+    pub fn bookmarks(&self) -> Vec<(Option<u8>, usize)> {
+        self.state
+            .tracked
+            .bookmarks
+            .iter()
+            .map(|b| (b.number, b.line + 1))
+            .collect()
+    }
+
+    /// Replaces the bookmarks (e.g. restored from a saved workspace).
+    pub fn set_bookmarks(&mut self, bookmarks: Vec<(Option<u8>, usize)>) {
+        let n = self.state.rope.len_lines();
+        let marks = &mut self.state.tracked.bookmarks;
+        *marks = bookmarks
+            .into_iter()
+            .filter(|(_, l)| (1..=n).contains(l))
+            .map(|(number, line)| tracked::Bookmark {
+                number,
+                line: line - 1,
+            })
+            .collect();
+        marks.sort_by_key(|b| (b.line, b.number.is_none()));
+        marks.dedup_by_key(|b| b.line);
+    }
+
+    /// Toggles a bookmark on a 1-based line (numbered 1–9 or unnamed).
+    pub fn toggle_bookmark(&mut self, line: usize, number: Option<u8>) {
+        self.state
+            .tracked
+            .toggle_bookmark(line.saturating_sub(1), number);
+    }
+
+    /// Moves the caret to the first non-blank char of a 0-based line.
+    fn jump_to_line(&mut self, line: usize) {
+        let rope = &self.state.rope;
+        let pos = text::pos_of(rope, line, 0)
+            + text::indent_of(&text::line_text(rope, line))
+                .chars()
+                .count();
+        self.state.set_caret(pos);
+        self.scroll_to_cursor = true;
+    }
+
+    // ----- snippets ---------------------------------------------------------
+
+    pub fn snippets(&self) -> &[Snippet] {
+        &self.snippets
+    }
+
+    /// Snippets that expand when their trigger is typed and Tab is pressed.
+    pub fn set_snippets(&mut self, snippets: Vec<Snippet>) {
+        self.snippets = snippets;
+    }
+
+    /// Inserts a snippet at the primary caret (replacing the selection) and
+    /// selects its first placeholder.
+    pub fn insert_snippet(&mut self, snippet: &Snippet) {
+        let primary = self.state.primary();
+        self.state.set_selections(vec![primary], 0);
+        self.state
+            .expand_snippet(primary.range(), &snippet.body, f64::MAX);
+        self.scroll_to_cursor = true;
+    }
+
+    /// Whether Tab currently moves between snippet placeholders.
+    pub fn is_snippet_active(&self) -> bool {
+        self.state.snippet.is_some()
+    }
+
+    /// Completion entries for the snippets whose trigger starts with `prefix`
+    /// (kind [`CompletionKind::Snippet`]; accepting one expands it).
+    pub fn snippet_completions(&self, prefix: &str) -> Vec<CompletionEntry> {
+        let prefix = prefix.to_lowercase();
+        self.snippets
+            .iter()
+            .filter(|s| s.trigger.to_lowercase().starts_with(&prefix))
+            .map(|s| CompletionEntry {
+                label: s.trigger.clone(),
+                detail: s.description.clone(),
+                kind: CompletionKind::Snippet,
+                insert_text: s.body.clone(),
+            })
+            .collect()
+    }
+
+    /// Expands the snippet whose trigger is the word before the caret.
+    fn expand_trigger(&mut self, time: f64) -> bool {
+        let st = &self.state;
+        let p = st.primary();
+        if st.sels.len() != 1 || !p.is_empty() {
+            return false;
+        }
+        let typed = assist::word_prefix_len(&st.rope, p.head);
+        if typed == 0 {
+            return false;
+        }
+        let word = st.rope.slice(p.head - typed..p.head).to_string();
+        let Some(body) = self
+            .snippets
+            .iter()
+            .find(|s| s.trigger.eq_ignore_ascii_case(&word))
+            .map(|s| s.body.clone())
+        else {
+            return false;
+        };
+        self.state
+            .expand_snippet(p.head - typed..p.head, &body, time);
+        self.scroll_to_cursor = true;
+        true
+    }
+
     fn pairs(&mut self) -> &[matching::Pair] {
         let rev = self.state.revision;
         if self.pairs_cache.as_ref().is_none_or(|(r, _)| *r != rev) {
@@ -478,6 +767,65 @@ mod tests {
         assert_eq!(json, "\"select 1\\nfrom dual\"");
         let back: CodeEditor = serde_json::from_str(&json).unwrap();
         assert_eq!(back.text(), editor.text());
+    }
+
+    const PKG: &str = "create or replace package body p as\n  procedure a is\n  begin\n    if x then\n      null;\n    end if;\n  end a;\n  procedure b is\n  begin\n    null;\n  end b;\nend p;\n";
+
+    #[test]
+    fn folding_api() {
+        let mut e = CodeEditor::new(PKG);
+        assert!(e.toggle_fold_at(2));
+        assert_eq!(e.folded_lines(), [2]);
+        assert_eq!(e.display_map().rows(), 13 - 5);
+        assert!(e.toggle_fold_at(2));
+        assert!(e.folded_lines().is_empty());
+        assert!(!e.toggle_fold_at(5));
+        e.fold_all();
+        // Both procedures and the IF, but not the file-wide package body.
+        assert_eq!(e.folded_lines(), [2, 4, 8]);
+        e.unfold_all();
+        e.set_folded_lines(&[8, 99]);
+        assert_eq!(e.folded_lines(), [8]);
+    }
+
+    #[test]
+    fn carets_leave_and_reveal_folds() {
+        let mut e = CodeEditor::new(PKG);
+        e.goto(5, 3);
+        e.fold_at_cursor();
+        // The innermost region around line 5 is the IF on line 4.
+        assert_eq!(e.folded_lines(), [4]);
+        assert_eq!(e.line_col().0, 4);
+        e.goto(5, 1);
+        e.reveal_carets();
+        assert!(e.folded_lines().is_empty());
+    }
+
+    #[test]
+    fn bookmarks_api() {
+        let mut e = CodeEditor::new(PKG);
+        e.toggle_bookmark(3, Some(1));
+        e.toggle_bookmark(9, None);
+        e.goto(1, 1);
+        e.insert_at_cursor("-- header\n");
+        assert_eq!(e.bookmarks(), [(Some(1), 4), (None, 10)]);
+        e.set_bookmarks(vec![(Some(2), 1), (None, 500)]);
+        assert_eq!(e.bookmarks(), [(Some(2), 1)]);
+    }
+
+    #[test]
+    fn snippet_trigger_and_completion() {
+        let mut e = CodeEditor::new("  sel");
+        e.goto(1, 6);
+        assert!(e.expand_trigger(0.0));
+        assert_eq!(e.text(), "  select *\n    from table_name\n   where 1 = 1");
+        assert_eq!(e.selected_text().as_deref(), Some("*"));
+        assert!(e.is_snippet_active());
+        let items = e.snippet_completions("pk");
+        assert_eq!(
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
+            ["pkg", "pkgb"]
+        );
     }
 
     #[test]

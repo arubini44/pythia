@@ -5,6 +5,12 @@
 //! With `ORUI_SCREENSHOT=<file>` it types into the editor by itself, answers
 //! the completion request, writes a raw RGBA screenshot (8-byte width/height
 //! header, then pixels) and exits. Used to check rendering without a human.
+//! `ORUI_DEMO=fold` scripts folding and bookmarks instead, `ORUI_DEMO=snippet`
+//! expands a snippet and fills its placeholders.
+//!
+//! Try: hover the gutter and click a chevron, Ctrl+K Ctrl+0 / Ctrl+K Ctrl+J,
+//! Ctrl+Shift+[ / ], Ctrl+Shift+1 then Ctrl+1, Ctrl+F2 / F2, or type `sel`,
+//! `fori` or `pkg` and press Tab.
 
 use std::sync::Arc;
 
@@ -96,6 +102,58 @@ impl eframe::App for Demo {
         }
         // A background window never has OS focus; pretend it does.
         raw.focused = true;
+        let demo = std::env::var("ORUI_DEMO").unwrap_or_default();
+        if demo == "fold" {
+            match self.frame {
+                3 => {
+                    self.editor.toggle_fold_at(2);
+                    self.editor.toggle_fold_at(4);
+                    self.editor.toggle_fold_at(19);
+                    self.editor.toggle_bookmark(24, None);
+                    self.editor.goto(22, 5);
+                    // Ctrl+Shift+1 as a US layout reports it.
+                    raw.events.push(egui::Event::Key {
+                        key: egui::Key::Exclamationmark,
+                        physical_key: Some(egui::Key::Num1),
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    });
+                }
+                // Dark: hover the gutter (chevrons); light: hover the pill of
+                // the folded procedure (preview of the hidden lines).
+                5 => {
+                    let at = if std::env::var("ORUI_LIGHT").is_ok() {
+                        egui::pos2(731.0, 38.0)
+                    } else {
+                        egui::pos2(12.0, 135.0)
+                    };
+                    raw.events.push(egui::Event::PointerMoved(at));
+                }
+                _ => {}
+            }
+            return;
+        }
+        if demo == "snippet" {
+            match self.frame {
+                3 => {
+                    raw.events
+                        .push(key(egui::Key::End, egui::Modifiers::COMMAND));
+                    raw.events
+                        .push(key(egui::Key::Enter, egui::Modifiers::NONE));
+                    raw.events.push(egui::Event::Text("sel".into()));
+                }
+                4 => raw.events.push(key(egui::Key::Tab, egui::Modifiers::NONE)),
+                5 => raw
+                    .events
+                    .push(egui::Event::Text("e.last_name, e.salary".into())),
+                6 => raw.events.push(key(egui::Key::Tab, egui::Modifiers::NONE)),
+                7 => raw.events.push(egui::Event::Text("employees e".into())),
+                8 => raw.events.push(key(egui::Key::Tab, egui::Modifiers::NONE)),
+                _ => {}
+            }
+            return;
+        }
         // Scripted input: go to the last line's end, then type "em".
         match self.frame {
             3 => {
@@ -154,16 +212,18 @@ impl eframe::App for Demo {
                         kind,
                         insert_text: label.into(),
                     };
-                    self.editor.show_completions(
-                        word_start..trigger.offset,
-                        vec![
-                            entry("EMPLOYEES", "HR · table", CompletionKind::Table),
-                            entry("EMP_DETAILS_VIEW", "HR · view", CompletionKind::View),
-                            entry("EMP_API", "HR · package", CompletionKind::Package),
-                            entry("EMPTY_BLOB", "function", CompletionKind::Function),
-                            entry("DEPARTMENTS", "HR · table", CompletionKind::Table),
-                        ],
-                    );
+                    let mut items = vec![
+                        entry("EMPLOYEES", "HR · table", CompletionKind::Table),
+                        entry("EMP_DETAILS_VIEW", "HR · view", CompletionKind::View),
+                        entry("EMP_API", "HR · package", CompletionKind::Package),
+                        entry("EMPTY_BLOB", "function", CompletionKind::Function),
+                        entry("DEPARTMENTS", "HR · table", CompletionKind::Table),
+                    ];
+                    // Snippets complete too; accepting one expands it.
+                    let prefix = &self.editor.text()[word_start..trigger.offset];
+                    items.extend(self.editor.snippet_completions(prefix));
+                    self.editor
+                        .show_completions(word_start..trigger.offset, items);
                 }
                 if let Some(off) = out.goto_request {
                     self.log.push(format!("goto {off}"));
@@ -171,7 +231,13 @@ impl eframe::App for Demo {
             });
 
         if let Some(path) = &self.screenshot {
-            if self.frame == 12 {
+            // Give tooltips time to appear in the fold demo.
+            let shot_frame = if std::env::var("ORUI_DEMO").is_ok_and(|d| d == "fold") {
+                60
+            } else {
+                12
+            };
+            if self.frame == shot_frame {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
             }
             let shot = ctx.input(|i| {

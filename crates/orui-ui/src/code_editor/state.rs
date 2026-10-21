@@ -10,10 +10,12 @@ use ropey::Rope;
 use super::highlight::Highlighter;
 use super::history::{Edit, EditKind, History};
 use super::selection::{Selection, normalize};
+use super::snippet::{self, Session};
 use super::text::{
     col_from_visual, indent_of, line_col, line_end, line_len, line_start, line_text, next_word,
     pos_of, prev_word, visual_col, word_range,
 };
+use super::tracked::Tracked;
 
 /// Lines whose trimmed text ends with one of these get an extra indent level
 /// on Enter.
@@ -31,6 +33,10 @@ pub struct EditorState {
     pub tab_width: usize,
     /// Revision at which the last undo step was recorded.
     recorded_revision: u64,
+    /// Folds and bookmarks, shifted by every edit.
+    pub tracked: Tracked,
+    /// Active snippet tab stops, mapped through edits.
+    pub snippet: Option<Session>,
 }
 
 impl EditorState {
@@ -46,6 +52,8 @@ impl EditorState {
             revision: 0,
             tab_width: 4,
             recorded_revision: u64::MAX,
+            tracked: Tracked::default(),
+            snippet: None,
         }
     }
 
@@ -55,6 +63,8 @@ impl EditorState {
         self.sels = vec![Selection::caret(0)];
         self.primary = 0;
         self.history.clear();
+        self.tracked.clear();
+        self.snippet = None;
         self.revision += 1;
     }
 
@@ -70,7 +80,7 @@ impl EditorState {
         self.rope.len_chars()
     }
 
-    fn indent_unit(&self) -> String {
+    pub fn indent_unit(&self) -> String {
         " ".repeat(self.tab_width.max(1))
     }
 
@@ -103,6 +113,9 @@ impl EditorState {
         let inserted_breaks = edit.inserted.matches('\n').count();
         self.highlighter
             .edited(&self.rope, line, removed_breaks, inserted_breaks);
+        let at_line_start = self.rope.line_to_char(line) == edit.at;
+        self.tracked
+            .shift(line, removed_breaks, inserted_breaks, at_line_start);
     }
 
     /// Replaces each (non-overlapping, sorted) range with its text as one
@@ -145,6 +158,12 @@ impl EditorState {
             s.head = map_pos(s.head, &mapping);
             s.goal = None;
         }
+        if let Some(session) = &mut self.snippet {
+            for r in session.stops.iter_mut().flatten() {
+                // Text typed at a placeholder's end extends it.
+                *r = map_start(r.start, &mapping)..map_pos(r.end, &mapping);
+            }
+        }
         self.primary = normalize(&mut self.sels, self.primary);
         self.revision += 1;
         self.history
@@ -166,6 +185,7 @@ impl EditorState {
     }
 
     pub fn undo(&mut self) -> bool {
+        self.snippet = None;
         let Some(tx) = self.history.undo().cloned() else {
             return false;
         };
@@ -184,6 +204,7 @@ impl EditorState {
     }
 
     pub fn redo(&mut self) -> bool {
+        self.snippet = None;
         let Some(tx) = self.history.redo().cloned() else {
             return false;
         };
@@ -684,7 +705,20 @@ impl EditorState {
     }
 
     /// Moves vertically by `lines` (negative = up), keeping the goal column.
+    #[cfg(test)]
     pub fn move_vertical(&mut self, lines: isize, extend: bool) {
+        self.move_vertical_mapped(lines, extend, &|line, delta| line as isize + delta);
+    }
+
+    /// Like [`Self::move_vertical`], with `target(line, delta)` choosing the
+    /// destination line (e.g. skipping folded lines). Out-of-range targets go
+    /// to the start or end of the text.
+    pub fn move_vertical_mapped(
+        &mut self,
+        lines: isize,
+        extend: bool,
+        target: &dyn Fn(usize, isize) -> isize,
+    ) {
         let tw = self.tab_width;
         let last = self.rope.len_lines() as isize - 1;
         let sels: Vec<Selection> = self
@@ -695,7 +729,7 @@ impl EditorState {
                 let goal = s
                     .goal
                     .unwrap_or_else(|| visual_col(&line_text(&self.rope, line), col, tw));
-                let target = line as isize + lines;
+                let target = target(line, lines);
                 let pos = if target < 0 {
                     0
                 } else if target > last {
@@ -791,6 +825,69 @@ impl EditorState {
         self.set_selections(sels, primary);
     }
 
+    // ----- snippets ---------------------------------------------------------
+
+    /// Replaces the char range `range` with a snippet body and selects its
+    /// first tab stop. Returns whether a snippet session started.
+    pub fn expand_snippet(&mut self, range: Range<usize>, body: &str, time: f64) -> bool {
+        let line = self.rope.char_to_line(range.start.min(self.len()));
+        let indent = indent_of(&line_text(&self.rope, line)).to_owned();
+        let expanded = snippet::expand(body, &indent, &self.indent_unit());
+        self.history.seal();
+        let inserted = self.apply_changes(vec![(range, expanded.text)], EditKind::Other, time);
+        self.history.seal();
+        let at = inserted.first().map_or(0, |r| r.start);
+        let stops: Vec<Vec<Range<usize>>> = expanded
+            .stops
+            .into_iter()
+            .map(|rs| rs.into_iter().map(|r| at + r.start..at + r.end).collect())
+            .collect();
+        let session = Session { stops, current: 0 };
+        self.select_stop(&session);
+        if session.is_last() {
+            self.snippet = None;
+            false
+        } else {
+            self.snippet = Some(session);
+            true
+        }
+    }
+
+    fn select_stop(&mut self, session: &Session) {
+        let sels: Vec<Selection> = session.stops[session.current]
+            .iter()
+            .map(|r| Selection::new(r.start, r.end))
+            .collect();
+        self.set_selections(sels, 0);
+    }
+
+    /// Tab / Shift+Tab inside a snippet. Returns false if there is none.
+    pub fn snippet_step(&mut self, forward: bool) -> bool {
+        let Some(mut session) = self.snippet.take() else {
+            return false;
+        };
+        if forward {
+            session.current += 1;
+        } else {
+            session.current = session.current.saturating_sub(1);
+        }
+        let current = session.current.min(session.stops.len() - 1);
+        session.current = current;
+        self.select_stop(&session);
+        if !session.is_last() {
+            self.snippet = Some(session);
+        }
+        true
+    }
+
+    /// Ends the snippet if the caret left the current stop.
+    pub fn check_snippet(&mut self) {
+        let head = self.primary().head;
+        if self.snippet.as_ref().is_some_and(|s| !s.contains(head)) {
+            self.snippet = None;
+        }
+    }
+
     /// Replaces byte ranges (e.g. search matches) as one undo step.
     pub fn replace_byte_ranges(
         &mut self,
@@ -821,6 +918,22 @@ fn map_pos(pos: usize, changes: &[(Range<usize>, usize)]) -> usize {
         if pos == r.start || pos < r.end {
             // At an insertion point, or inside a replaced range.
             return (r.start as isize + delta) as usize + new_len;
+        }
+        delta += *new_len as isize - (r.end - r.start) as isize;
+    }
+    (pos as isize + delta) as usize
+}
+
+/// Like [`map_pos`], but a position at an insertion point stays before the
+/// inserted text and a position inside a replaced range moves to its start.
+fn map_start(pos: usize, changes: &[(Range<usize>, usize)]) -> usize {
+    let mut delta: isize = 0;
+    for (r, new_len) in changes {
+        if pos <= r.start {
+            break;
+        }
+        if pos < r.end {
+            return (r.start as isize + delta) as usize;
         }
         delta += *new_len as isize - (r.end - r.start) as isize;
     }
@@ -1068,6 +1181,56 @@ mod tests {
         assert_eq!(show(&s), "a[bc]d\na[b]\na[bc]def");
         s.insert("X", 0.0);
         assert_eq!(show(&s), "aX|d\naX|\naX|def");
+    }
+
+    #[test]
+    fn snippet_session() {
+        let mut s = st("  x|");
+        s.sels = vec![Selection::caret(3)];
+        assert!(s.expand_snippet(2..3, "if ${1:cond} then\n\t${2:null;}\nend if;$0", 0.0));
+        assert_eq!(show(&s), "  if [cond] then\n      null;\n  end if;");
+        s.insert("a > 1", 0.1);
+        assert_eq!(show(&s), "  if a > 1| then\n      null;\n  end if;");
+        assert!(s.snippet_step(true));
+        assert_eq!(show(&s), "  if a > 1 then\n      [null;]\n  end if;");
+        assert!(s.snippet_step(true));
+        assert_eq!(show(&s), "  if a > 1 then\n      null;\n  end if;|");
+        assert!(s.snippet.is_none());
+    }
+
+    #[test]
+    fn snippet_mirrors_and_exit() {
+        let mut s = st("|");
+        s.expand_snippet(0..0, "${1:t} := ${1:t} + 1;$0", 0.0);
+        assert_eq!(show(&s), "[t] := [t] + 1;");
+        s.insert("x", 0.0);
+        assert_eq!(show(&s), "x| := x| + 1;");
+        s.check_snippet();
+        assert!(s.snippet.is_some());
+        s.move_doc_end(false);
+        s.check_snippet();
+        assert!(s.snippet.is_none());
+    }
+
+    #[test]
+    fn folds_and_bookmarks_follow_edits() {
+        let mut s = st("a\nb\nc\n|d\ne");
+        s.tracked.folds = vec![(3, 4)];
+        s.tracked.toggle_bookmark(4, Some(1));
+        s.newline(0.0);
+        assert_eq!(s.tracked.folds, [(4, 5)]);
+        assert_eq!(s.tracked.bookmarks[0].line, 5);
+        s.undo();
+        assert_eq!(s.tracked.folds, [(3, 4)]);
+        assert_eq!(s.tracked.bookmarks[0].line, 4);
+    }
+
+    #[test]
+    fn vertical_movement_skips_folds() {
+        let mut s = st("a|\nb\nc\nd");
+        let map = super::super::fold::DisplayMap::new(4, [(0, 2)]);
+        s.move_vertical_mapped(1, false, &|l, d| map.offset_line(l, d));
+        assert_eq!(show(&s), "a\nb\nc\nd|");
     }
 
     #[test]
