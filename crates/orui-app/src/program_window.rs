@@ -45,6 +45,8 @@ struct State {
     /// Parts still to compile after the current one (compile all).
     compile_queue: Vec<usize>,
     message: Option<(bool, String)>,
+    /// Line to show once the part's source has loaded: (part, line).
+    pending_goto: Option<(usize, usize)>,
 }
 
 impl ProgramWindow {
@@ -71,6 +73,19 @@ impl ProgramWindow {
             parts,
             active,
             state: State::default(),
+        }
+    }
+
+    /// Shows `line` of the part with `object_type` (now, or once loaded).
+    pub fn goto_line(&mut self, object_type: ObjectType, line: usize) {
+        let Some(i) = self.parts.iter().position(|p| p.object_type == object_type) else {
+            return;
+        };
+        self.active = i;
+        if self.state.loading.values().any(|p| *p == i) {
+            self.state.pending_goto = Some((i, line));
+        } else {
+            self.parts[i].editor.goto(line, 1);
         }
     }
 
@@ -162,6 +177,12 @@ impl ProgramWindow {
                             let part = &mut self.parts[i];
                             part.editor.set_text(text.clone());
                             part.saved = text;
+                            if let Some((p, line)) = self.state.pending_goto
+                                && p == i
+                            {
+                                self.state.pending_goto = None;
+                                part.editor.goto(line, 1);
+                            }
                         }
                         // A package without a body yet: offer an empty one.
                         Err(_) if i > 0 => {}

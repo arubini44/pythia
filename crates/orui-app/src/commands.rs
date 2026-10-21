@@ -42,6 +42,7 @@ commands! {
     ToggleAutocommit => "Session: Toggle Auto-Commit",
     History => "Edit: Recall Statement (history)",
     FindObject => "Tools: Find Database Object…",
+    FindInSource => "Tools: Find in Database Source…",
     CompareSchemas => "Tools: Compare Schemas…",
     CompareData => "Tools: Compare Table Data…",
     MonitorDashboard => "Monitor: Dashboard",
@@ -99,6 +100,10 @@ impl Keymap {
                 (
                     Command::FindObject,
                     KeyboardShortcut::new(ctrl | shift, Key::O),
+                ),
+                (
+                    Command::FindInSource,
+                    KeyboardShortcut::new(ctrl | Modifiers::ALT, Key::F),
                 ),
                 (
                     Command::ShowPalette,

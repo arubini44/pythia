@@ -20,6 +20,7 @@ mod program_window;
 mod screenshots;
 mod secrets;
 mod settings_dialog;
+mod source_search;
 mod sql_window;
 mod test_script;
 mod theme;

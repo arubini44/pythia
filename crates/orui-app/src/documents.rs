@@ -106,6 +106,12 @@ pub enum OpenRequest {
         connection: String,
         object: ObjectRef,
     },
+    /// Open a program window and put the cursor on a 1-based line.
+    ProgramAt {
+        connection: String,
+        object: ObjectRef,
+        line: usize,
+    },
     /// Open the connection manager.
     ConnectDialog,
     /// Show this connection in the object browser.
@@ -130,6 +136,7 @@ pub enum DocKind {
     Object(ObjectView),
     Monitor(crate::monitor_window::MonitorWindow),
     Compare(crate::compare_window::CompareWindow),
+    Search(crate::source_search::SourceSearch),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -163,6 +170,7 @@ impl Document {
             DocKind::Object(v) => v.title(),
             DocKind::Monitor(m) => m.title(),
             DocKind::Compare(c) => c.title(),
+            DocKind::Search(s) => s.title(),
         }
     }
 
@@ -183,6 +191,7 @@ impl Document {
             DocKind::Object(v) => v.is_loading(),
             DocKind::Monitor(m) => m.is_busy(),
             DocKind::Compare(c) => c.is_busy(),
+            DocKind::Search(s) => s.is_busy(),
         }
     }
 
@@ -208,6 +217,7 @@ impl Document {
             DocKind::Object(v) => v.on_event(event),
             DocKind::Monitor(m) => m.on_event(event),
             DocKind::Compare(c) => c.on_event(event),
+            DocKind::Search(s) => s.on_event(event),
         }
     }
 
@@ -218,6 +228,7 @@ impl Document {
             DocKind::Object(v) => v.ui(ui, cx, self.connection.as_deref()),
             DocKind::Monitor(m) => m.ui(ui, cx),
             DocKind::Compare(c) => c.ui(ui, cx),
+            DocKind::Search(s) => s.ui(ui, cx),
         }
     }
 
@@ -227,7 +238,7 @@ impl Document {
             DocKind::Sql(_) => Effects::default(),
             DocKind::Program(w) => w.load(),
             DocKind::Object(v) => v.load(),
-            DocKind::Monitor(_) | DocKind::Compare(_) => Effects::default(),
+            DocKind::Monitor(_) | DocKind::Compare(_) | DocKind::Search(_) => Effects::default(),
         }
     }
 
@@ -236,7 +247,9 @@ impl Document {
         match &self.kind {
             DocKind::Sql(w) => (Some(w.state.line_col), w.result_status()),
             DocKind::Program(w) => (Some(w.line_col()), None),
-            DocKind::Object(_) | DocKind::Monitor(_) | DocKind::Compare(_) => (None, None),
+            DocKind::Object(_) | DocKind::Monitor(_) | DocKind::Compare(_) | DocKind::Search(_) => {
+                (None, None)
+            }
         }
     }
 }

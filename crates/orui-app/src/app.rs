@@ -319,6 +319,21 @@ impl OruiApp {
                 }
             }
             OpenRequest::ConnectDialog => self.connect_dialog.show(self.last_profile.as_ref()),
+            OpenRequest::ProgramAt {
+                connection,
+                object,
+                line,
+            } => {
+                let object_type = object.object_type;
+                self.open(OpenRequest::Program { connection, object });
+                if let Some(DocKind::Program(w)) = self
+                    .focused
+                    .and_then(|id| self.docs.get_mut(&id))
+                    .map(|d| &mut d.kind)
+                {
+                    w.goto_line(object_type, line);
+                }
+            }
             OpenRequest::Browse { connection } => {
                 let schema = self
                     .conns
@@ -658,6 +673,13 @@ impl OruiApp {
                 }
             }
             Command::History => self.history_dialog.toggle(),
+            Command::FindInSource => {
+                let connection = self.current_connection();
+                self.add_doc(
+                    connection,
+                    DocKind::Search(crate::source_search::SourceSearch::new()),
+                );
+            }
             Command::CompareSchemas | Command::CompareData => {
                 let kind = if command == Command::CompareSchemas {
                     crate::compare_window::CompareKind::Schema
@@ -991,6 +1013,7 @@ impl OruiApp {
             });
             ui.menu_button("Tools", |ui| {
                 item(ui, Command::FindObject);
+                item(ui, Command::FindInSource);
                 ui.separator();
                 item(ui, Command::CompareSchemas);
                 item(ui, Command::CompareData);
@@ -1482,6 +1505,16 @@ impl OruiApp {
     pub fn test_close_connect(&mut self) {
         self.connect_dialog.open = false;
         self.saved.profiles.clear();
+    }
+
+    pub fn test_search_source(&mut self, query: &str) {
+        let id = self.focused.expect("focused");
+        let Some(DocKind::Search(s)) = self.docs.get_mut(&id).map(|d| &mut d.kind) else {
+            panic!("not a search document");
+        };
+        s.query = query.to_owned();
+        let effects = s.search();
+        self.apply(Some(id), effects);
     }
 
     pub fn test_command(&mut self, command: Command) {

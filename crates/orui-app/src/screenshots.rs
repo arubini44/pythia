@@ -253,6 +253,13 @@ fn screenshots() {
             .test_command(crate::commands::Command::CompareSchemas);
         h.run_steps(5);
         save(&mut h, &format!("09-compare-{suffix}"));
+
+        h.state_mut()
+            .test_command(crate::commands::Command::FindInSource);
+        h.run_steps(3);
+        h.state_mut().test_search_source("salary");
+        wait_until(&mut h, "source search", |app| !app.test_focused_busy());
+        save(&mut h, &format!("10-source-search-{suffix}"));
     }
 }
 
