@@ -100,27 +100,27 @@ orui/
 - [x] Main menu, toolbar, status bar (connection, session, transaction state, cursor pos, encoding)
 - [x] Command palette (Ctrl+Shift+P) with fuzzy search over all commands
 - [ ] Configurable keybindings; ship a PL/SQL Developer compatible preset
-- [ ] Light/dark themes, custom theme files (TOML)
+- [x] Light/dark themes, custom theme files (TOML) (no TOML theme files yet)
 - [ ] Font selection with ligatures off by default, HiDPI scaling
-- [ ] Settings dialog (global, per connection, per project)
+- [x] Settings dialog (global, per connection, per project) (global settings; per-connection options live in the connection dialog; no per-project settings)
 - [x] Crash handler and panic logging
 - [ ] Single-instance mode with file open forwarding (optional)
 
 ### 5.2 Connection Management (M1)
 
 - [x] Connection dialog: user/password, TNS alias, EZConnect, full descriptor
-- [ ] Read `tnsnames.ora` / `sqlnet.ora` (`TNS_ADMIN`, `ORACLE_HOME`)
+- [x] Read `tnsnames.ora` / `sqlnet.ora` (`TNS_ADMIN`, `ORACLE_HOME`) (aliases from `tnsnames.ora` incl. `IFILE`; `sqlnet.ora` is not read)
 - [x] Wallet / external authentication (`/@alias`)
 - [x] Connect as SYSDBA / SYSOPER / SYSBACKUP
 - [ ] Proxy user connect (`user[proxy]`)
 - [x] Saved connections organized in folders, with colors and tags (e.g. red = production)
 - [x] Passwords in the OS keychain (`keyring`), never in plain text
-- [ ] Production safety flags: read-only mode, confirm on commit, confirm DML/DDL
+- [x] Production safety flags: read-only mode, confirm on commit, confirm DML/DDL
 - [x] Multiple simultaneous connections
 - [ ] Session modes: multi-session / dual-session / single-session
-- [ ] Connection health check, auto-reconnect prompt
-- [ ] Set NLS settings, `CURRENT_SCHEMA`, module/action/client info on connect
-- [ ] Login script per connection (like `login.sql`)
+- [x] Connection health check, auto-reconnect prompt (lost sessions are detected on errors and replaced on the next statement; no periodic ping or prompt)
+- [x] Set NLS settings, `CURRENT_SCHEMA`, module/action/client info on connect (`CURRENT_SCHEMA` per connection, NLS via the login script, module set to `orui`; no action/client info)
+- [x] Login script per connection (like `login.sql`)
 - [x] Detect Instant Client and give a helpful message if it's missing
 
 ### 5.3 Code Editor Widget (M2)
@@ -129,14 +129,14 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 - [x] Rope-backed buffer (`ropey`) with undo/redo history (grouped edits)
 - [x] Virtualized rendering (only visible lines laid out), smooth scrolling
-- [ ] Line numbers, gutter with markers (breakpoints, errors, bookmarks, folding)
+- [x] Line numbers, gutter with markers (breakpoints, errors, bookmarks, folding) (no folding markers; a bookmark marker kind exists but bookmarks aren't implemented)
 - [x] Multi-cursor and column/block selection (Alt+drag)
 - [ ] Code folding (blocks, `BEGIN/END`, `IF`, `LOOP`, `CASE`, comments)
 - [x] Bracket and keyword matching (`BEGIN`↔`END`, `IF`↔`END IF`)
 - [x] Find/replace in file with regex, whole word, case sensitivity, in-selection
 - [ ] Go to line, bookmarks (numbered like PL/SQL Developer: Ctrl+Shift+0..9)
 - [x] Auto-indent and smart tab
-- [ ] Keyword case conversion (upper/lower/init cap) live or on demand
+- [x] Keyword case conversion (upper/lower/init cap) live or on demand (on demand: Ctrl+U / Ctrl+Shift+U on selection or word, formatter keyword case; no init cap, no live conversion)
 - [x] Comment/uncomment selection
 - [ ] Minimap (optional)
 - [x] Whitespace / EOL visualization
@@ -144,13 +144,13 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [ ] Large file mode (>50MB): reduced features, still responsive
 - [ ] Split view of the same buffer
 - [ ] Clipboard with rich and plain text
-- [ ] IME / Unicode input support
+- [x] IME / Unicode input support
 
 ### 5.4 Syntax Highlighting & Language Intelligence (M2/M4)
 
 - [x] PL/SQL + SQL lexer (`logos`): keywords, identifiers, quoted identifiers, strings incl. `q'[...]'`, numbers, comments, hints `/*+ */`, bind variables, substitution variables `&var`
 - [ ] Highlighting for SQL*Plus commands (`SET`, `PROMPT`, `@`, `DEFINE`, `/`)
-- [ ] Incremental re-lexing on edit (only dirty lines)
+- [x] Incremental re-lexing on edit (only dirty lines)
 - [x] Recursive-descent PL/SQL parser producing an AST with error recovery
 - [x] Statement splitting (handles `/`, `;`, PL/SQL blocks, `CREATE ... AS` units)
 - [x] Code outline / structure view (package specs, bodies, procedures, functions, types, cursors, variables)
@@ -163,11 +163,11 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
   - [x] Procedure parameter hints (signature help)
 - [x] Hover info: object type, column datatype, parameter list, comments
 - [x] Go to definition (Ctrl+click), including into package bodies on the DB
-- [ ] Find references within the file and across the schema (via `ALL_IDENTIFIERS` / PL/Scope when enabled)
+- [x] Find references within the file and across the schema (via `ALL_IDENTIFIERS` / PL/Scope when enabled) (within the file only, Shift+F12; no schema-wide search via PL/Scope)
 - [x] Live diagnostics: parse errors, unknown identifiers (optional)
-- [ ] Hyperlinks for object names (open in object browser)
-- [ ] Code templates / snippets with placeholders (`sel` → `SELECT * FROM ...`)
-- [ ] Code formatter (PL/SQL Beautifier equivalent) with configurable rules
+- [x] Hyperlinks for object names (open in object browser) (Ctrl+hover link, Ctrl+click opens the object's window; doesn't reveal it in the object browser)
+- [x] Code templates / snippets with placeholders (`sel` → `SELECT * FROM ...`) (built-in snippets with a caret position; no tab-stop placeholders, no user-defined templates)
+- [x] Code formatter (PL/SQL Beautifier equivalent) with configurable rules
 - [x] Code assistant settings: delay, case, min chars
 
 ### 5.5 SQL Window (M1)
@@ -188,18 +188,18 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.6 Result Grid / Data Grid (M1/M5)
 
-- [ ] Virtualized grid for millions of rows (row and column virtualization)
+- [x] Virtualized grid for millions of rows (row and column virtualization) (rows only; columns are not virtualized)
 - [ ] Column resize, reorder, hide, freeze
-- [ ] Sort and filter client-side; option to push sort/filter into SQL
-- [ ] Data type aware rendering: NULL distinct, dates per NLS format, numbers aligned right
-- [ ] LOB viewers: CLOB text, BLOB hex/image, XMLType, JSON pretty view
+- [x] Sort and filter client-side; option to push sort/filter into SQL (no push of sort/filter into SQL)
+- [x] Data type aware rendering: NULL distinct, dates per NLS format, numbers aligned right
+- [x] LOB viewers: CLOB text, BLOB hex/image, XMLType, JSON pretty view (no XML pretty view)
 - [x] Single record view (transposed)
 - [x] Editable grid (`SELECT ... FOR UPDATE` / ROWID based): insert, update, delete rows
 - [ ] Cell editors per type (date picker, number, LOB editor dialog)
 - [x] Copy as: TSV, CSV, INSERT statements, Markdown, JSON, with headers
-- [ ] Paste from clipboard into grid (Excel ranges)
+- [x] Paste from clipboard into grid (Excel ranges)
 - [x] Cell, row, and column selection; aggregates of selection (sum, count, avg, min, max) in the status bar
-- [ ] Find in grid
+- [x] Find in grid (quick filter shows matching rows; no find next/previous)
 - [x] Highlight changed cells before commit
 - [x] Foreign key navigation: jump to parent/child rows
 
@@ -209,34 +209,34 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Spec and body in one window with tabs
 - [x] Compile (F8) with error list, click error → jump to line
 - [x] Compile with debug info (`PLSQL_OPTIMIZE_LEVEL`, `ALTER ... COMPILE DEBUG`)
-- [ ] Show compiler warnings (`PLSQL_WARNINGS`)
-- [ ] Detect when the DB version changed since it was opened (conflict warning)
+- [x] Show compiler warnings (`PLSQL_WARNINGS`) (warnings Oracle reports are shown; no setting to enable `PLSQL_WARNINGS` categories)
+- [x] Detect when the DB version changed since it was opened (conflict warning)
 - [x] Save to file / load from file
-- [ ] Recompile invalid objects (schema-wide, dependency order)
+- [x] Recompile invalid objects (schema-wide, dependency order) (`DBMS_UTILITY.COMPILE_SCHEMA` per schema from the object browser)
 
 ### 5.8 Test Window (M4/M6)
 
 - [x] Generate a test script for a procedure/function (anonymous block with bind variables for params)
 - [ ] Variable grid: name, type, value, in/out
 - [x] Run, run with debugger
-- [ ] Show DBMS_OUTPUT and out parameters, ref cursors as result grids
+- [x] Show DBMS_OUTPUT and out parameters, ref cursors as result grids (OUT parameters and results printed via DBMS_OUTPUT; ref cursors not shown as grids)
 - [ ] Save/load test scripts (`.tst`), compatible with PL/SQL Developer format if feasible
 
 ### 5.9 Command Window (M5)
 
 - [ ] SQL*Plus-like command window
 - [ ] Support common SQL*Plus commands: `SET`, `SHOW`, `DESC`, `SPOOL`, `PROMPT`, `DEFINE`, `@`, `@@`, `EXEC`, `VAR`, `PRINT`, `CONNECT`, `WHENEVER`
-- [ ] Run deployment scripts with progress and stop-on-error
+- [x] Run deployment scripts with progress and stop-on-error (in SQL windows; no dedicated command window)
 - [ ] Spool output to file
 
 ### 5.10 Object Browser / Code Browser (M3)
 
 - [x] Tree: connection → schema → object type → objects
-- [ ] Object types: tables, views, materialized views, sequences, synonyms, packages, procedures, functions, types, triggers, indexes, constraints, DB links, jobs/scheduler, queues, directories, users, roles, profiles
+- [x] Object types: tables, views, materialized views, sequences, synonyms, packages, procedures, functions, types, triggers, indexes, constraints, DB links, jobs/scheduler, queues, directories, users, roles, profiles (no constraints, queues, directories, users, roles or profiles folders)
 - [x] "My objects" / all schemas / filter by schema
 - [ ] Filters: name pattern, status (invalid), modified since, custom saved filters
 - [x] Invalid objects highlighted
-- [ ] Context menu: view, edit, compile, drop, rename, describe, query data, generate DDL, copy name, grant
+- [x] Context menu: view, edit, compile, drop, rename, describe, query data, generate DDL, copy name, grant (no rename or grant)
 - [ ] Expand table → columns, indexes, constraints, triggers, FKs, references-by
 - [x] Expand package → procedures/functions with parameters (outline from parser)
 - [x] Dependencies view (uses / used by)
@@ -248,10 +248,10 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.11 Object Editors (M3/M5)
 
 - [x] View and generate DDL (`DBMS_METADATA`) with options (storage, tablespace, constraints)
-- [ ] Table editor: columns, keys, indexes, checks, comments, partitions → generates `ALTER` script
+- [x] Table editor: columns, keys, indexes, checks, comments, partitions → generates `ALTER` script (no partitions)
 - [ ] Sequence, synonym, view, index, user, role editors
 - [ ] Grants editor
-- [ ] Preview generated DDL before applying
+- [x] Preview generated DDL before applying
 
 ### 5.12 Debugger (M6)
 
@@ -260,10 +260,10 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Debug session lifecycle: target session + debugger session
 - [ ] Breakpoints in gutter: line, conditional, hit count, enable/disable
 - [ ] Breakpoints persisted per object
-- [ ] Step into / over / out, run to cursor, continue, abort
+- [x] Step into / over / out, run to cursor, continue, abort (no run to cursor)
 - [ ] Break on exception (all / specific ORA codes)
 - [x] Call stack panel with navigation
-- [ ] Variables panel: locals, parameters, package globals
+- [x] Variables panel: locals, parameters, package globals (locals and parameters; no package globals)
 - [x] Inspect records, collections, objects (tree view)
 - [ ] Watches with expressions
 - [ ] Modify variable values while paused
@@ -284,11 +284,11 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.14 Data Search (M5)
 
-- [ ] Search a value across all tables/columns in selected schemas
-- [ ] Filter by column data type (strings, numbers, dates), table name patterns
-- [ ] Match modes: exact, contains, regex (`REGEXP_LIKE`), case-insensitive
-- [ ] Run in parallel with throttling, show progress, cancellable
-- [ ] Results: table, column, matching row count; click → open query with filter
+- [x] Search a value across all tables/columns in selected schemas (one schema at a time)
+- [x] Filter by column data type (strings, numbers, dates), table name patterns (column types follow from the value; no explicit type filter)
+- [x] Match modes: exact, contains, regex (`REGEXP_LIKE`), case-insensitive
+- [x] Run in parallel with throttling, show progress, cancellable (sequential, not parallel)
+- [x] Results: table, column, matching row count; click → open query with filter
 - [ ] Find columns by name across schemas
 
 ### 5.15 Data Compare (M7)
@@ -333,10 +333,10 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.19 Explain Plan & Performance (M8)
 
-- [ ] Explain plan as a tree grid (cost, cardinality, bytes, predicates)
-- [ ] Actual execution plan via `DBMS_XPLAN.DISPLAY_CURSOR` with `GATHER_PLAN_STATISTICS`
+- [x] Explain plan as a tree grid (cost, cardinality, bytes, predicates)
+- [x] Actual execution plan via `DBMS_XPLAN.DISPLAY_CURSOR` with `GATHER_PLAN_STATISTICS`
 - [ ] SQL Monitor report viewer (if licensed)
-- [ ] Statistics of the last execution (`V$MYSTAT` deltas: consistent gets, physical reads, ...)
+- [x] Statistics of the last execution (`V$MYSTAT` deltas: consistent gets, physical reads, ...)
 - [ ] PL/SQL profiler (`DBMS_HPROF`) with result view, hot lines in the editor
 - [x] Trace file helper (enable 10046 for session)
 
@@ -347,17 +347,17 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Lock tree / blocking sessions
 - [x] Long operations (`V$SESSION_LONGOPS`)
 - [x] Tablespace usage overview
-- [ ] DBMS_SCHEDULER jobs: list, run, enable/disable, history
+- [x] DBMS_SCHEDULER jobs: list, run, enable/disable, history
 
 ### 5.21 Refactoring & Productivity (M8)
 
 - [ ] Rename local variable / parameter
 - [ ] Extract procedure from selection
-- [ ] Generate: column list, `INSERT`/`UPDATE` template for table, record type, `%ROWTYPE` declarations
-- [ ] Generate package body stubs from spec
+- [x] Generate: column list, `INSERT`/`UPDATE` template for table, record type, `%ROWTYPE` declarations (column list and SELECT/INSERT/UPDATE from the object browser; no record type or `%ROWTYPE` declarations)
+- [x] Generate package body stubs from spec
 - [ ] Synchronize spec and body signatures
 - [ ] Macro recorder (replay command sequences)
-- [ ] Editor tabs: pin, reorder, close others, reopen closed
+- [x] Editor tabs: pin, reorder, close others, reopen closed (no pinning)
 - [ ] Project / workspace: group files, objects, and connections
 
 ### 5.22 Version Control Integration (M8/M9)
@@ -370,9 +370,9 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.23 Reports (M9)
 
 - [ ] Saved parameterized SQL reports
-- [ ] Built-in reports (invalid objects, object sizes, grants, ...)
-- [ ] Export report to HTML/XLSX
-- [ ] Simple charts for query results (bar/line) – optional
+- [x] Built-in reports (invalid objects, object sizes, grants, ...)
+- [x] Export report to HTML/XLSX (through the result grid's export)
+- [x] Simple charts for query results (bar/line) – optional
 
 ### 5.24 Extensibility (Later)
 
@@ -395,23 +395,23 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### Reliability & Safety
 - [ ] Never lose unsaved editor content: autosave to a recovery folder
 - [x] Transaction state always visible; warn before disconnect/exit with uncommitted work
-- [ ] All destructive actions confirm, with extra confirm on production-flagged connections
+- [x] All destructive actions confirm, with extra confirm on production-flagged connections
 - [x] No passwords in logs, history, or crash reports
 
 ### Quality
 - [x] Unit tests for lexer, parser, formatter (snapshot tests with `insta`)
 - [x] Integration tests against Oracle Free 23ai in Docker
-- [ ] CI: build + test on Linux, Windows, macOS
+- [x] CI: build + test on Linux, Windows, macOS
 - [x] `clippy` and `rustfmt` enforced
 
 ### Packaging
-- [ ] Windows MSI/installer, macOS `.dmg` (signed/notarized), Linux AppImage / `.deb` / Flatpak
-- [ ] Bundled or guided Instant Client installation
+- [x] Windows MSI/installer, macOS `.dmg` (signed/notarized), Linux AppImage / `.deb` / Flatpak (no Flatpak; signing/notarization only when the secrets are configured)
+- [x] Bundled or guided Instant Client installation (guided: steps shown when the client is missing; not bundled for licensing reasons)
 - [ ] Auto-update check (optional, opt-in)
 
 ### Accessibility & i18n
 - [ ] Full keyboard navigation
-- [ ] AccessKit support (egui has it built in)
+- [x] AccessKit support (egui has it built in) (eframe's `accesskit` feature is enabled; not audited)
 - [ ] Translatable UI strings (English first, German second)
 
 ---
@@ -423,7 +423,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] **Editor widget effort**: a custom high-quality code editor in egui is a big task. Evaluate existing crates (`egui_code_editor`, `egui-textedit` extensions) vs building our own
 - [x] **PL/SQL grammar coverage**: the grammar is huge; aim for a "good enough" error-tolerant parser for outline, completion, and navigation rather than a full validating parser
 - [ ] **egui text rendering**: check font fallback, CJK, and subpixel quality on all platforms
-- [ ] **Licensing**: choose a license (MIT/Apache-2.0 vs commercial); check Oracle Instant Client redistribution terms
+- [x] **Licensing**: choose a license (MIT/Apache-2.0 vs commercial); check Oracle Instant Client redistribution terms (MIT OR Apache-2.0; Instant Client may not be bundled)
 - [ ] **File format compatibility**: should we import PL/SQL Developer `.tst`, `.sql`, preferences, and connection lists?
 
 ---
