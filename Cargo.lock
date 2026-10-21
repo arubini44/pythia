@@ -2937,6 +2937,8 @@ version = "0.1.0"
 dependencies = [
  "insta",
  "logos",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

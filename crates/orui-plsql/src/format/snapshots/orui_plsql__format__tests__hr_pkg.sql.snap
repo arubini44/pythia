@@ -1,0 +1,172 @@
+---
+source: crates/orui-plsql/src/format/tests.rs
+expression: out
+---
+create or replace package hr.emp_pkg as
+  -- Public types and constants
+  c_max_salary constant number := 100000;
+  type t_emp_rec is record (
+    id     employees.employee_id%type,
+    name   varchar2(100),
+    salary number(8, 2) := 0
+  );
+  type t_emp_tab is table of t_emp_rec index by pls_integer;
+  type t_cur is ref cursor return employees%rowtype;
+  g_count     pls_integer;
+  e_not_found exception;
+  pragma exception_init(e_not_found, -20001);
+
+  cursor c_dept(p_dept_id number) return departments%rowtype;
+
+  procedure raise_salary(p_emp_id in employees.employee_id%type, p_pct in number default 10);
+  procedure raise_salary(p_emp_id in number, p_amount in number, p_reason in varchar2);
+  function get_name(p_emp_id in number) return varchar2 deterministic;
+  function count_by_dept(p_dept_id in number, p_active in boolean := true) return pls_integer;
+end emp_pkg;
+/
+create or replace package body hr.emp_pkg as
+
+  cursor c_dept(p_dept_id number) return departments%rowtype is
+    select *
+    from departments d
+    where d.department_id = p_dept_id;
+
+  g_cache t_emp_tab;
+
+  -- private helper
+  function fmt(p_value in number) return varchar2 is
+  begin
+    return to_char(p_value, 'FM999G999D00');
+  end fmt;
+
+  procedure log_change(p_emp_id number, p_old number, p_new number) is
+    pragma autonomous_transaction;
+  begin
+    insert into salary_log (employee_id, old_salary, new_salary, changed_at)
+    values (p_emp_id, p_old, p_new, systimestamp);
+    commit;
+  end log_change;
+
+  procedure raise_salary(p_emp_id in employees.employee_id%type, p_pct in number default 10) is
+    l_emp employees%rowtype;
+    l_new employees.salary%type;
+
+    procedure check_limit(p_amount number) is
+    begin
+      if p_amount > c_max_salary then
+        raise_application_error(-20002, 'Salary too high: ' || fmt(p_amount));
+      elsif p_amount < 0 then
+        raise value_error;
+      else
+        null;
+      end if;
+    end check_limit;
+  begin
+    select *
+    into l_emp
+    from employees e
+    where e.employee_id = p_emp_id
+    for update;
+    l_new := round(l_emp.salary * (1 + p_pct / 100), 2);
+    check_limit(l_new);
+    update employees e
+    set e.salary = l_new, e.last_update = case when l_new > 5000 then sysdate else e.last_update end
+    where e.employee_id = p_emp_id;
+    log_change(p_emp_id, l_emp.salary, l_new);
+  exception
+    when no_data_found then
+      raise e_not_found;
+    when others then
+      rollback;
+      raise;
+  end raise_salary;
+
+  procedure raise_salary(p_emp_id in number, p_amount in number, p_reason in varchar2) is
+  begin
+    update employees
+    set salary = salary + p_amount
+    where employee_id = p_emp_id;
+  end;
+
+  function get_name(p_emp_id in number) return varchar2 deterministic is
+    l_name varchar2(200);
+  begin
+    select first_name || ' ' || last_name
+    into l_name
+    from employees
+    where employee_id = p_emp_id;
+    return l_name;
+  exception
+    when no_data_found then
+      return null;
+  end get_name;
+
+  function count_by_dept(p_dept_id in number, p_active in boolean := true) return pls_integer is
+    l_count pls_integer := 0;
+    l_ids   dbms_sql.number_table;
+  begin
+    for r in (
+      select e.employee_id, e.salary sal, d.department_name
+      from employees e
+      join departments d on d.department_id = e.department_id
+      where e.department_id = p_dept_id
+    ) loop
+      l_count := l_count + 1;
+      g_cache(r.employee_id).salary := r.sal;
+    end loop;
+
+    for d in c_dept(p_dept_id) loop
+      dbms_output.put_line(d.department_name);
+    end loop;
+
+    <<outer>>
+    for i in 1..10 loop
+      exit outer when i > l_count;
+      continue when mod(i, 2) = 0;
+    end loop outer;
+
+    while l_count > 100 loop
+      l_count := l_count - 1;
+    end loop;
+
+    case
+      when l_count = 0 then
+        g_count := 0;
+      when l_count < 10 then
+        g_count := 1;
+      else
+        g_count := 2;
+    end case;
+
+    select employee_id
+    bulk collect into l_ids
+    from employees;
+    forall i in 1..l_ids.count
+      delete from salary_log where employee_id = l_ids(i);
+
+    merge into employee_stats s
+    using (
+      select department_id, count(*) cnt
+      from employees
+      group by department_id
+    ) x
+    on (s.department_id = x.department_id)
+    when matched then
+      update set s.headcount = x.cnt
+    when not matched then
+      insert (department_id, headcount)
+      values (x.department_id, x.cnt);
+
+    declare
+      l_local date := sysdate;
+    begin
+      g_count := g_count + 1;
+    end;
+
+    return l_count;
+  end count_by_dept;
+
+begin
+  g_count := 0;
+end emp_pkg;
+/

@@ -1,0 +1,42 @@
+---
+source: crates/orui-plsql/src/format/tests.rs
+expression: out
+---
+create or replace trigger hr.employees_biu
+  before insert or update of salary on hr.employees
+  for each row
+  when (new.salary > 0)
+declare
+  l_now date := sysdate;
+begin
+  if inserting then
+    :new.created_at := l_now;
+  end if;
+  :new.updated_at := l_now;
+end;
+/
+create or replace trigger emp_compound
+  for update of salary on employees
+  compound trigger
+  type t_ids is table of employees.employee_id%type;
+  g_ids t_ids := t_ids();
+
+  before statement is
+  begin
+    g_ids.delete;
+  end before statement;
+
+  after each row is
+  begin
+    g_ids.extend;
+    g_ids(g_ids.last) := :new.employee_id;
+  end after each row;
+
+  after statement is
+  begin
+    for i in 1 .. g_ids.count loop
+      null;
+    end loop;
+  end after statement;
+end emp_compound;
+/
