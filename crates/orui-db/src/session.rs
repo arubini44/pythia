@@ -146,6 +146,10 @@ impl Worker {
                 DbRequest::Commit => worker.end_transaction(true),
                 DbRequest::Rollback => worker.end_transaction(false),
                 DbRequest::SetAutocommit(on) => worker.autocommit = on,
+                DbRequest::Task { id, task } => {
+                    let result = task(&worker.conn);
+                    worker.events.send(DbEvent::TaskDone { id, result });
+                }
                 DbRequest::Disconnect => break,
             }
         }
@@ -404,5 +408,8 @@ fn statement_kind_label(kind: &StatementType, sql: &str) -> String {
 /// The session's current schema. `Connection::current_schema` only reports a
 /// value after it was set explicitly, so ask the database.
 fn current_schema(conn: &Connection) -> oracle::Result<String> {
-    conn.query_row_as("select sys_context('USERENV', 'CURRENT_SCHEMA') from dual", &[])
+    conn.query_row_as(
+        "select sys_context('USERENV', 'CURRENT_SCHEMA') from dual",
+        &[],
+    )
 }

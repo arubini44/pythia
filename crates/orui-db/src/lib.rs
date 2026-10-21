@@ -17,4 +17,8 @@ pub use meta::{
 pub use session::Session;
 pub use types::{
     Cell, Column, Compiled, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
+    TaskFn, TaskResult,
 };
+
+/// Re-exported so tools running [`DbRequest::Task`] can use the driver.
+pub use oracle;

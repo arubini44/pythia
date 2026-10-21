@@ -109,6 +109,8 @@ pub struct SqlEditor<'a> {
     id_salt: egui::Id,
     font_size: f32,
     line_numbers: bool,
+    select: Option<Range<usize>>,
+    read_only: bool,
 }
 
 /// Cursor and selection after the frame, as byte offsets into the text.
@@ -128,7 +130,20 @@ impl<'a> SqlEditor<'a> {
             id_salt: egui::Id::new(id_salt),
             font_size: 13.0,
             line_numbers: true,
+            select: None,
+            read_only: false,
         }
+    }
+
+    /// Selects the byte range, focuses the editor and scrolls it into view.
+    pub fn select(mut self, range: Option<Range<usize>>) -> Self {
+        self.select = range;
+        self
+    }
+
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
     }
 
     pub fn font_size(mut self, size: f32) -> Self {
@@ -158,6 +173,11 @@ impl<'a> SqlEditor<'a> {
         let line_count = self.text.lines().count().max(1) + usize::from(self.text.ends_with('\n'));
         let gutter_color = ui.visuals().weak_text_color();
         let text = self.text;
+        let select = self.select.map(|r| {
+            let to_char = |b: usize| text[..b.min(text.len())].chars().count();
+            (to_char(r.start), to_char(r.end))
+        });
+        let read_only = self.read_only;
 
         let output = egui::ScrollArea::both()
             .id_salt(self.id_salt.with("scroll"))
@@ -178,15 +198,26 @@ impl<'a> SqlEditor<'a> {
                             .selectable(false),
                         );
                     }
-                    egui::TextEdit::multiline(text)
+                    let mut output = egui::TextEdit::multiline(text)
                         .id_salt(self.id_salt)
                         .code_editor()
+                        .interactive(!read_only)
                         .frame(egui::Frame::NONE)
                         .desired_width(f32::INFINITY)
                         .desired_rows(30)
                         .lock_focus(true)
                         .layouter(&mut layouter)
-                        .show(ui)
+                        .show(ui);
+                    if let Some((start, end)) = select {
+                        use egui::text::{CCursor, CCursorRange};
+                        let range = CCursorRange::two(CCursor::new(start), CCursor::new(end));
+                        output.state.cursor.set_char_range(Some(range));
+                        output.state.clone().store(ui.ctx(), output.response.response.id);
+                        output.response.response.request_focus();
+                        let rect = output.galley.pos_from_cursor(CCursor::new(start));
+                        ui.scroll_to_rect(rect.translate(output.galley_pos.to_vec2()).expand(40.0), None);
+                    }
+                    output
                 })
                 .inner
             })

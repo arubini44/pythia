@@ -24,7 +24,10 @@ impl fmt::Debug for ConnectParams {
     }
 }
 
-#[derive(Debug, Clone)]
+/// A closure run on the session's worker thread with its connection.
+pub type TaskFn = Box<dyn FnOnce(&oracle::Connection) -> TaskResult + Send>;
+pub type TaskResult = Result<Box<dyn std::any::Any + Send>, DbError>;
+
 pub enum DbRequest {
     /// Executes one statement. Queries return the first `max_rows` rows.
     Execute {
@@ -47,10 +50,53 @@ pub enum DbRequest {
     Commit,
     Rollback,
     SetAutocommit(bool),
+    /// Runs arbitrary code on the connection (used by tools such as the
+    /// monitor). Answered with [`DbEvent::TaskDone`].
+    Task {
+        id: u64,
+        task: TaskFn,
+    },
     Disconnect,
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Debug for DbRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DbRequest::Execute {
+                id,
+                sql,
+                max_rows,
+                binds,
+            } => f
+                .debug_struct("Execute")
+                .field("id", id)
+                .field("sql", sql)
+                .field("max_rows", max_rows)
+                .field("binds", &binds.len())
+                .finish(),
+            DbRequest::Meta { id, query } => f
+                .debug_struct("Meta")
+                .field("id", id)
+                .field("query", query)
+                .finish(),
+            DbRequest::FetchMore { id, max_rows } => f
+                .debug_struct("FetchMore")
+                .field("id", id)
+                .field("max_rows", max_rows)
+                .finish(),
+            DbRequest::Commit => f.write_str("Commit"),
+            DbRequest::Rollback => f.write_str("Rollback"),
+            DbRequest::SetAutocommit(on) => f.debug_tuple("SetAutocommit").field(on).finish(),
+            DbRequest::Task { id, .. } => f
+                .debug_struct("Task")
+                .field("id", id)
+                .finish_non_exhaustive(),
+            DbRequest::Disconnect => f.write_str("Disconnect"),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum DbEvent {
     Connected(ServerInfo),
     ConnectFailed(DbError),
@@ -77,6 +123,10 @@ pub enum DbEvent {
     Meta {
         id: u64,
         result: Result<MetaResult, DbError>,
+    },
+    TaskDone {
+        id: u64,
+        result: TaskResult,
     },
     /// Lines read from `DBMS_OUTPUT` after a statement.
     Output(Vec<String>),
