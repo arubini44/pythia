@@ -1,0 +1,590 @@
+Oracle AI Database 26ai Free Release 23.26.3.0.0 - Develop, Learn, and Run for Free
+Version 23.26.3.0.0
+Build label:    RDBMS_23.26.3.0.0DBRU_LINUX.X64_260704
+ORACLE_HOME:    /opt/oracle/product/26ai/dbhomeFree
+System name:	Linux
+Node name:	dbhost
+Release:	6.0.0
+Version:	#1 SMP
+Machine:	x86_64
+CLID:	P
+Instance name: FREE
+Instance number: 1
+Database name: FREE 
+Database unique name: FREE 
+Database id: 1
+Database role: PRIMARY
+Redo thread mounted by this instance: 1
+Oracle binary inode: 	2113714
+Oracle process number: 84
+Unix process pid:       1944
+             NID:       4026533991
+             created:   2026-10-21T18:50:14.199684731+00:00
+             image:     oracle@dbhost
+
+
+*** 2026-10-21T18:50:15.485426+00:00 (FREEPDB1(3))
+*** SESSION ID:(50.3210) 2026-10-21T18:50:15.485439+00:00
+*** CLIENT ID:() 2026-10-21T18:50:15.485450+00:00
+*** SERVICE NAME:(freepdb1) 2026-10-21T18:50:15.485460+00:00
+*** MODULE NAME:(orui-test@client (TNS V1-V3)) 2026-10-21T18:50:15.485469+00:00
+*** ACTION NAME:() 2026-10-21T18:50:15.485479+00:00
+*** CLIENT DRIVER:(rust-oracle : 0.6.3) 2026-10-21T18:50:15.485487+00:00
+*** CONTAINER ID:(3) 2026-10-21T18:50:15.485496+00:00
+*** CLIENT IP:(10.89.14.2) 2026-10-21T18:50:15.485504+00:00
+*** CONNECTION ID:(Xl81eRq796TgYwEBAH8dKA==) 2026-10-21T18:50:15.485514+00:00
+ 
+=====================
+PARSING IN CURSOR #138290362307120 len=106 dep=0 uid=9 oct=47 lid=9 tim=12601287910 hv=2692710355 ad='71ec2968' sqlid='01gybqkh7yzym'
+begin dbms_monitor.session_trace_enable(waits => true, binds => true, plan_stat => 'ALL_EXECUTIONS'); end;
+END OF STMT
+EXEC #138290362307120:c=5544,e=6109,p=3,cr=92,cu=0,mis=1,r=1,dep=0,og=1,plh=0,tim=12601287907
+WAIT #138290362307120: nam='SQL*Net message to client' ela=17 driver id=1952673792 #bytes=188 p3=0 obj#=4294967295 tim=12601288904
+WAIT #138290362307120: nam='SQL*Net message from client' ela=384 driver id=1952673792 #bytes=1 p3=0 obj#=4294967295 tim=12601289308
+=====================
+PARSING IN CURSOR #138290350220928 len=77 dep=0 uid=9 oct=3 lid=9 tim=12601289782 hv=1992348311 ad='7442c2f8' sqlid='g0bsxrjvc1nnr'
+select /* orui_trace_marker */ count(*) from all_objects where object_id < :1
+END OF STMT
+PARSE #138290350220928:c=409,e=409,p=0,cr=0,cu=0,mis=1,r=0,dep=0,og=1,plh=0,tim=12601289781
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=48 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601300345
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=32 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601301855
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=31 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601304925
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=26 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601306049
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=18 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601306976
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=21 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601307514
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=30 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601308766
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=35 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601310830
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=13 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601311399
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=20 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601312331
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=13 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601313060
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=5 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601313136
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=14 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601313403
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=10 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601313816
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=21 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601314948
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=30 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601316695
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=8 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601316888
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=15 Bytes=65536 where=2 p3=0 obj#=4294967295 tim=12601317107
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=8 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601317297
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=6 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601317446
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=5 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601317591
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=11 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601317789
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=14 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601318435
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=33 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601320591
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=8 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601320777
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=7 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601320979
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=8 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601321280
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=6 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601321403
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=5 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601321499
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=16 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601321840
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=10 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601322496
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=18 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601323500
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=38 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601325737
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=37 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601327720
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=43 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601329012
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=11 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601329235
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=9 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601329436
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=8 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601329595
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=9 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601329751
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=9 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601329935
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=32 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601331503
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=9 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601331710
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=10 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601331882
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=37 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601333861
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=10 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601334082
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=9 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601334258
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=29 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601335184
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=12 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601335506
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=7 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601335626
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=17 Bytes=65536 where=2 p3=0 obj#=4294967295 tim=12601335953
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=63 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601345747
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=43 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601347878
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=35 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601349444
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=18 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601350126
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=27 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601350858
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=15 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601351615
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=26 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601352789
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=44 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601356558
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=52 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601358258
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=15 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601358546
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=32 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601359923
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=49 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601375812
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=37 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601377317
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=27 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601378472
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=23 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601379615
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=31 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601382138
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=43 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601384696
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=16 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601385332
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=25 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601386253
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=9 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601386457
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=7 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601386553
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=5 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601386679
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=8 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601387169
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=11 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601387261
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=6 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601387430
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=6 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601387582
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=4 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601387609
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=31 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601388983
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=29 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601390454
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=8 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601390538
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=17 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601391337
+WAIT #138290350220928: nam='Allocate CGA memory from OS' ela=26 Bytes=65536 where=2 p3=0 obj#=4294967295 tim=12601391824
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=54 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601394674
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=9 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601394809
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=5 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601394865
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=5 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601394919
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=6 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601394974
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=7 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601395038
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=6 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601395098
+BINDS #138290350220928:
+
+ Bind#0
+  oacdty=02 mxl=22(21) mxlc=00 mal=00 scl=00 pre=00
+  oacflg=01 fl2=1000000 frm=00 csi=00 siz=24 off=0
+  kxsbbbfp=7dc63b333c58  bln=22  avl=02  flg=05
+  value=1000
+EXEC #138290350220928:c=104477,e=105426,p=0,cr=58,cu=0,mis=1,r=0,dep=0,og=1,plh=3407277182,tim=12601395281
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=13 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601395551
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=6 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601395617
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=14 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601395674
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=5 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601395709
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=4 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601395792
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=8 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601396062
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=19 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601397090
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=10 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601397460
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=8 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601397613
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=5 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601397670
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=5 Bytes=65536 where=1 p3=0 obj#=4294967295 tim=12601397716
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=5 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601397755
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=5 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601397845
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=15 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601398399
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=6 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601398445
+FETCH #138290350220928:c=16908,e=16842,p=0,cr=2421,cu=0,mis=0,r=1,dep=0,og=1,plh=3407277182,tim=12601412195
+STAT #138290350220928 id=1 cnt=1 pid=0 pos=1 obj=0 op='SORT AGGREGATE (cr=2421 pr=0 pw=0 str=1 time=16866 dr=0 dw=0 us)'
+STAT #138290350220928 id=2 cnt=809 pid=1 pos=1 obj=5574 op='VIEW  ALL_OBJECTS (cr=2421 pr=0 pw=0 str=1 time=23095 dr=0 dw=0 us cost=44 size=0 card=2)'
+STAT #138290350220928 id=3 cnt=809 pid=2 pos=1 obj=0 op='UNION-ALL  (cr=2421 pr=0 pw=0 str=1 time=22977 dr=0 dw=0 us)'
+STAT #138290350220928 id=4 cnt=809 pid=3 pos=1 obj=0 op='FILTER  (cr=2421 pr=0 pw=0 str=1 time=22742 dr=0 dw=0 us)'
+STAT #138290350220928 id=5 cnt=992 pid=4 pos=1 obj=0 op='HASH JOIN  (cr=26 pr=0 pw=0 str=1 time=3404 dr=0 dw=0 us cost=29 size=1380 card=10)'
+STAT #138290350220928 id=6 cnt=992 pid=5 pos=1 obj=0 op='NESTED LOOPS  (cr=25 pr=0 pw=0 str=1 time=2720 dr=0 dw=0 us cost=29 size=1380 card=10)'
+STAT #138290350220928 id=7 cnt=992 pid=6 pos=1 obj=0 op='STATISTICS COLLECTOR  (cr=25 pr=0 pw=0 str=1 time=2595 dr=0 dw=0 us)'
+STAT #138290350220928 id=8 cnt=992 pid=7 pos=1 obj=0 op='HASH JOIN  (cr=25 pr=0 pw=0 str=1 time=2313 dr=0 dw=0 us cost=28 size=1340 card=10)'
+STAT #138290350220928 id=9 cnt=992 pid=8 pos=1 obj=0 op='NESTED LOOPS  (cr=24 pr=0 pw=0 str=1 time=1605 dr=0 dw=0 us cost=28 size=1340 card=10)'
+STAT #138290350220928 id=10 cnt=992 pid=9 pos=1 obj=0 op='STATISTICS COLLECTOR  (cr=24 pr=0 pw=0 str=1 time=1229 dr=0 dw=0 us)'
+STAT #138290350220928 id=11 cnt=992 pid=10 pos=1 obj=18 op='TABLE ACCESS BY INDEX ROWID BATCHED OBJ$ (cr=24 pr=0 pw=0 str=1 time=708 dr=0 dw=0 us cost=27 size=1090 card=10)'
+STAT #138290350220928 id=12 cnt=994 pid=11 pos=1 obj=36 op='INDEX RANGE SCAN I_OBJ1 (cr=4 pr=0 pw=0 str=1 time=297 dr=0 dw=0 us cost=5 size=0 card=999)'
+STAT #138290350220928 id=13 cnt=0 pid=9 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=25 card=1)'
+STAT #138290350220928 id=14 cnt=139 pid=8 pos=2 obj=47 op='INDEX FULL SCAN I_USER2 (cr=1 pr=0 pw=0 str=1 time=162 dr=0 dw=0 us cost=1 size=2750 card=110)'
+STAT #138290350220928 id=15 cnt=0 pid=6 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=4 card=1)'
+STAT #138290350220928 id=16 cnt=139 pid=5 pos=2 obj=47 op='INDEX FULL SCAN I_USER2 (cr=1 pr=0 pw=0 str=1 time=150 dr=0 dw=0 us cost=1 size=440 card=110)'
+STAT #138290350220928 id=17 cnt=0 pid=4 pos=2 obj=138 op='TABLE ACCESS BY INDEX ROWID BATCHED USER_EDITIONING$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=6 card=1)'
+STAT #138290350220928 id=18 cnt=0 pid=17 pos=1 obj=139 op='INDEX RANGE SCAN I_USER_EDITIONING (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=0 card=2)'
+STAT #138290350220928 id=19 cnt=0 pid=4 pos=3 obj=138 op='TABLE ACCESS BY INDEX ROWID BATCHED USER_EDITIONING$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=6 card=1)'
+STAT #138290350220928 id=20 cnt=0 pid=19 pos=1 obj=139 op='INDEX RANGE SCAN I_USER_EDITIONING (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=0 card=2)'
+STAT #138290350220928 id=21 cnt=0 pid=4 pos=4 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=29 card=1)'
+STAT #138290350220928 id=22 cnt=0 pid=21 pos=1 obj=47 op='INDEX SKIP SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=20 card=1)'
+STAT #138290350220928 id=23 cnt=0 pid=21 pos=2 obj=39 op='INDEX RANGE SCAN I_OBJ4 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=24 cnt=424 pid=4 pos=5 obj=19 op='TABLE ACCESS BY INDEX ROWID IND$ (cr=84 pr=0 pw=0 str=503 time=958 dr=0 dw=0 us cost=2 size=8 card=1)'
+STAT #138290350220928 id=25 cnt=503 pid=24 pos=1 obj=41 op='INDEX UNIQUE SCAN I_IND1 (cr=9 pr=0 pw=0 str=503 time=368 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=26 cnt=0 pid=4 pos=6 obj=0 op='NESTED LOOPS  (cr=1770 pr=0 pw=0 str=424 time=3002 dr=0 dw=0 us cost=4 size=32 card=1)'
+STAT #138290350220928 id=27 cnt=0 pid=26 pos=1 obj=0 op='NESTED LOOPS  (cr=1770 pr=0 pw=0 str=424 time=2853 dr=0 dw=0 us cost=3 size=23 card=1)'
+STAT #138290350220928 id=28 cnt=424 pid=27 pos=1 obj=19 op='TABLE ACCESS BY INDEX ROWID IND$ (cr=855 pr=0 pw=0 str=424 time=1168 dr=0 dw=0 us cost=2 size=10 card=1)'
+STAT #138290350220928 id=29 cnt=424 pid=28 pos=1 obj=41 op='INDEX UNIQUE SCAN I_IND1 (cr=429 pr=0 pw=0 str=424 time=608 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=30 cnt=0 pid=27 pos=2 obj=4 op='TABLE ACCESS CLUSTER TAB$ (cr=915 pr=0 pw=0 str=424 time=1379 dr=0 dw=0 us cost=1 size=13 card=1)'
+STAT #138290350220928 id=31 cnt=0 pid=26 pos=2 obj=36 op='INDEX RANGE SCAN I_OBJ1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=32 cnt=371 pid=4 pos=7 obj=4 op='TABLE ACCESS CLUSTER TAB$ (cr=425 pr=0 pw=0 str=371 time=2139 dr=0 dw=0 us cost=2 size=13 card=1)'
+STAT #138290350220928 id=33 cnt=371 pid=32 pos=1 obj=3 op='INDEX UNIQUE SCAN I_OBJ# (cr=9 pr=0 pw=0 str=371 time=294 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=34 cnt=25 pid=4 pos=8 obj=105 op='TABLE ACCESS BY INDEX ROWID SEQ$ (cr=5 pr=0 pw=0 str=25 time=92 dr=0 dw=0 us cost=1 size=8 card=1)'
+STAT #138290350220928 id=35 cnt=25 pid=34 pos=1 obj=110 op='INDEX UNIQUE SCAN I_SEQ1 (cr=4 pr=0 pw=0 str=25 time=45 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=36 cnt=0 pid=4 pos=9 obj=0 op='NESTED LOOPS  (cr=111 pr=0 pw=0 str=104 time=4215 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=37 cnt=2288 pid=36 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=104 time=1791 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=38 cnt=0 pid=36 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=111 pr=0 pw=0 str=2288 time=1926 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=39 cnt=0 pid=4 pos=10 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=48 card=1)'
+STAT #138290350220928 id=40 cnt=0 pid=39 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=41 cnt=0 pid=40 pos=1 obj=955 op='TABLE ACCESS BY INDEX ROWID TABPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=42 cnt=0 pid=41 pos=1 obj=959 op='INDEX UNIQUE SCAN I_TABPART_OBJ$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=43 cnt=0 pid=40 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=44 cnt=0 pid=39 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=45 cnt=0 pid=4 pos=11 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=48 card=1)'
+STAT #138290350220928 id=46 cnt=0 pid=45 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=47 cnt=0 pid=46 pos=1 obj=977 op='TABLE ACCESS BY INDEX ROWID TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=48 cnt=0 pid=47 pos=1 obj=981 op='INDEX UNIQUE SCAN I_TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=49 cnt=0 pid=46 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=50 cnt=0 pid=45 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=51 cnt=0 pid=4 pos=12 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=58 card=1)'
+STAT #138290350220928 id=52 cnt=0 pid=51 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=46 card=1)'
+STAT #138290350220928 id=53 cnt=0 pid=52 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=20 card=1)'
+STAT #138290350220928 id=54 cnt=0 pid=53 pos=1 obj=967 op='TABLE ACCESS BY INDEX ROWID TABSUBPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=55 cnt=0 pid=54 pos=1 obj=971 op='INDEX UNIQUE SCAN I_TABSUBPART$_OBJ$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=56 cnt=0 pid=53 pos=2 obj=977 op='TABLE ACCESS BY INDEX ROWID TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=57 cnt=0 pid=56 pos=1 obj=981 op='INDEX UNIQUE SCAN I_TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=58 cnt=0 pid=52 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=59 cnt=0 pid=51 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=60 cnt=0 pid=4 pos=13 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=45 card=1)'
+STAT #138290350220928 id=61 cnt=0 pid=60 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=36 card=1)'
+STAT #138290350220928 id=62 cnt=0 pid=61 pos=1 obj=19 op='TABLE ACCESS BY INDEX ROWID IND$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=10 card=1)'
+STAT #138290350220928 id=63 cnt=0 pid=62 pos=1 obj=41 op='INDEX UNIQUE SCAN I_IND1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=64 cnt=0 pid=61 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=65 cnt=0 pid=60 pos=2 obj=63 op='INDEX RANGE SCAN I_OBJAUTH2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=66 cnt=0 pid=4 pos=14 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=67 cnt=0 pid=66 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=68 cnt=0 pid=66 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=69 cnt=0 pid=4 pos=15 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=70 cnt=0 pid=69 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=71 cnt=0 pid=69 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=72 cnt=0 pid=4 pos=16 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=52 card=1)'
+STAT #138290350220928 id=73 cnt=0 pid=72 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=40 card=1)'
+STAT #138290350220928 id=74 cnt=0 pid=73 pos=1 obj=381 op='TABLE ACCESS BY INDEX ROWID TRIGGER$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=14 card=1)'
+STAT #138290350220928 id=75 cnt=0 pid=74 pos=1 obj=384 op='INDEX UNIQUE SCAN I_TRIGGER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=76 cnt=0 pid=73 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=77 cnt=0 pid=72 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=78 cnt=0 pid=4 pos=17 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=88 card=1)'
+STAT #138290350220928 id=79 cnt=0 pid=78 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=76 card=1)'
+STAT #138290350220928 id=80 cnt=0 pid=79 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=66 card=1)'
+STAT #138290350220928 id=81 cnt=0 pid=80 pos=1 obj=0 op='MERGE JOIN CARTESIAN (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=62 card=1)'
+STAT #138290350220928 id=82 cnt=0 pid=81 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=83 cnt=0 pid=81 pos=2 obj=0 op='BUFFER SORT (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=84 cnt=0 pid=83 pos=1 obj=40 op='INDEX RANGE SCAN I_OBJ5 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=85 cnt=0 pid=80 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=4 card=1)'
+STAT #138290350220928 id=86 cnt=0 pid=79 pos=2 obj=87 op='INDEX RANGE SCAN I_DEPENDENCY3 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=87 cnt=0 pid=78 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=88 cnt=0 pid=4 pos=18 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=89 cnt=0 pid=88 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=90 cnt=0 pid=88 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=91 cnt=0 pid=4 pos=19 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=88 card=1)'
+STAT #138290350220928 id=92 cnt=0 pid=91 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=76 card=1)'
+STAT #138290350220928 id=93 cnt=0 pid=92 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=66 card=1)'
+STAT #138290350220928 id=94 cnt=0 pid=93 pos=1 obj=0 op='MERGE JOIN CARTESIAN (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=62 card=1)'
+STAT #138290350220928 id=95 cnt=0 pid=94 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=96 cnt=0 pid=94 pos=2 obj=0 op='BUFFER SORT (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=97 cnt=0 pid=96 pos=1 obj=40 op='INDEX RANGE SCAN I_OBJ5 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=98 cnt=0 pid=93 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=4 card=1)'
+STAT #138290350220928 id=99 cnt=0 pid=92 pos=2 obj=87 op='INDEX RANGE SCAN I_DEPENDENCY3 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=100 cnt=0 pid=91 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=101 cnt=0 pid=4 pos=20 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=102 cnt=0 pid=101 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=103 cnt=0 pid=101 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=104 cnt=0 pid=4 pos=21 obj=0 op='VIEW  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=13 card=1)'
+STAT #138290350220928 id=105 cnt=0 pid=104 pos=1 obj=0 op='FAST DUAL  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=0 card=1)'
+STAT #138290350220928 id=106 cnt=0 pid=4 pos=23 obj=0 op='HASH JOIN  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=35 card=1)'
+STAT #138290350220928 id=107 cnt=0 pid=106 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=35 card=1)'
+STAT #138290350220928 id=108 cnt=0 pid=107 pos=1 obj=0 op='STATISTICS COLLECTOR  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us)'
+STAT #138290350220928 id=109 cnt=0 pid=108 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=110 cnt=0 pid=107 pos=2 obj=63 op='INDEX RANGE SCAN I_OBJAUTH2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=111 cnt=0 pid=106 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=112 cnt=0 pid=4 pos=2 obj=0 op='VIEW  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=16 card=1)'
+STAT #138290350220928 id=113 cnt=0 pid=112 pos=1 obj=0 op='SORT GROUP BY NOSORT (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=35 card=1)'
+STAT #138290350220928 id=114 cnt=0 pid=113 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=70 card=2)'
+STAT #138290350220928 id=115 cnt=0 pid=114 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=46 card=2)'
+STAT #138290350220928 id=116 cnt=0 pid=115 pos=1 obj=1380 op='INDEX UNIQUE SCAN I_OLAP_CUBES$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=13 card=1)'
+STAT #138290350220928 id=117 cnt=0 pid=115 pos=2 obj=87 op='INDEX RANGE SCAN I_DEPENDENCY3 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=20 card=2)'
+STAT #138290350220928 id=118 cnt=0 pid=114 pos=2 obj=36 op='INDEX RANGE SCAN I_OBJ1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=119 cnt=0 pid=4 pos=24 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=35 card=1)'
+STAT #138290350220928 id=120 cnt=0 pid=119 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=121 cnt=0 pid=119 pos=2 obj=63 op='INDEX RANGE SCAN I_OBJAUTH2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=122 cnt=0 pid=3 pos=2 obj=0 op='FILTER  (cr=0 pr=0 pw=0 str=1 time=1 dr=0 dw=0 us)'
+STAT #138290350220928 id=123 cnt=0 pid=122 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=17 card=1)'
+STAT #138290350220928 id=124 cnt=0 pid=123 pos=1 obj=357 op='INDEX FULL SCAN I_LINK1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=13 card=1)'
+STAT #138290350220928 id=125 cnt=0 pid=123 pos=2 obj=22 op='TABLE ACCESS CLUSTER USER$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=4 card=1)'
+STAT #138290350220928 id=126 cnt=0 pid=125 pos=1 obj=11 op='INDEX UNIQUE SCAN I_USER# (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+WAIT #138290350220928: nam='Free private memory to OS' ela=672 Bytes=6750208 where=4 p3=0 obj#=4294967295 tim=12601417401
+WAIT #138290350220928: nam='SQL*Net message to client' ela=3 driver id=1952673792 #bytes=434 p3=0 obj#=4294967295 tim=12601417471
+WAIT #138290350220928: nam='SQL*Net message from client' ela=413 driver id=1952673792 #bytes=1 p3=0 obj#=4294967295 tim=12601417898
+BINDS #138290350220928:
+
+ Bind#0
+  oacdty=02 mxl=22(21) mxlc=00 mal=00 scl=00 pre=00
+  oacflg=01 fl2=1000000 frm=00 csi=00 siz=24 off=0
+  kxsbbbfp=7dc63a87aea8  bln=22  avl=03  flg=05
+  value=1001
+EXEC #138290350220928:c=341,e=341,p=0,cr=0,cu=0,mis=0,r=0,dep=0,og=1,plh=3407277182,tim=12601418294
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=39 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601419553
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=11 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601419931
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=6 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601420045
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=14 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601420553
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=6 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601420590
+FETCH #138290350220928:c=14632,e=14801,p=0,cr=2422,cu=0,mis=0,r=1,dep=0,og=1,plh=3407277182,tim=12601433129
+STAT #138290350220928 id=1 cnt=1 pid=0 pos=1 obj=0 op='SORT AGGREGATE (cr=2422 pr=0 pw=0 str=1 time=14821 dr=0 dw=0 us)'
+STAT #138290350220928 id=2 cnt=810 pid=1 pos=1 obj=5574 op='VIEW  ALL_OBJECTS (cr=2422 pr=0 pw=0 str=1 time=16094 dr=0 dw=0 us cost=44 size=0 card=2)'
+STAT #138290350220928 id=3 cnt=810 pid=2 pos=1 obj=0 op='UNION-ALL  (cr=2422 pr=0 pw=0 str=1 time=15745 dr=0 dw=0 us)'
+STAT #138290350220928 id=4 cnt=810 pid=3 pos=1 obj=0 op='FILTER  (cr=2422 pr=0 pw=0 str=1 time=15397 dr=0 dw=0 us)'
+STAT #138290350220928 id=5 cnt=993 pid=4 pos=1 obj=0 op='HASH JOIN  (cr=26 pr=0 pw=0 str=1 time=2682 dr=0 dw=0 us cost=29 size=1380 card=10)'
+STAT #138290350220928 id=6 cnt=993 pid=5 pos=1 obj=0 op='NESTED LOOPS  (cr=25 pr=0 pw=0 str=1 time=2008 dr=0 dw=0 us cost=29 size=1380 card=10)'
+STAT #138290350220928 id=7 cnt=993 pid=6 pos=1 obj=0 op='STATISTICS COLLECTOR  (cr=25 pr=0 pw=0 str=1 time=1883 dr=0 dw=0 us)'
+STAT #138290350220928 id=8 cnt=993 pid=7 pos=1 obj=0 op='HASH JOIN  (cr=25 pr=0 pw=0 str=1 time=1878 dr=0 dw=0 us cost=28 size=1340 card=10)'
+STAT #138290350220928 id=9 cnt=993 pid=8 pos=1 obj=0 op='NESTED LOOPS  (cr=24 pr=0 pw=0 str=1 time=1293 dr=0 dw=0 us cost=28 size=1340 card=10)'
+STAT #138290350220928 id=10 cnt=993 pid=9 pos=1 obj=0 op='STATISTICS COLLECTOR  (cr=24 pr=0 pw=0 str=1 time=1168 dr=0 dw=0 us)'
+STAT #138290350220928 id=11 cnt=993 pid=10 pos=1 obj=18 op='TABLE ACCESS BY INDEX ROWID BATCHED OBJ$ (cr=24 pr=0 pw=0 str=1 time=1164 dr=0 dw=0 us cost=27 size=1090 card=10)'
+STAT #138290350220928 id=12 cnt=995 pid=11 pos=1 obj=36 op='INDEX RANGE SCAN I_OBJ1 (cr=4 pr=0 pw=0 str=1 time=275 dr=0 dw=0 us cost=5 size=0 card=999)'
+STAT #138290350220928 id=13 cnt=0 pid=9 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=25 card=1)'
+STAT #138290350220928 id=14 cnt=139 pid=8 pos=2 obj=47 op='INDEX FULL SCAN I_USER2 (cr=1 pr=0 pw=0 str=1 time=8 dr=0 dw=0 us cost=1 size=2750 card=110)'
+STAT #138290350220928 id=15 cnt=0 pid=6 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=4 card=1)'
+STAT #138290350220928 id=16 cnt=139 pid=5 pos=2 obj=47 op='INDEX FULL SCAN I_USER2 (cr=1 pr=0 pw=0 str=1 time=9 dr=0 dw=0 us cost=1 size=440 card=110)'
+STAT #138290350220928 id=17 cnt=0 pid=4 pos=2 obj=138 op='TABLE ACCESS BY INDEX ROWID BATCHED USER_EDITIONING$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=6 card=1)'
+STAT #138290350220928 id=18 cnt=0 pid=17 pos=1 obj=139 op='INDEX RANGE SCAN I_USER_EDITIONING (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=0 card=2)'
+STAT #138290350220928 id=19 cnt=0 pid=4 pos=3 obj=138 op='TABLE ACCESS BY INDEX ROWID BATCHED USER_EDITIONING$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=6 card=1)'
+STAT #138290350220928 id=20 cnt=0 pid=19 pos=1 obj=139 op='INDEX RANGE SCAN I_USER_EDITIONING (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=0 card=2)'
+STAT #138290350220928 id=21 cnt=0 pid=4 pos=4 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=29 card=1)'
+STAT #138290350220928 id=22 cnt=0 pid=21 pos=1 obj=47 op='INDEX SKIP SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=20 card=1)'
+STAT #138290350220928 id=23 cnt=0 pid=21 pos=2 obj=39 op='INDEX RANGE SCAN I_OBJ4 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=24 cnt=424 pid=4 pos=5 obj=19 op='TABLE ACCESS BY INDEX ROWID IND$ (cr=84 pr=0 pw=0 str=503 time=890 dr=0 dw=0 us cost=2 size=8 card=1)'
+STAT #138290350220928 id=25 cnt=503 pid=24 pos=1 obj=41 op='INDEX UNIQUE SCAN I_IND1 (cr=9 pr=0 pw=0 str=503 time=324 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=26 cnt=0 pid=4 pos=6 obj=0 op='NESTED LOOPS  (cr=1770 pr=0 pw=0 str=424 time=2928 dr=0 dw=0 us cost=4 size=32 card=1)'
+STAT #138290350220928 id=27 cnt=0 pid=26 pos=1 obj=0 op='NESTED LOOPS  (cr=1770 pr=0 pw=0 str=424 time=2773 dr=0 dw=0 us cost=3 size=23 card=1)'
+STAT #138290350220928 id=28 cnt=424 pid=27 pos=1 obj=19 op='TABLE ACCESS BY INDEX ROWID IND$ (cr=855 pr=0 pw=0 str=424 time=1155 dr=0 dw=0 us cost=2 size=10 card=1)'
+STAT #138290350220928 id=29 cnt=424 pid=28 pos=1 obj=41 op='INDEX UNIQUE SCAN I_IND1 (cr=429 pr=0 pw=0 str=424 time=589 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=30 cnt=0 pid=27 pos=2 obj=4 op='TABLE ACCESS CLUSTER TAB$ (cr=915 pr=0 pw=0 str=424 time=1367 dr=0 dw=0 us cost=1 size=13 card=1)'
+STAT #138290350220928 id=31 cnt=0 pid=26 pos=2 obj=36 op='INDEX RANGE SCAN I_OBJ1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=32 cnt=372 pid=4 pos=7 obj=4 op='TABLE ACCESS CLUSTER TAB$ (cr=426 pr=0 pw=0 str=372 time=1438 dr=0 dw=0 us cost=2 size=13 card=1)'
+STAT #138290350220928 id=33 cnt=372 pid=32 pos=1 obj=3 op='INDEX UNIQUE SCAN I_OBJ# (cr=9 pr=0 pw=0 str=372 time=305 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=34 cnt=25 pid=4 pos=8 obj=105 op='TABLE ACCESS BY INDEX ROWID SEQ$ (cr=5 pr=0 pw=0 str=25 time=65 dr=0 dw=0 us cost=1 size=8 card=1)'
+STAT #138290350220928 id=35 cnt=25 pid=34 pos=1 obj=110 op='INDEX UNIQUE SCAN I_SEQ1 (cr=4 pr=0 pw=0 str=25 time=29 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=36 cnt=0 pid=4 pos=9 obj=0 op='NESTED LOOPS  (cr=111 pr=0 pw=0 str=104 time=4153 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=37 cnt=2288 pid=36 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=104 time=1718 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=38 cnt=0 pid=36 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=111 pr=0 pw=0 str=2288 time=1824 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=39 cnt=0 pid=4 pos=10 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=48 card=1)'
+STAT #138290350220928 id=40 cnt=0 pid=39 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=41 cnt=0 pid=40 pos=1 obj=955 op='TABLE ACCESS BY INDEX ROWID TABPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=42 cnt=0 pid=41 pos=1 obj=959 op='INDEX UNIQUE SCAN I_TABPART_OBJ$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=43 cnt=0 pid=40 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=44 cnt=0 pid=39 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=45 cnt=0 pid=4 pos=11 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=48 card=1)'
+STAT #138290350220928 id=46 cnt=0 pid=45 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=47 cnt=0 pid=46 pos=1 obj=977 op='TABLE ACCESS BY INDEX ROWID TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=48 cnt=0 pid=47 pos=1 obj=981 op='INDEX UNIQUE SCAN I_TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=49 cnt=0 pid=46 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=50 cnt=0 pid=45 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=51 cnt=0 pid=4 pos=12 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=58 card=1)'
+STAT #138290350220928 id=52 cnt=0 pid=51 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=46 card=1)'
+STAT #138290350220928 id=53 cnt=0 pid=52 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=20 card=1)'
+STAT #138290350220928 id=54 cnt=0 pid=53 pos=1 obj=967 op='TABLE ACCESS BY INDEX ROWID TABSUBPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=55 cnt=0 pid=54 pos=1 obj=971 op='INDEX UNIQUE SCAN I_TABSUBPART$_OBJ$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=56 cnt=0 pid=53 pos=2 obj=977 op='TABLE ACCESS BY INDEX ROWID TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=57 cnt=0 pid=56 pos=1 obj=981 op='INDEX UNIQUE SCAN I_TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=58 cnt=0 pid=52 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=59 cnt=0 pid=51 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=60 cnt=0 pid=4 pos=13 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=45 card=1)'
+STAT #138290350220928 id=61 cnt=0 pid=60 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=36 card=1)'
+STAT #138290350220928 id=62 cnt=0 pid=61 pos=1 obj=19 op='TABLE ACCESS BY INDEX ROWID IND$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=10 card=1)'
+STAT #138290350220928 id=63 cnt=0 pid=62 pos=1 obj=41 op='INDEX UNIQUE SCAN I_IND1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=64 cnt=0 pid=61 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=65 cnt=0 pid=60 pos=2 obj=63 op='INDEX RANGE SCAN I_OBJAUTH2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=66 cnt=0 pid=4 pos=14 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=67 cnt=0 pid=66 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=68 cnt=0 pid=66 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=69 cnt=0 pid=4 pos=15 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=70 cnt=0 pid=69 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=71 cnt=0 pid=69 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=72 cnt=0 pid=4 pos=16 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=52 card=1)'
+STAT #138290350220928 id=73 cnt=0 pid=72 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=40 card=1)'
+STAT #138290350220928 id=74 cnt=0 pid=73 pos=1 obj=381 op='TABLE ACCESS BY INDEX ROWID TRIGGER$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=14 card=1)'
+STAT #138290350220928 id=75 cnt=0 pid=74 pos=1 obj=384 op='INDEX UNIQUE SCAN I_TRIGGER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=76 cnt=0 pid=73 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=77 cnt=0 pid=72 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=78 cnt=0 pid=4 pos=17 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=88 card=1)'
+STAT #138290350220928 id=79 cnt=0 pid=78 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=76 card=1)'
+STAT #138290350220928 id=80 cnt=0 pid=79 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=66 card=1)'
+STAT #138290350220928 id=81 cnt=0 pid=80 pos=1 obj=0 op='MERGE JOIN CARTESIAN (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=62 card=1)'
+STAT #138290350220928 id=82 cnt=0 pid=81 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=83 cnt=0 pid=81 pos=2 obj=0 op='BUFFER SORT (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=84 cnt=0 pid=83 pos=1 obj=40 op='INDEX RANGE SCAN I_OBJ5 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=85 cnt=0 pid=80 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=4 card=1)'
+STAT #138290350220928 id=86 cnt=0 pid=79 pos=2 obj=87 op='INDEX RANGE SCAN I_DEPENDENCY3 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=87 cnt=0 pid=78 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=88 cnt=0 pid=4 pos=18 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=89 cnt=0 pid=88 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=90 cnt=0 pid=88 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=91 cnt=0 pid=4 pos=19 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=88 card=1)'
+STAT #138290350220928 id=92 cnt=0 pid=91 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=76 card=1)'
+STAT #138290350220928 id=93 cnt=0 pid=92 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=66 card=1)'
+STAT #138290350220928 id=94 cnt=0 pid=93 pos=1 obj=0 op='MERGE JOIN CARTESIAN (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=62 card=1)'
+STAT #138290350220928 id=95 cnt=0 pid=94 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=96 cnt=0 pid=94 pos=2 obj=0 op='BUFFER SORT (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=97 cnt=0 pid=96 pos=1 obj=40 op='INDEX RANGE SCAN I_OBJ5 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=98 cnt=0 pid=93 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=4 card=1)'
+STAT #138290350220928 id=99 cnt=0 pid=92 pos=2 obj=87 op='INDEX RANGE SCAN I_DEPENDENCY3 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=100 cnt=0 pid=91 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=101 cnt=0 pid=4 pos=20 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=102 cnt=0 pid=101 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=103 cnt=0 pid=101 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=104 cnt=0 pid=4 pos=21 obj=0 op='VIEW  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=13 card=1)'
+STAT #138290350220928 id=105 cnt=0 pid=104 pos=1 obj=0 op='FAST DUAL  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=0 card=1)'
+STAT #138290350220928 id=106 cnt=0 pid=4 pos=23 obj=0 op='HASH JOIN  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=35 card=1)'
+STAT #138290350220928 id=107 cnt=0 pid=106 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=35 card=1)'
+STAT #138290350220928 id=108 cnt=0 pid=107 pos=1 obj=0 op='STATISTICS COLLECTOR  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us)'
+STAT #138290350220928 id=109 cnt=0 pid=108 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=110 cnt=0 pid=107 pos=2 obj=63 op='INDEX RANGE SCAN I_OBJAUTH2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=111 cnt=0 pid=106 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=112 cnt=0 pid=4 pos=2 obj=0 op='VIEW  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=16 card=1)'
+STAT #138290350220928 id=113 cnt=0 pid=112 pos=1 obj=0 op='SORT GROUP BY NOSORT (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=35 card=1)'
+STAT #138290350220928 id=114 cnt=0 pid=113 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=70 card=2)'
+STAT #138290350220928 id=115 cnt=0 pid=114 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=46 card=2)'
+STAT #138290350220928 id=116 cnt=0 pid=115 pos=1 obj=1380 op='INDEX UNIQUE SCAN I_OLAP_CUBES$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=13 card=1)'
+STAT #138290350220928 id=117 cnt=0 pid=115 pos=2 obj=87 op='INDEX RANGE SCAN I_DEPENDENCY3 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=20 card=2)'
+STAT #138290350220928 id=118 cnt=0 pid=114 pos=2 obj=36 op='INDEX RANGE SCAN I_OBJ1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=119 cnt=0 pid=4 pos=24 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=35 card=1)'
+STAT #138290350220928 id=120 cnt=0 pid=119 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=121 cnt=0 pid=119 pos=2 obj=63 op='INDEX RANGE SCAN I_OBJAUTH2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=122 cnt=0 pid=3 pos=2 obj=0 op='FILTER  (cr=0 pr=0 pw=0 str=1 time=2 dr=0 dw=0 us)'
+STAT #138290350220928 id=123 cnt=0 pid=122 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=17 card=1)'
+STAT #138290350220928 id=124 cnt=0 pid=123 pos=1 obj=357 op='INDEX FULL SCAN I_LINK1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=13 card=1)'
+STAT #138290350220928 id=125 cnt=0 pid=123 pos=2 obj=22 op='TABLE ACCESS CLUSTER USER$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=4 card=1)'
+STAT #138290350220928 id=126 cnt=0 pid=125 pos=1 obj=11 op='INDEX UNIQUE SCAN I_USER# (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+WAIT #138290350220928: nam='Free private memory to OS' ela=77 Bytes=655360 where=4 p3=0 obj#=4294967295 tim=12601437381
+WAIT #138290350220928: nam='SQL*Net message to client' ela=3 driver id=1952673792 #bytes=234 p3=0 obj#=4294967295 tim=12601437426
+WAIT #138290350220928: nam='SQL*Net message from client' ela=340 driver id=1952673792 #bytes=1 p3=0 obj#=4294967295 tim=12601437778
+BINDS #138290350220928:
+
+ Bind#0
+  oacdty=02 mxl=22(21) mxlc=00 mal=00 scl=00 pre=00
+  oacflg=01 fl2=1000000 frm=00 csi=00 siz=24 off=0
+  kxsbbbfp=7dc63a87aea8  bln=22  avl=03  flg=05
+  value=1002
+EXEC #138290350220928:c=296,e=296,p=0,cr=0,cu=0,mis=0,r=0,dep=0,og=1,plh=3407277182,tim=12601438121
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=43 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601439241
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=11 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601439632
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=7 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601439729
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=11 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601440209
+WAIT #138290350220928: nam='Allocate UGA memory from OS' ela=12 Bytes=131072 where=1 p3=0 obj#=4294967295 tim=12601440262
+FETCH #138290350220928:c=13725,e=14266,p=0,cr=2426,cu=0,mis=0,r=1,dep=0,og=1,plh=3407277182,tim=12601452419
+STAT #138290350220928 id=1 cnt=1 pid=0 pos=1 obj=0 op='SORT AGGREGATE (cr=2426 pr=0 pw=0 str=1 time=14289 dr=0 dw=0 us)'
+STAT #138290350220928 id=2 cnt=811 pid=1 pos=1 obj=5574 op='VIEW  ALL_OBJECTS (cr=2426 pr=0 pw=0 str=1 time=15845 dr=0 dw=0 us cost=44 size=0 card=2)'
+STAT #138290350220928 id=3 cnt=811 pid=2 pos=1 obj=0 op='UNION-ALL  (cr=2426 pr=0 pw=0 str=1 time=15496 dr=0 dw=0 us)'
+STAT #138290350220928 id=4 cnt=811 pid=3 pos=1 obj=0 op='FILTER  (cr=2426 pr=0 pw=0 str=1 time=14683 dr=0 dw=0 us)'
+STAT #138290350220928 id=5 cnt=994 pid=4 pos=1 obj=0 op='HASH JOIN  (cr=26 pr=0 pw=0 str=1 time=2528 dr=0 dw=0 us cost=29 size=1380 card=10)'
+STAT #138290350220928 id=6 cnt=994 pid=5 pos=1 obj=0 op='NESTED LOOPS  (cr=25 pr=0 pw=0 str=1 time=1758 dr=0 dw=0 us cost=29 size=1380 card=10)'
+STAT #138290350220928 id=7 cnt=994 pid=6 pos=1 obj=0 op='STATISTICS COLLECTOR  (cr=25 pr=0 pw=0 str=1 time=1507 dr=0 dw=0 us)'
+STAT #138290350220928 id=8 cnt=994 pid=7 pos=1 obj=0 op='HASH JOIN  (cr=25 pr=0 pw=0 str=1 time=1503 dr=0 dw=0 us cost=28 size=1340 card=10)'
+STAT #138290350220928 id=9 cnt=994 pid=8 pos=1 obj=0 op='NESTED LOOPS  (cr=24 pr=0 pw=0 str=1 time=1048 dr=0 dw=0 us cost=28 size=1340 card=10)'
+STAT #138290350220928 id=10 cnt=994 pid=9 pos=1 obj=0 op='STATISTICS COLLECTOR  (cr=24 pr=0 pw=0 str=1 time=1046 dr=0 dw=0 us)'
+STAT #138290350220928 id=11 cnt=994 pid=10 pos=1 obj=18 op='TABLE ACCESS BY INDEX ROWID BATCHED OBJ$ (cr=24 pr=0 pw=0 str=1 time=1044 dr=0 dw=0 us cost=27 size=1090 card=10)'
+STAT #138290350220928 id=12 cnt=996 pid=11 pos=1 obj=36 op='INDEX RANGE SCAN I_OBJ1 (cr=4 pr=0 pw=0 str=1 time=405 dr=0 dw=0 us cost=5 size=0 card=999)'
+STAT #138290350220928 id=13 cnt=0 pid=9 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=25 card=1)'
+STAT #138290350220928 id=14 cnt=139 pid=8 pos=2 obj=47 op='INDEX FULL SCAN I_USER2 (cr=1 pr=0 pw=0 str=1 time=20 dr=0 dw=0 us cost=1 size=2750 card=110)'
+STAT #138290350220928 id=15 cnt=0 pid=6 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=4 card=1)'
+STAT #138290350220928 id=16 cnt=139 pid=5 pos=2 obj=47 op='INDEX FULL SCAN I_USER2 (cr=1 pr=0 pw=0 str=1 time=10 dr=0 dw=0 us cost=1 size=440 card=110)'
+STAT #138290350220928 id=17 cnt=0 pid=4 pos=2 obj=138 op='TABLE ACCESS BY INDEX ROWID BATCHED USER_EDITIONING$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=6 card=1)'
+STAT #138290350220928 id=18 cnt=0 pid=17 pos=1 obj=139 op='INDEX RANGE SCAN I_USER_EDITIONING (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=0 card=2)'
+STAT #138290350220928 id=19 cnt=0 pid=4 pos=3 obj=138 op='TABLE ACCESS BY INDEX ROWID BATCHED USER_EDITIONING$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=6 card=1)'
+STAT #138290350220928 id=20 cnt=0 pid=19 pos=1 obj=139 op='INDEX RANGE SCAN I_USER_EDITIONING (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=0 card=2)'
+STAT #138290350220928 id=21 cnt=0 pid=4 pos=4 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=29 card=1)'
+STAT #138290350220928 id=22 cnt=0 pid=21 pos=1 obj=47 op='INDEX SKIP SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=20 card=1)'
+STAT #138290350220928 id=23 cnt=0 pid=21 pos=2 obj=39 op='INDEX RANGE SCAN I_OBJ4 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=24 cnt=425 pid=4 pos=5 obj=19 op='TABLE ACCESS BY INDEX ROWID IND$ (cr=84 pr=0 pw=0 str=504 time=851 dr=0 dw=0 us cost=2 size=8 card=1)'
+STAT #138290350220928 id=25 cnt=504 pid=24 pos=1 obj=41 op='INDEX UNIQUE SCAN I_IND1 (cr=9 pr=0 pw=0 str=504 time=320 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=26 cnt=0 pid=4 pos=6 obj=0 op='NESTED LOOPS  (cr=1774 pr=0 pw=0 str=425 time=2891 dr=0 dw=0 us cost=4 size=32 card=1)'
+STAT #138290350220928 id=27 cnt=0 pid=26 pos=1 obj=0 op='NESTED LOOPS  (cr=1774 pr=0 pw=0 str=425 time=2768 dr=0 dw=0 us cost=3 size=23 card=1)'
+STAT #138290350220928 id=28 cnt=425 pid=27 pos=1 obj=19 op='TABLE ACCESS BY INDEX ROWID IND$ (cr=857 pr=0 pw=0 str=425 time=1238 dr=0 dw=0 us cost=2 size=10 card=1)'
+STAT #138290350220928 id=29 cnt=425 pid=28 pos=1 obj=41 op='INDEX UNIQUE SCAN I_IND1 (cr=430 pr=0 pw=0 str=425 time=740 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=30 cnt=0 pid=27 pos=2 obj=4 op='TABLE ACCESS CLUSTER TAB$ (cr=917 pr=0 pw=0 str=425 time=1285 dr=0 dw=0 us cost=1 size=13 card=1)'
+STAT #138290350220928 id=31 cnt=0 pid=26 pos=2 obj=36 op='INDEX RANGE SCAN I_OBJ1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=32 cnt=372 pid=4 pos=7 obj=4 op='TABLE ACCESS CLUSTER TAB$ (cr=426 pr=0 pw=0 str=372 time=1339 dr=0 dw=0 us cost=2 size=13 card=1)'
+STAT #138290350220928 id=33 cnt=372 pid=32 pos=1 obj=3 op='INDEX UNIQUE SCAN I_OBJ# (cr=9 pr=0 pw=0 str=372 time=234 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=34 cnt=25 pid=4 pos=8 obj=105 op='TABLE ACCESS BY INDEX ROWID SEQ$ (cr=5 pr=0 pw=0 str=25 time=63 dr=0 dw=0 us cost=1 size=8 card=1)'
+STAT #138290350220928 id=35 cnt=25 pid=34 pos=1 obj=110 op='INDEX UNIQUE SCAN I_SEQ1 (cr=4 pr=0 pw=0 str=25 time=35 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=36 cnt=0 pid=4 pos=9 obj=0 op='NESTED LOOPS  (cr=111 pr=0 pw=0 str=104 time=3956 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=37 cnt=2288 pid=36 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=104 time=1797 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=38 cnt=0 pid=36 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=111 pr=0 pw=0 str=2288 time=1749 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=39 cnt=0 pid=4 pos=10 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=48 card=1)'
+STAT #138290350220928 id=40 cnt=0 pid=39 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=41 cnt=0 pid=40 pos=1 obj=955 op='TABLE ACCESS BY INDEX ROWID TABPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=42 cnt=0 pid=41 pos=1 obj=959 op='INDEX UNIQUE SCAN I_TABPART_OBJ$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=43 cnt=0 pid=40 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=44 cnt=0 pid=39 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=45 cnt=0 pid=4 pos=11 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=48 card=1)'
+STAT #138290350220928 id=46 cnt=0 pid=45 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=47 cnt=0 pid=46 pos=1 obj=977 op='TABLE ACCESS BY INDEX ROWID TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=48 cnt=0 pid=47 pos=1 obj=981 op='INDEX UNIQUE SCAN I_TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=49 cnt=0 pid=46 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=50 cnt=0 pid=45 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=51 cnt=0 pid=4 pos=12 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=58 card=1)'
+STAT #138290350220928 id=52 cnt=0 pid=51 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=46 card=1)'
+STAT #138290350220928 id=53 cnt=0 pid=52 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=20 card=1)'
+STAT #138290350220928 id=54 cnt=0 pid=53 pos=1 obj=967 op='TABLE ACCESS BY INDEX ROWID TABSUBPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=55 cnt=0 pid=54 pos=1 obj=971 op='INDEX UNIQUE SCAN I_TABSUBPART$_OBJ$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=56 cnt=0 pid=53 pos=2 obj=977 op='TABLE ACCESS BY INDEX ROWID TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=57 cnt=0 pid=56 pos=1 obj=981 op='INDEX UNIQUE SCAN I_TABCOMPART$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=58 cnt=0 pid=52 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=59 cnt=0 pid=51 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=60 cnt=0 pid=4 pos=13 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=45 card=1)'
+STAT #138290350220928 id=61 cnt=0 pid=60 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=36 card=1)'
+STAT #138290350220928 id=62 cnt=0 pid=61 pos=1 obj=19 op='TABLE ACCESS BY INDEX ROWID IND$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=10 card=1)'
+STAT #138290350220928 id=63 cnt=0 pid=62 pos=1 obj=41 op='INDEX UNIQUE SCAN I_IND1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=0 card=1)'
+STAT #138290350220928 id=64 cnt=0 pid=61 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=65 cnt=0 pid=60 pos=2 obj=63 op='INDEX RANGE SCAN I_OBJAUTH2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=66 cnt=0 pid=4 pos=14 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=67 cnt=0 pid=66 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=68 cnt=0 pid=66 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=69 cnt=0 pid=4 pos=15 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=70 cnt=0 pid=69 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=71 cnt=0 pid=69 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=72 cnt=0 pid=4 pos=16 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=52 card=1)'
+STAT #138290350220928 id=73 cnt=0 pid=72 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=40 card=1)'
+STAT #138290350220928 id=74 cnt=0 pid=73 pos=1 obj=381 op='TABLE ACCESS BY INDEX ROWID TRIGGER$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=14 card=1)'
+STAT #138290350220928 id=75 cnt=0 pid=74 pos=1 obj=384 op='INDEX UNIQUE SCAN I_TRIGGER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+STAT #138290350220928 id=76 cnt=0 pid=73 pos=2 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=77 cnt=0 pid=72 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=78 cnt=0 pid=4 pos=17 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=88 card=1)'
+STAT #138290350220928 id=79 cnt=0 pid=78 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=76 card=1)'
+STAT #138290350220928 id=80 cnt=0 pid=79 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=66 card=1)'
+STAT #138290350220928 id=81 cnt=0 pid=80 pos=1 obj=0 op='MERGE JOIN CARTESIAN (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=62 card=1)'
+STAT #138290350220928 id=82 cnt=0 pid=81 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=83 cnt=0 pid=81 pos=2 obj=0 op='BUFFER SORT (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=84 cnt=0 pid=83 pos=1 obj=40 op='INDEX RANGE SCAN I_OBJ5 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=85 cnt=0 pid=80 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=4 card=1)'
+STAT #138290350220928 id=86 cnt=0 pid=79 pos=2 obj=87 op='INDEX RANGE SCAN I_DEPENDENCY3 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=87 cnt=0 pid=78 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=88 cnt=0 pid=4 pos=18 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=89 cnt=0 pid=88 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=90 cnt=0 pid=88 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=91 cnt=0 pid=4 pos=19 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=88 card=1)'
+STAT #138290350220928 id=92 cnt=0 pid=91 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=76 card=1)'
+STAT #138290350220928 id=93 cnt=0 pid=92 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=66 card=1)'
+STAT #138290350220928 id=94 cnt=0 pid=93 pos=1 obj=0 op='MERGE JOIN CARTESIAN (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=62 card=1)'
+STAT #138290350220928 id=95 cnt=0 pid=94 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=96 cnt=0 pid=94 pos=2 obj=0 op='BUFFER SORT (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=97 cnt=0 pid=96 pos=1 obj=40 op='INDEX RANGE SCAN I_OBJ5 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=36 card=1)'
+STAT #138290350220928 id=98 cnt=0 pid=93 pos=2 obj=47 op='INDEX RANGE SCAN I_USER2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=4 card=1)'
+STAT #138290350220928 id=99 cnt=0 pid=92 pos=2 obj=87 op='INDEX RANGE SCAN I_DEPENDENCY3 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=10 card=1)'
+STAT #138290350220928 id=100 cnt=0 pid=91 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=101 cnt=0 pid=4 pos=20 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=38 card=1)'
+STAT #138290350220928 id=102 cnt=0 pid=101 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=103 cnt=0 pid=101 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=104 cnt=0 pid=4 pos=21 obj=0 op='VIEW  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=13 card=1)'
+STAT #138290350220928 id=105 cnt=0 pid=104 pos=1 obj=0 op='FAST DUAL  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=2 size=0 card=1)'
+STAT #138290350220928 id=106 cnt=0 pid=4 pos=23 obj=0 op='HASH JOIN  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=35 card=1)'
+STAT #138290350220928 id=107 cnt=0 pid=106 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=35 card=1)'
+STAT #138290350220928 id=108 cnt=0 pid=107 pos=1 obj=0 op='STATISTICS COLLECTOR  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us)'
+STAT #138290350220928 id=109 cnt=0 pid=108 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=110 cnt=0 pid=107 pos=2 obj=63 op='INDEX RANGE SCAN I_OBJAUTH2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=111 cnt=0 pid=106 pos=2 obj=62 op='INDEX RANGE SCAN I_OBJAUTH1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=112 cnt=0 pid=4 pos=2 obj=0 op='VIEW  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=16 card=1)'
+STAT #138290350220928 id=113 cnt=0 pid=112 pos=1 obj=0 op='SORT GROUP BY NOSORT (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=4 size=35 card=1)'
+STAT #138290350220928 id=114 cnt=0 pid=113 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=3 size=70 card=2)'
+STAT #138290350220928 id=115 cnt=0 pid=114 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=46 card=2)'
+STAT #138290350220928 id=116 cnt=0 pid=115 pos=1 obj=1380 op='INDEX UNIQUE SCAN I_OLAP_CUBES$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=13 card=1)'
+STAT #138290350220928 id=117 cnt=0 pid=115 pos=2 obj=87 op='INDEX RANGE SCAN I_DEPENDENCY3 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=20 card=2)'
+STAT #138290350220928 id=118 cnt=0 pid=114 pos=2 obj=36 op='INDEX RANGE SCAN I_OBJ1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=12 card=1)'
+STAT #138290350220928 id=119 cnt=0 pid=4 pos=24 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=35 card=1)'
+STAT #138290350220928 id=120 cnt=0 pid=119 pos=1 obj=0 op='FIXED TABLE FULL X$KZSRO (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=26 card=1)'
+STAT #138290350220928 id=121 cnt=0 pid=119 pos=2 obj=63 op='INDEX RANGE SCAN I_OBJAUTH2 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=1 size=9 card=1)'
+STAT #138290350220928 id=122 cnt=0 pid=3 pos=2 obj=0 op='FILTER  (cr=0 pr=0 pw=0 str=1 time=1 dr=0 dw=0 us)'
+STAT #138290350220928 id=123 cnt=0 pid=122 pos=1 obj=0 op='NESTED LOOPS  (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=17 card=1)'
+STAT #138290350220928 id=124 cnt=0 pid=123 pos=1 obj=357 op='INDEX FULL SCAN I_LINK1 (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=13 card=1)'
+STAT #138290350220928 id=125 cnt=0 pid=123 pos=2 obj=22 op='TABLE ACCESS CLUSTER USER$ (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=4 card=1)'
+STAT #138290350220928 id=126 cnt=0 pid=125 pos=1 obj=11 op='INDEX UNIQUE SCAN I_USER# (cr=0 pr=0 pw=0 str=0 time=0 dr=0 dw=0 us cost=0 size=0 card=1)'
+WAIT #138290350220928: nam='Free private memory to OS' ela=77 Bytes=655360 where=4 p3=0 obj#=4294967295 tim=12601456574
+WAIT #138290350220928: nam='SQL*Net message to client' ela=3 driver id=1952673792 #bytes=234 p3=0 obj#=4294967295 tim=12601456628
+WAIT #138290350220928: nam='SQL*Net message from client' ela=405 driver id=1952673792 #bytes=1 p3=0 obj#=4294967295 tim=12601457060
+=====================
+PARSING IN CURSOR #138290338726128 len=39 dep=0 uid=9 oct=47 lid=9 tim=12601458449 hv=3921004764 ad='7137aaa8' sqlid='cdj6j13nvbk6w'
+begin null; /* orui_trace_plsql */ end;
+END OF STMT
+PARSE #138290338726128:c=1116,e=1315,p=0,cr=0,cu=0,mis=1,r=0,dep=0,og=1,plh=0,tim=12601458447
+EXEC #138290338726128:c=49,e=49,p=0,cr=0,cu=0,mis=0,r=1,dep=0,og=1,plh=0,tim=12601458590
+WAIT #138290338726128: nam='SQL*Net message to client' ela=16 driver id=1952673792 #bytes=188 p3=0 obj#=4294967295 tim=12601458653
+WAIT #138290338726128: nam='SQL*Net message from client' ela=301 driver id=1952673792 #bytes=1 p3=0 obj#=4294967295 tim=12601458971
+=====================
+PARSING IN CURSOR #138290362267256 len=46 dep=0 uid=9 oct=47 lid=9 tim=12601460432 hv=2376001516 ad='7733b2f8' sqlid='1qgdf4y6txtzc'
+begin dbms_monitor.session_trace_disable; end;
+END OF STMT
+PARSE #138290362267256:c=1156,e=1378,p=0,cr=0,cu=0,mis=1,r=0,dep=0,og=1,plh=0,tim=12601460431
+EXEC #138290362267256:c=389,e=389,p=0,cr=0,cu=0,mis=0,r=1,dep=0,og=1,plh=0,tim=12601460907

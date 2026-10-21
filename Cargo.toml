@@ -12,6 +12,7 @@ rust-version = "1.95"
 orui-config = { path = "crates/orui-config" }
 orui-data = { path = "crates/orui-data" }
 orui-db = { path = "crates/orui-db" }
+orui-monitor = { path = "crates/orui-monitor" }
 orui-plsql = { path = "crates/orui-plsql" }
 orui-ui = { path = "crates/orui-ui" }
 
