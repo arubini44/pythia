@@ -100,12 +100,9 @@ pub fn package_body(spec: &str, body: Option<&str>) -> Option<Stubs> {
                 });
             }
             // Before the package's final END.
-            let end = tokenize(body)
-                .into_iter()
-                .filter(|t| {
-                    t.kind == TokenKind::Keyword && body[t.span.clone()].eq_ignore_ascii_case("END")
-                })
-                .last()?;
+            let end = tokenize(body).into_iter().rev().find(|t| {
+                t.kind == TokenKind::Keyword && body[t.span.clone()].eq_ignore_ascii_case("END")
+            })?;
             let line_start = body[..end.span.start].rfind('\n').map_or(0, |i| i + 1);
             format!(
                 "{}\n{}\n{}",
