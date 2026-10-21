@@ -369,6 +369,7 @@ impl OruiApp {
                 id: request,
                 sql: stmt.sql,
                 max_rows: self.settings.fetch_size,
+                binds: Vec::new(),
             });
             return;
         }
@@ -461,6 +462,7 @@ impl OruiApp {
                 self.connect_dialog.failed(message);
             }
             DbEvent::Transaction { pending } => conn.pending_tx = pending,
+            DbEvent::Meta { .. } => {}
             DbEvent::Disconnected => self.conn = None,
             DbEvent::QueryStarted { id, .. }
             | DbEvent::Rows { id, .. }

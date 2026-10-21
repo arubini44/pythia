@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use orui_config::Privilege;
 
+use crate::meta::{CompileError, MetaQuery, MetaResult};
+
 #[derive(Clone)]
 pub struct ConnectParams {
     pub username: String,
@@ -29,6 +31,13 @@ pub enum DbRequest {
         id: u64,
         sql: String,
         max_rows: usize,
+        /// Values for `:name` bind variables, bound as strings (`None` = NULL).
+        binds: Vec<(String, Option<String>)>,
+    },
+    /// Data dictionary lookup; answered with [`DbEvent::Meta`].
+    Meta {
+        id: u64,
+        query: MetaQuery,
     },
     /// Fetches more rows of the open result set of query `id`.
     FetchMore {
@@ -65,6 +74,10 @@ pub enum DbEvent {
         error: DbError,
         elapsed: Duration,
     },
+    Meta {
+        id: u64,
+        result: Result<MetaResult, DbError>,
+    },
     /// Lines read from `DBMS_OUTPUT` after a statement.
     Output(Vec<String>),
     /// Whether the session has uncommitted changes.
@@ -99,10 +112,34 @@ pub struct ExecSummary {
     /// Statement type, e.g. `UPDATE`, `CREATE`, `PL/SQL block`.
     pub kind: String,
     pub rows_affected: Option<u64>,
+    /// For `CREATE` of a stored unit: the object and its compile errors.
+    pub compiled: Option<Compiled>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Compiled {
+    pub owner: String,
+    pub name: String,
+    pub object_type: String,
+    pub errors: Vec<CompileError>,
 }
 
 impl fmt::Display for ExecSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(c) = &self.compiled {
+            let ty = c.object_type.to_lowercase();
+            let errors = c.errors.iter().filter(|e| !e.warning).count();
+            let warnings = c.errors.len() - errors;
+            return match (errors, warnings) {
+                (0, 0) => write!(f, "{ty} {}.{} compiled", c.owner, c.name),
+                (0, w) => write!(
+                    f,
+                    "{ty} {}.{} compiled with {w} warning(s)",
+                    c.owner, c.name
+                ),
+                (e, _) => write!(f, "{ty} {}.{} compiled with {e} error(s)", c.owner, c.name),
+            };
+        }
         match self.rows_affected {
             Some(1) => write!(f, "{}: 1 row affected", self.kind),
             Some(n) => write!(f, "{}: {n} rows affected", self.kind),

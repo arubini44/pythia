@@ -6,10 +6,15 @@
 //! bypasses the queue is [`Session::cancel`], which has to interrupt the
 //! worker while it is busy.
 
+mod meta;
 mod session;
 mod types;
 
+pub use meta::{
+    CompileError, DbObject, Detail, Member, MetaQuery, MetaResult, ObjectType, TableColumn,
+    like_pattern,
+};
 pub use session::Session;
 pub use types::{
-    Cell, Column, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
+    Cell, Column, Compiled, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
 };

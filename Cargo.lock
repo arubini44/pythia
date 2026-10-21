@@ -2409,6 +2409,8 @@ version = "0.1.0"
 dependencies = [
  "oracle",
  "orui-config",
+ "orui-plsql",
+ "serde",
  "thiserror 2.0.21",
  "tracing",
 ]

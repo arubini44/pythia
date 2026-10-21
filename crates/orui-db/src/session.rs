@@ -8,8 +8,9 @@ use oracle::{Connection, Connector, ResultSet, Row, StatementType};
 use orui_config::Privilege;
 use tracing::{debug, info, warn};
 
+use crate::meta;
 use crate::types::{
-    Cell, Column, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
+    Cell, Column, Compiled, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
 };
 
 /// Handle to a database session running on its own worker thread.
@@ -131,7 +132,16 @@ impl Worker {
         while let Ok(request) = requests.recv() {
             debug!(?request, "db request");
             match request {
-                DbRequest::Execute { id, sql, max_rows } => worker.execute(id, &sql, max_rows),
+                DbRequest::Execute {
+                    id,
+                    sql,
+                    max_rows,
+                    binds,
+                } => worker.execute(id, &sql, max_rows, &binds),
+                DbRequest::Meta { id, query } => {
+                    let result = meta::run(&worker.conn, &query);
+                    worker.events.send(DbEvent::Meta { id, result });
+                }
                 DbRequest::FetchMore { id, max_rows } => worker.fetch_more(id, max_rows),
                 DbRequest::Commit => worker.end_transaction(true),
                 DbRequest::Rollback => worker.end_transaction(false),
@@ -157,14 +167,14 @@ impl Worker {
         Ok(ServerInfo {
             version: version.to_string(),
             banner,
-            current_schema: self.conn.current_schema()?,
+            current_schema: current_schema(&self.conn)?,
         })
     }
 
-    fn execute(&mut self, id: u64, sql: &str, max_rows: usize) {
+    fn execute(&mut self, id: u64, sql: &str, max_rows: usize, binds: &[(String, Option<String>)]) {
         self.open_query = None;
         let started = Instant::now();
-        let result = self.execute_inner(id, sql, max_rows, started);
+        let result = self.execute_inner(id, sql, max_rows, binds, started);
         if let Err(error) = result {
             self.events.send(DbEvent::Failed {
                 id,
@@ -180,12 +190,17 @@ impl Worker {
         id: u64,
         sql: &str,
         max_rows: usize,
+        binds: &[(String, Option<String>)],
         started: Instant,
     ) -> Result<(), DbError> {
+        let named: Vec<(&str, &dyn oracle::sql_type::ToSql)> = binds
+            .iter()
+            .map(|(name, value)| (name.as_str(), value as &dyn oracle::sql_type::ToSql))
+            .collect();
         let mut stmt = self.conn.statement(sql).build()?;
         if stmt.is_query() {
             drop(stmt);
-            let rows = self.conn.query(sql, &[])?;
+            let rows = self.conn.query_named(sql, &named)?;
             let columns = rows
                 .column_info()
                 .iter()
@@ -197,15 +212,20 @@ impl Worker {
             return Ok(());
         }
 
-        stmt.execute(&[])?;
+        stmt.execute_named(&named)?;
         let kind = stmt.statement_type();
         let rows_affected = stmt.is_dml().then(|| stmt.row_count()).transpose()?;
         if self.autocommit && stmt.is_dml() {
             self.conn.commit()?;
         }
+        let compiled = match kind {
+            StatementType::Create => self.compiled(sql)?,
+            _ => None,
+        };
         let summary = ExecSummary {
             kind: statement_kind_label(&kind, sql),
             rows_affected,
+            compiled,
         };
         self.events.send(DbEvent::Executed {
             id,
@@ -213,6 +233,24 @@ impl Worker {
             elapsed: started.elapsed(),
         });
         Ok(())
+    }
+
+    /// After `CREATE` of a stored unit, reads its compile errors.
+    fn compiled(&self, sql: &str) -> Result<Option<Compiled>, DbError> {
+        let Some(header) = orui_plsql::unit_header(sql) else {
+            return Ok(None);
+        };
+        let owner = match header.owner {
+            Some(owner) => owner,
+            None => current_schema(&self.conn)?,
+        };
+        let errors = meta::errors(&self.conn, &owner, &header.name, &header.object_type)?;
+        Ok(Some(Compiled {
+            owner,
+            name: header.name,
+            object_type: header.object_type,
+            errors,
+        }))
     }
 
     fn fetch_more(&mut self, id: u64, max_rows: usize) {
@@ -361,4 +399,10 @@ fn statement_kind_label(kind: &StatementType, sql: &str) -> String {
             .unwrap_or("Statement")
             .to_uppercase(),
     }
+}
+
+/// The session's current schema. `Connection::current_schema` only reports a
+/// value after it was set explicitly, so ask the database.
+fn current_schema(conn: &Connection) -> oracle::Result<String> {
+    conn.query_row_as("select sys_context('USERENV', 'CURRENT_SCHEMA') from dual", &[])
 }
