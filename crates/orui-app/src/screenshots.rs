@@ -601,6 +601,19 @@ fn deployment_script() {
     let mut h = harness(true);
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
+    // The script expects the table not to exist (left over by a failed run).
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "begin
+  for t in (select table_name from user_tables where table_name = 'ORUI_DEPLOY_T') loop
+    execute immediate 'drop table orui_deploy_t purge';
+  end loop;
+end;
+/"
+        .into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
     h.state_mut().test_open_file(dir.join("install.sql"));
     h.run_steps(2);
     h.state_mut()
@@ -737,7 +750,13 @@ fn foreign_key_links() {
     wait_until(&mut h, "connection", |app| app.test_connected());
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "orui@FREEPDB1".into(),
-        text: "create table orui_fk_p (id number primary key, name varchar2(20));
+        text: "begin
+  for t in (select table_name from user_tables where table_name in ('ORUI_FK_C', 'ORUI_FK_P')) loop
+    execute immediate 'drop table ' || t.table_name || ' cascade constraints purge';
+  end loop;
+end;
+/
+create table orui_fk_p (id number primary key, name varchar2(20));
 create table orui_fk_c (id number primary key, p_id number references orui_fk_p);
 insert into orui_fk_p values (1, 'one');
 insert into orui_fk_c values (10, 1);

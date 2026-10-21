@@ -139,10 +139,8 @@ pub enum OpenRequest {
 pub type TableData = (Vec<orui_db::Column>, Vec<Vec<orui_db::Cell>>);
 
 #[derive(Serialize, Deserialize)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "a handful of documents, never copied"
-)]
+// A handful of documents, never copied: variant sizes don't matter.
+#[allow(clippy::large_enum_variant)]
 pub enum DocKind {
     Sql(SqlWindow),
     Program(ProgramWindow),

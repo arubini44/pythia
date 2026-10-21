@@ -244,11 +244,23 @@ impl DbError {
 impl From<oracle::Error> for DbError {
     fn from(e: oracle::Error) -> Self {
         match e.db_error() {
-            Some(db) => Self {
-                code: Some(db.code()).filter(|c| *c != 0),
-                message: db.message().trim_end().to_owned(),
-                offset: Some(db.offset()).filter(|o| *o != 0),
-            },
+            Some(db) => {
+                let mut message = db.message().trim_end().to_owned();
+                if db.code() == 1805 {
+                    // Raised by the client while fetching, not by the database.
+                    message.push_str(
+                        "\nThe Oracle client's time zone file lacks a time zone region in this \
+                         result (TIMESTAMP WITH TIME ZONE). Instant Client \"Basic Light\" only \
+                         has the small time zone file: install \"Basic\" instead, or select the \
+                         column with TO_CHAR().",
+                    );
+                }
+                Self {
+                    code: Some(db.code()).filter(|c| *c != 0),
+                    message,
+                    offset: Some(db.offset()).filter(|o| *o != 0),
+                }
+            }
             None => Self::new(e.to_string()),
         }
     }

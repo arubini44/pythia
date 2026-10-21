@@ -150,7 +150,10 @@ impl Format {
 
 impl<W: Write> StreamWriter<W> {
     pub fn new(format: Format, columns: Vec<Column>, options: Options, mut out: W) -> Result<Self> {
-        assert!(Format::STREAMING.contains(&format), "{format:?} can't stream");
+        assert!(
+            Format::STREAMING.contains(&format),
+            "{format:?} can't stream"
+        );
         match format {
             Format::Csv | Format::Tsv if options.header => {
                 let delimiter = if format == Format::Csv { b',' } else { b'\t' };
@@ -185,7 +188,11 @@ impl<W: Write> StreamWriter<W> {
             Format::Markdown => markdown_rows(rows, &mut self.out)?,
             Format::Json => {
                 for (i, row) in rows.iter().enumerate() {
-                    let sep = if self.rows == 0 && i == 0 { "\n" } else { ",\n" };
+                    let sep = if self.rows == 0 && i == 0 {
+                        "\n"
+                    } else {
+                        ",\n"
+                    };
                     let object = serde_json::to_string_pretty(&json_object(&self.columns, row))?;
                     write!(self.out, "{sep}{}", indent(&object))?;
                 }
@@ -620,6 +627,9 @@ mod tests {
             .unwrap()
             .finish()
             .unwrap();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&empty).unwrap(), serde_json::json!([]));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&empty).unwrap(),
+            serde_json::json!([])
+        );
     }
 }

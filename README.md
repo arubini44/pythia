@@ -90,8 +90,11 @@ release](https://github.com/ortic/orui/releases).
 orui talks to Oracle through the **Oracle Instant Client**, which Oracle's
 license doesn't allow us to bundle. Install it once:
 
-1. Download *Basic* or *Basic Light* for your platform from
+1. Download *Basic* for your platform from
    <https://www.oracle.com/database/technologies/instant-client/downloads.html>.
+   *Basic Light* works too, but it only has the small time zone file:
+   `TIMESTAMP WITH TIME ZONE` values with region names (e.g. scheduler job
+   times) then fail with ORA-01805.
 2. Unpack it, e.g. to `/opt/oracle/instantclient_23` or `C:\oracle\instantclient_23`.
 3. Make it findable:
    - **Linux:** `sudo apt install libaio1t64` (or `libaio1` on older

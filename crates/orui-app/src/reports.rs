@@ -162,8 +162,11 @@ select sid, serial#, opname, target, sofar, totalwork,
     Report {
         category: "Jobs",
         name: "Scheduler jobs",
-        sql: "select owner, job_name, enabled, state, job_type, repeat_interval,
-       last_start_date, last_run_duration, next_run_date, run_count, failure_count
+        sql: "-- Times are converted to text: TIMESTAMP WITH TIME ZONE values with region names
+-- need the full Instant Client time zone file
+select owner, job_name, enabled, state, job_type, repeat_interval,
+       to_char(last_start_date, 'YYYY-MM-DD HH24:MI:SS TZR') as last_start_date, last_run_duration,
+       to_char(next_run_date, 'YYYY-MM-DD HH24:MI:SS TZR') as next_run_date, run_count, failure_count
   from all_scheduler_jobs
  where owner not in (select username from all_users where oracle_maintained = 'Y')
  order by owner, job_name",
@@ -171,7 +174,9 @@ select sid, serial#, opname, target, sofar, totalwork,
     Report {
         category: "Jobs",
         name: "Recent job runs",
-        sql: "select owner, job_name, status, actual_start_date, run_duration, error#, additional_info
+        sql: "select owner, job_name, status,
+       to_char(actual_start_date, 'YYYY-MM-DD HH24:MI:SS TZR') as actual_start_date,
+       run_duration, error#, additional_info
   from all_scheduler_job_run_details
  where actual_start_date > systimestamp - interval '7' day
    and owner not in (select username from all_users where oracle_maintained = 'Y')

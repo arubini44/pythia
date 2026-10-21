@@ -382,7 +382,9 @@ impl GridState {
             .into_iter()
             .filter(|&c| Some(c) != locked)
             .collect();
-        let (r0, c0) = self.cursor.unwrap_or((0, targets.first().copied().unwrap_or(0)));
+        let (r0, c0) = self
+            .cursor
+            .unwrap_or((0, targets.first().copied().unwrap_or(0)));
         let targets: Vec<usize> = targets.into_iter().filter(|&c| c >= c0).collect();
         let text = text.strip_suffix('\n').unwrap_or(text);
         let text = text.strip_suffix('\r').unwrap_or(text);
@@ -507,8 +509,17 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
         return;
     }
     let (r, c) = state.cursor.unwrap_or((0, first_col));
-    let prev_col = visible.iter().rev().find(|&&v| v < c).copied().unwrap_or(first_col);
-    let next_col = visible.iter().find(|&&v| v > c).copied().unwrap_or(last_col);
+    let prev_col = visible
+        .iter()
+        .rev()
+        .find(|&&v| v < c)
+        .copied()
+        .unwrap_or(first_col);
+    let next_col = visible
+        .iter()
+        .find(|&&v| v > c)
+        .copied()
+        .unwrap_or(last_col);
     let page = 20;
     let (mut nr, mut nc) = (r, c);
     let mut extend = false;
@@ -688,7 +699,9 @@ fn table(
                                     }
                                     if hidden_count > 0
                                         && ui
-                                            .button(format!("Show all columns ({hidden_count} hidden)"))
+                                            .button(format!(
+                                                "Show all columns ({hidden_count} hidden)"
+                                            ))
                                             .clicked()
                                     {
                                         show_all = true;
@@ -978,7 +991,10 @@ fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut
                         .columns
                         .iter()
                         .all(|&c| rows[row].get(c).is_some_and(Option::is_some));
-                    if ui.add_enabled(has_key, egui::Button::new(&link.label)).clicked() {
+                    if ui
+                        .add_enabled(has_key, egui::Button::new(&link.label))
+                        .clicked()
+                    {
                         chosen = Some((i, row));
                         ui.close();
                     }
@@ -1023,7 +1039,11 @@ pub fn selection_data(
         let cols = keep.iter().map(|&i| columns[i].clone()).collect();
         let data = rows
             .iter()
-            .map(|row| keep.iter().map(|&i| row.get(i).cloned().flatten()).collect())
+            .map(|row| {
+                keep.iter()
+                    .map(|&i| row.get(i).cloned().flatten())
+                    .collect()
+            })
             .collect();
         return (cols, data);
     };
@@ -1031,7 +1051,11 @@ pub fn selection_data(
     let cols = keep.iter().map(|&i| columns[i].clone()).collect();
     let data = r
         .filter_map(|vr| rows.get(state.row_index(vr)))
-        .map(|row| keep.iter().map(|&i| row.get(i).cloned().flatten()).collect())
+        .map(|row| {
+            keep.iter()
+                .map(|&i| row.get(i).cloned().flatten())
+                .collect()
+        })
         .collect();
     (cols, data)
 }

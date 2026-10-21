@@ -30,15 +30,51 @@ impl Default for Editor {
     }
 }
 
+/// Saved form: just the text, or the text with bookmarks and folds.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Saved {
+    Text(String),
+    Full {
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bookmarks: Vec<(Option<u8>, usize)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        folds: Vec<usize>,
+    },
+}
+
 impl Serialize for Editor {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.text.serialize(serializer)
+        let bookmarks = self.inner.bookmarks();
+        let folds = self.inner.folded_lines();
+        if bookmarks.is_empty() && folds.is_empty() {
+            return self.text.serialize(serializer);
+        }
+        Saved::Full {
+            text: self.text.clone(),
+            bookmarks,
+            folds,
+        }
+        .serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for Editor {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Editor::new)
+        Ok(match Saved::deserialize(deserializer)? {
+            Saved::Text(text) => Editor::new(text),
+            Saved::Full {
+                text,
+                bookmarks,
+                folds,
+            } => {
+                let mut editor = Editor::new(text);
+                editor.inner.set_bookmarks(bookmarks);
+                editor.inner.set_folded_lines(&folds);
+                editor
+            }
+        })
     }
 }
 
@@ -267,5 +303,20 @@ mod tests {
         e.insert("SELECT");
         assert_eq!(e.text(), "SELECT 1");
         assert_eq!(serde_json::to_string(&e).unwrap(), "\"SELECT 1\"");
+    }
+
+    #[test]
+    fn bookmarks_and_folds_survive_saving() {
+        let mut e = Editor::new("begin\n  null;\n  null;\nend;\nselect 1 from dual;\n");
+        e.inner().toggle_bookmark(5, Some(3));
+        e.inner().toggle_fold_at(1);
+        let json = serde_json::to_string(&e).unwrap();
+        let mut back: Editor = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.text(), e.text());
+        assert_eq!(back.inner().bookmarks(), vec![(Some(3), 5)]);
+        assert_eq!(back.inner().folded_lines(), vec![1]);
+        // Old sessions saved just the text.
+        let old: Editor = serde_json::from_str("\"select 2\"").unwrap();
+        assert_eq!(old.text(), "select 2");
     }
 }

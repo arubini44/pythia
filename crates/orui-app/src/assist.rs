@@ -154,7 +154,18 @@ impl Assist {
         match request {
             Pending::Complete(_) => {
                 let completion = self.analysis.complete(editor.cursor(), catalog);
-                let entries = completion.items.into_iter().map(entry).collect();
+                let mut entries: Vec<CompletionEntry> =
+                    completion.items.into_iter().map(entry).collect();
+                // Snippets for a plain word, not after `alias.` or `pkg.`.
+                let text = editor.text();
+                let replace = completion.replace.clone();
+                let member = text[..replace.start.min(text.len())].ends_with('.');
+                if let Some(prefix) = text.get(replace.clone()).map(str::to_owned)
+                    && !prefix.is_empty()
+                    && !member
+                {
+                    entries.extend(editor.inner().snippet_completions(&prefix));
+                }
                 editor.inner().show_completions(completion.replace, entries);
                 completion.missing
             }

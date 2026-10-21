@@ -47,6 +47,8 @@ commands! {
     ToggleAutocommit => "Session: Toggle Auto-Commit",
     History => "Edit: Recall Statement (history)",
     Format => "Edit: Format Code",
+    FoldAll => "Edit: Fold All",
+    UnfoldAll => "Edit: Unfold All",
     FindObject => "Tools: Find Database Object…",
     FindInSource => "Tools: Find in Database Source…",
     SearchData => "Tools: Search Data in Tables…",

@@ -909,6 +909,24 @@ impl OruiApp {
                 }
             }
             Command::History => self.history_dialog.toggle(),
+            Command::FoldAll | Command::UnfoldAll => {
+                let editor = match self
+                    .focused
+                    .and_then(|id| self.docs.get_mut(&id))
+                    .map(|d| &mut d.kind)
+                {
+                    Some(DocKind::Sql(w)) => Some(&mut w.editor),
+                    Some(DocKind::Program(w)) => w.active_editor(),
+                    _ => None,
+                };
+                if let Some(editor) = editor {
+                    if command == Command::FoldAll {
+                        editor.inner().fold_all();
+                    } else {
+                        editor.inner().unfold_all();
+                    }
+                }
+            }
             Command::Format => {
                 let options = self.settings.format.clone();
                 let editor = match self
@@ -1341,6 +1359,9 @@ impl OruiApp {
             ui.menu_button("Edit", |ui| {
                 item(ui, Command::Format);
                 item(ui, Command::History);
+                ui.separator();
+                item(ui, Command::FoldAll);
+                item(ui, Command::UnfoldAll);
             });
             ui.menu_button("Session", |ui| {
                 item(ui, Command::Connect);

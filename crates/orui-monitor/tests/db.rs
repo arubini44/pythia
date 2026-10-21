@@ -63,7 +63,16 @@ fn capabilities_dba_and_app_user() {
     assert!(caps.pack_access.is_some());
     assert_eq!(caps.awr().is_ok(), caps.diagnostics_licensed());
 
-    if let Some(app) = connect("ORUI_TEST_DB") {
+    // The unprivileged checks only hold for a user without catalog access.
+    let catalog_role = |c: &Connection| {
+        c.query_row_as::<i64>(
+            "select count(*) from session_roles where role = 'SELECT_CATALOG_ROLE'",
+            &[],
+        )
+        .unwrap()
+            > 0
+    };
+    if let Some(app) = connect("ORUI_TEST_DB").filter(|c| !catalog_role(c)) {
         let caps = queries::capabilities(&app).unwrap();
         assert!(!caps.missing_views().is_empty());
         assert!(caps.awr().is_err());
