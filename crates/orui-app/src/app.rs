@@ -80,6 +80,7 @@ pub struct OruiApp {
     log: Vec<String>,
     connect_dialog: ConnectDialog,
     palette: CommandPalette,
+    settings_dialog: crate::settings_dialog::SettingsDialog,
     finder: ObjectFinder,
     history_dialog: HistoryDialog,
     confirm: Option<Confirm>,
@@ -128,6 +129,7 @@ impl OruiApp {
             log: Vec::new(),
             connect_dialog: ConnectDialog::default(),
             palette: CommandPalette::default(),
+            settings_dialog: Default::default(),
             finder: ObjectFinder::default(),
             history_dialog: HistoryDialog::default(),
             confirm: None,
@@ -193,6 +195,14 @@ impl OruiApp {
             && let Err(e) = save_toml(&paths.settings_file(), &self.settings)
         {
             error!("saving settings: {e:#}");
+        }
+    }
+
+    fn save_connections(&self) {
+        if let Some(paths) = &self.paths
+            && let Err(e) = save_toml(&paths.connections_file(), &self.saved)
+        {
+            error!("saving connections: {e:#}");
         }
     }
 
@@ -308,6 +318,7 @@ impl OruiApp {
                     }
                 }
             }
+            OpenRequest::ConnectDialog => self.connect_dialog.show(self.last_profile.as_ref()),
             OpenRequest::Browse { connection } => {
                 let schema = self
                     .conns
@@ -583,6 +594,7 @@ impl OruiApp {
                 }
             }
             Command::Connect => self.connect_dialog.show(self.last_profile.as_ref()),
+            Command::Settings => self.settings_dialog.open = true,
             Command::Disconnect => {
                 let Some(name) = self.current_connection() else {
                     return;
@@ -957,6 +969,8 @@ impl OruiApp {
                 item(ui, Command::CloseTab);
                 item(ui, Command::CloseOtherTabs);
                 ui.separator();
+                item(ui, Command::Settings);
+                ui.separator();
                 item(ui, Command::Quit);
             });
             ui.menu_button("Edit", |ui| {
@@ -1179,8 +1193,40 @@ impl OruiApp {
     }
 
     fn popups(&mut self, ctx: &egui::Context, commands: &mut Vec<Command>) {
-        if let Some(request) = self.connect_dialog.ui(ctx, &self.saved) {
-            self.connect(request.profile, request.password, request.save_profile);
+        match self.connect_dialog.ui(ctx, &self.saved) {
+            Some(crate::dialogs::ConnectAction::Connect(request)) => {
+                self.connect(request.profile, request.password, request.save_profile);
+            }
+            Some(crate::dialogs::ConnectAction::Save {
+                profile,
+                previous,
+                password,
+            }) => {
+                if let Some(previous) = previous.filter(|p| *p != profile.display_name()) {
+                    self.saved.profiles.retain(|p| p.display_name() != previous);
+                    secrets::forget(&previous);
+                }
+                match &password {
+                    Some(pw) => secrets::store(&profile.display_name(), pw),
+                    None => secrets::forget(&profile.display_name()),
+                }
+                self.saved.upsert(profile);
+                self.save_connections();
+            }
+            Some(crate::dialogs::ConnectAction::Delete(name)) => {
+                self.saved.profiles.retain(|p| p.display_name() != name);
+                secrets::forget(&name);
+                self.save_connections();
+            }
+            None => {}
+        }
+        match self.settings_dialog.ui(ctx, &mut self.settings) {
+            crate::settings_dialog::SettingsResult::Changed => self.apply_settings(ctx),
+            crate::settings_dialog::SettingsResult::Closed => {
+                self.apply_settings(ctx);
+                self.save_settings();
+            }
+            crate::settings_dialog::SettingsResult::None => {}
         }
         if let Some(command) = self.palette.ui(ctx, &self.keymap) {
             commands.push(command);
@@ -1425,6 +1471,17 @@ impl OruiApp {
 
     pub fn test_apply(&mut self, effects: Effects) {
         self.apply(self.focused, effects);
+    }
+
+    pub fn test_show_connections(&mut self, profiles: Vec<ConnectionProfile>) {
+        self.saved.profiles = profiles;
+        let first = self.saved.profiles.first().cloned();
+        self.connect_dialog.show(first.as_ref());
+    }
+
+    pub fn test_close_connect(&mut self) {
+        self.connect_dialog.open = false;
+        self.saved.profiles.clear();
     }
 
     pub fn test_command(&mut self, command: Command) {

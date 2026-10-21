@@ -3,9 +3,10 @@
 
 use std::time::Duration;
 
-use egui::{Key, RichText};
+use egui::{Key, RichText, Sense, Ui};
 use orui_config::{ConnectionProfile, Connections as SavedConnections, Privilege};
 use orui_db::{DbObject, ObjectType};
+use orui_ui::icons::Icon;
 
 use crate::commands::{Command, Keymap, fuzzy_score};
 use crate::documents::ObjectRef;
@@ -19,7 +20,10 @@ pub struct ConnectDialog {
     pub error: Option<String>,
     form: ConnectionProfile,
     password: String,
-    save_profile: bool,
+    /// Display name of the saved profile being edited, if any.
+    editing: Option<String>,
+    search: String,
+    confirm_delete: bool,
     focus_requested: bool,
 }
 
@@ -29,12 +33,35 @@ pub struct ConnectRequest {
     pub save_profile: bool,
 }
 
+pub enum ConnectAction {
+    Connect(ConnectRequest),
+    /// Save the profile, replacing the one named `previous` (if renamed).
+    Save {
+        profile: ConnectionProfile,
+        previous: Option<String>,
+        password: Option<String>,
+    },
+    Delete(String),
+}
+
+/// Accent colors offered for connections.
+const COLORS: [[u8; 3]; 8] = [
+    [0x3b, 0x82, 0xf6],
+    [0x14, 0xb8, 0xa6],
+    [0x22, 0xc5, 0x5e],
+    [0xea, 0xb3, 0x08],
+    [0xf9, 0x73, 0x16],
+    [0xa8, 0x55, 0xf7],
+    [0xec, 0x48, 0x99],
+    [0x64, 0x74, 0x8b],
+];
+
 impl ConnectDialog {
     pub fn show(&mut self, last: Option<&ConnectionProfile>) {
         self.open = true;
         self.error = None;
         self.focus_requested = false;
-        self.save_profile = true;
+        self.confirm_delete = false;
         if let Some(last) = last {
             self.pick(last.clone());
         }
@@ -46,165 +73,343 @@ impl ConnectDialog {
         } else {
             String::new()
         };
+        self.editing = Some(profile.display_name());
         self.form = profile;
+        self.confirm_delete = false;
+        self.focus_requested = false;
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, saved: &SavedConnections) -> Option<ConnectRequest> {
+    fn new_profile(&mut self) {
+        self.form = ConnectionProfile::default();
+        self.password.clear();
+        self.editing = None;
+        self.confirm_delete = false;
+        self.focus_requested = false;
+    }
+
+    pub fn ui(&mut self, ctx: &egui::Context, saved: &SavedConnections) -> Option<ConnectAction> {
         if !self.open {
             return None;
         }
-        let mut request = None;
+        let mut action = None;
         let modal = egui::Modal::new(egui::Id::new("connect-dialog")).show(ctx, |ui| {
-            ui.set_width(440.0);
-            ui.heading("Connect to Oracle");
-            ui.add_space(8.0);
-
-            if !saved.profiles.is_empty() {
-                let mut picked = None;
-                egui::ComboBox::from_label("Saved connection")
-                    .selected_text(self.form.display_name())
-                    .width(300.0)
-                    .show_ui(ui, |ui| {
-                        for p in &saved.profiles {
-                            let marker = if p.production { "● " } else { "" };
-                            let text = RichText::new(format!("{marker}{}", p.display_name()));
-                            let text = if p.production {
-                                text.color(ui.visuals().error_fg_color)
-                            } else {
-                                text
-                            };
-                            if ui.selectable_label(false, text).clicked() {
-                                picked = Some(p.clone());
-                            }
-                        }
-                    });
-                if let Some(p) = picked {
-                    self.pick(p);
-                }
-                ui.add_space(6.0);
-            }
-
-            let mut submit = false;
-            egui::Grid::new("connect-form")
-                .num_columns(2)
-                .spacing([10.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("Username");
-                    let user = ui.add(
-                        egui::TextEdit::singleline(&mut self.form.username).desired_width(290.0),
-                    );
-                    if !self.focus_requested {
-                        user.request_focus();
-                        self.focus_requested = true;
-                    }
-                    ui.end_row();
-
-                    ui.label("Password");
-                    let pw = ui.add(
-                        egui::TextEdit::singleline(&mut self.password)
-                            .password(true)
-                            .desired_width(290.0),
-                    );
-                    submit |= pw.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    ui.end_row();
-
-                    ui.label("Database");
-                    let db = ui.add(
-                        egui::TextEdit::singleline(&mut self.form.connect_string)
-                            .hint_text("TNS alias or host:1521/service")
-                            .desired_width(290.0),
-                    );
-                    submit |= db.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    ui.end_row();
-
-                    ui.label("Connect as");
-                    egui::ComboBox::from_id_salt("privilege")
-                        .selected_text(self.form.privilege.label())
-                        .show_ui(ui, |ui| {
-                            for p in Privilege::ALL {
-                                ui.selectable_value(&mut self.form.privilege, p, p.label());
-                            }
-                        });
-                    ui.end_row();
-
-                    ui.label("Name");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.form.name)
-                            .hint_text("optional")
-                            .desired_width(290.0),
-                    );
-                    ui.end_row();
-
-                    ui.label("Folder");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.form.folder)
-                            .hint_text("e.g. customer/prod")
-                            .desired_width(290.0),
-                    );
-                    ui.end_row();
-                });
-
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut self.form.production, "Production")
-                    .on_hover_text("Red marker and confirmation before commit");
-                ui.checkbox(&mut self.form.read_only, "Read-only")
-                    .on_hover_text("Only queries are allowed");
-                ui.checkbox(&mut self.save_profile, "Save connection");
-                ui.add_enabled(
-                    self.save_profile,
-                    egui::Checkbox::new(&mut self.form.save_password, "Save password"),
-                )
-                .on_hover_text("Stored in the operating system's keychain");
+            ui.set_width(if saved.profiles.is_empty() {
+                460.0
+            } else {
+                720.0
             });
-
-            if let Some(error) = &self.error {
-                ui.add_space(8.0);
-                egui::Frame::new()
-                    .fill(ui.visuals().error_fg_color.gamma_multiply(0.12))
-                    .corner_radius(6.0)
-                    .inner_margin(8.0)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
+            ui.horizontal_top(|ui| {
+                if !saved.profiles.is_empty() {
+                    ui.vertical(|ui| {
+                        ui.set_width(240.0);
+                        self.list_ui(ui, saved, &mut action);
                     });
-            }
-
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                let can_connect = !self.connecting && !self.form.connect_string.trim().is_empty();
-                if self.connecting {
-                    ui.spinner();
-                    ui.label("Connecting…");
+                    ui.separator();
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.open = false;
-                        self.connecting = false;
-                    }
-                    let connect = ui.add_enabled(
-                        can_connect,
-                        egui::Button::new(RichText::new("Connect").strong()),
-                    );
-                    if connect.clicked() || (submit && can_connect) {
-                        self.error = None;
-                        self.connecting = true;
-                        let mut profile = self.form.clone();
-                        profile.username = profile.username.trim().to_owned();
-                        profile.connect_string = profile.connect_string.trim().to_owned();
-                        profile.save_password &= self.save_profile;
-                        request = Some(ConnectRequest {
-                            profile,
-                            password: self.password.clone(),
-                            save_profile: self.save_profile,
-                        });
-                    }
-                });
+                ui.vertical(|ui| self.form_ui(ui, &mut action));
             });
         });
         if modal.should_close() && !self.connecting {
             self.open = false;
         }
-        request
+        action
+    }
+
+    fn list_ui(
+        &mut self,
+        ui: &mut Ui,
+        saved: &SavedConnections,
+        action: &mut Option<ConnectAction>,
+    ) {
+        ui.horizontal(|ui| {
+            ui.strong("Connections");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if crate::icons_ext::small_icon_button(ui, Icon::Plus, "New connection").clicked() {
+                    self.new_profile();
+                }
+            });
+        });
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Search…")
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(4.0);
+        let needle = self.search.to_lowercase();
+        let mut folders: Vec<&str> = saved.profiles.iter().map(|p| p.folder.as_str()).collect();
+        folders.sort_unstable();
+        folders.dedup();
+        let mut picked = None;
+        let mut connect = None;
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for folder in folders {
+                    let profiles: Vec<&ConnectionProfile> = saved
+                        .profiles
+                        .iter()
+                        .filter(|p| p.folder == folder)
+                        .filter(|p| {
+                            needle.is_empty()
+                                || p.display_name().to_lowercase().contains(&needle)
+                                || p.connect_string.to_lowercase().contains(&needle)
+                        })
+                        .collect();
+                    if profiles.is_empty() {
+                        continue;
+                    }
+                    if !folder.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add(Icon::Folder.sized(ui, orui_ui::icons::IconSize::Small));
+                            ui.label(RichText::new(folder).small().strong());
+                        });
+                    }
+                    for p in profiles {
+                        let name = p.display_name();
+                        let selected = self.editing.as_deref() == Some(name.as_str());
+                        let r = ui.horizontal(|ui| {
+                            if !folder.is_empty() {
+                                ui.add_space(10.0);
+                            }
+                            let color = if p.production {
+                                ui.visuals().error_fg_color
+                            } else {
+                                p.color.map_or(ui.visuals().weak_text_color(), |[r, g, b]| {
+                                    egui::Color32::from_rgb(r, g, b)
+                                })
+                            };
+                            let (dot, _) =
+                                ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 4.0, color);
+                            let mut text = RichText::new(&name);
+                            if p.production {
+                                text = text.color(ui.visuals().error_fg_color);
+                            }
+                            let r = ui.add(
+                                egui::Button::selectable(selected, text).frame_when_inactive(false),
+                            );
+                            r.on_hover_text(format!(
+                                "{}@{}{}",
+                                p.username,
+                                p.connect_string,
+                                if p.production { "\nProduction" } else { "" }
+                            ))
+                        });
+                        let r = r.inner;
+                        if r.clicked() {
+                            picked = Some(p.clone());
+                        }
+                        if r.double_clicked() {
+                            connect = Some(p.clone());
+                        }
+                    }
+                }
+            });
+        if let Some(p) = picked {
+            self.pick(p);
+        }
+        if let Some(p) = connect {
+            self.pick(p);
+            *action = self.connect_request();
+        }
+    }
+
+    fn form_ui(&mut self, ui: &mut Ui, action: &mut Option<ConnectAction>) {
+        ui.heading(if self.editing.is_some() {
+            "Connection"
+        } else {
+            "New connection"
+        });
+        ui.add_space(6.0);
+        let mut submit = false;
+        egui::Grid::new("connect-form")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Username");
+                let user = ui
+                    .add(egui::TextEdit::singleline(&mut self.form.username).desired_width(280.0));
+                if !self.focus_requested {
+                    if self.form.username.is_empty() {
+                        user.request_focus();
+                    }
+                    self.focus_requested = true;
+                }
+                ui.end_row();
+
+                ui.label("Password");
+                let pw = ui.add(
+                    egui::TextEdit::singleline(&mut self.password)
+                        .password(true)
+                        .desired_width(280.0),
+                );
+                if self.focus_requested
+                    && !self.form.username.is_empty()
+                    && self.password.is_empty()
+                    && !pw.has_focus()
+                    && ui.memory(|m| m.focused().is_none())
+                {
+                    pw.request_focus();
+                }
+                submit |= pw.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                ui.end_row();
+
+                ui.label("Database");
+                let db = ui.add(
+                    egui::TextEdit::singleline(&mut self.form.connect_string)
+                        .hint_text("TNS alias or host:1521/service")
+                        .desired_width(280.0),
+                );
+                submit |= db.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                ui.end_row();
+
+                ui.label("Connect as");
+                egui::ComboBox::from_id_salt("privilege")
+                    .selected_text(self.form.privilege.label())
+                    .show_ui(ui, |ui| {
+                        for p in Privilege::ALL {
+                            ui.selectable_value(&mut self.form.privilege, p, p.label());
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.form.name)
+                        .hint_text("optional, e.g. HR dev")
+                        .desired_width(280.0),
+                );
+                ui.end_row();
+
+                ui.label("Folder");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.form.folder)
+                        .hint_text("optional, e.g. customer/prod")
+                        .desired_width(280.0),
+                );
+                ui.end_row();
+
+                ui.label("Color");
+                ui.horizontal(|ui| {
+                    for c in COLORS {
+                        let color = egui::Color32::from_rgb(c[0], c[1], c[2]);
+                        let (rect, r) =
+                            ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::click());
+                        let selected = self.form.color == Some(c);
+                        ui.painter().circle_filled(
+                            rect.center(),
+                            if selected { 8.0 } else { 6.5 },
+                            color,
+                        );
+                        if selected {
+                            ui.painter().circle_stroke(
+                                rect.center(),
+                                9.0,
+                                egui::Stroke::new(1.5, ui.visuals().text_color()),
+                            );
+                        }
+                        if r.clicked() {
+                            self.form.color = if selected { None } else { Some(c) };
+                        }
+                    }
+                });
+                ui.end_row();
+            });
+
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.form.production, "Production")
+                .on_hover_text("Red marker everywhere and confirmation before commit");
+            ui.checkbox(&mut self.form.read_only, "Read-only")
+                .on_hover_text("Only queries are allowed");
+            ui.checkbox(&mut self.form.save_password, "Save password")
+                .on_hover_text("Stored in the operating system's keychain");
+        });
+
+        if let Some(error) = &self.error {
+            ui.add_space(8.0);
+            egui::Frame::new()
+                .fill(ui.visuals().error_fg_color.gamma_multiply(0.12))
+                .corner_radius(6.0)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
+                });
+        }
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            let valid = !self.form.connect_string.trim().is_empty();
+            if self.connecting {
+                ui.spinner();
+                ui.label("Connecting…");
+            }
+            if let Some(name) = self.editing.clone() {
+                if self.confirm_delete {
+                    ui.label("Delete this connection?");
+                    if ui
+                        .button(RichText::new("Delete").color(ui.visuals().error_fg_color))
+                        .clicked()
+                    {
+                        *action = Some(ConnectAction::Delete(name));
+                        self.new_profile();
+                    }
+                    if ui.button("Keep").clicked() {
+                        self.confirm_delete = false;
+                    }
+                } else if crate::icons_ext::small_icon_button(ui, Icon::Trash, "Delete connection")
+                    .clicked()
+                {
+                    self.confirm_delete = true;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let connect = ui.add_enabled(
+                    valid && !self.connecting,
+                    egui::Button::new(RichText::new("Connect").strong()),
+                );
+                if connect.clicked() || (submit && valid && !self.connecting) {
+                    *action = self.connect_request();
+                }
+                if ui.add_enabled(valid, egui::Button::new("Save")).clicked() {
+                    let profile = self.cleaned();
+                    let password = profile.save_password.then(|| self.password.clone());
+                    *action = Some(ConnectAction::Save {
+                        previous: self.editing.clone(),
+                        profile: profile.clone(),
+                        password,
+                    });
+                    self.editing = Some(profile.display_name());
+                }
+                if ui.button("Cancel").clicked() {
+                    self.open = false;
+                    self.connecting = false;
+                }
+            });
+        });
+    }
+
+    fn cleaned(&self) -> ConnectionProfile {
+        let mut profile = self.form.clone();
+        profile.username = profile.username.trim().to_owned();
+        profile.connect_string = profile.connect_string.trim().to_owned();
+        profile.name = profile.name.trim().to_owned();
+        profile.folder = profile.folder.trim().trim_matches('/').to_owned();
+        profile
+    }
+
+    fn connect_request(&mut self) -> Option<ConnectAction> {
+        if self.form.connect_string.trim().is_empty() {
+            return None;
+        }
+        self.error = None;
+        self.connecting = true;
+        Some(ConnectAction::Connect(ConnectRequest {
+            profile: self.cleaned(),
+            password: self.password.clone(),
+            save_profile: true,
+        }))
     }
 
     /// Called once the connection is established.

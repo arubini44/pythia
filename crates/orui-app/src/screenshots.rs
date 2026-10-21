@@ -160,6 +160,29 @@ fn screenshots() {
         let mut h = harness(dark);
         h.run_steps(3);
         save(&mut h, &format!("01-start-{suffix}"));
+        let sample = |name: &str, folder: &str, color: Option<[u8; 3]>, production: bool| {
+            ConnectionProfile {
+                name: name.into(),
+                folder: folder.into(),
+                username: "app".into(),
+                connect_string: format!(
+                    "{}.db.example.com:1521/SVC",
+                    name.to_lowercase().replace(' ', "-")
+                ),
+                color,
+                production,
+                ..Default::default()
+            }
+        };
+        h.state_mut().test_show_connections(vec![
+            sample("Local dev", "", Some([0x22, 0xc5, 0x5e]), false),
+            sample("Acme test", "acme", Some([0xea, 0xb3, 0x08]), false),
+            sample("Acme prod", "acme", None, true),
+            sample("Globex QA", "globex", Some([0xa8, 0x55, 0xf7]), false),
+        ]);
+        h.run_steps(4);
+        save(&mut h, &format!("00-connect-{suffix}"));
+        h.state_mut().test_close_connect();
 
         let Some((profile, password)) = profile() else {
             continue;

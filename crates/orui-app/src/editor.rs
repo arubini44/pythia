@@ -175,6 +175,15 @@ impl Editor {
             font_size: settings.font_size,
             tab_width: settings.tab_width,
             show_line_numbers: settings.show_line_numbers,
+            show_whitespace: settings.show_whitespace,
+            highlight_current_line: settings.highlight_current_line,
+            // Automatic completion off = only Ctrl+Space.
+            auto_complete_min_chars: if settings.auto_complete {
+                settings.auto_complete_min_chars.max(1)
+            } else {
+                usize::MAX
+            },
+            auto_complete_delay_ms: settings.auto_complete_delay_ms,
             read_only,
             ..EditorConfig::default()
         };

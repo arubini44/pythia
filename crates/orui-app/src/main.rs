@@ -12,12 +12,14 @@ mod dialogs;
 mod documents;
 mod editor;
 mod history;
+mod icons_ext;
 mod monitor_window;
 mod object_view;
 mod program_window;
 #[cfg(test)]
 mod screenshots;
 mod secrets;
+mod settings_dialog;
 mod sql_window;
 mod test_script;
 mod theme;

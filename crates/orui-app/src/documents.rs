@@ -106,6 +106,8 @@ pub enum OpenRequest {
         connection: String,
         object: ObjectRef,
     },
+    /// Open the connection manager.
+    ConnectDialog,
     /// Show this connection in the object browser.
     Browse { connection: String },
     Monitor {

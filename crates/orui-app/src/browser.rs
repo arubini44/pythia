@@ -312,7 +312,11 @@ impl Browser {
             ui.vertical_centered(|ui| {
                 ui.weak("Not connected");
                 ui.add_space(4.0);
-                ui.weak("Session → Connect… (or the toolbar) to browse a database.");
+                ui.weak("Connect to browse tables, packages and other objects.");
+                ui.add_space(8.0);
+                if orui_ui::icons::icon_text_button(ui, Icon::Connect, "Connect…").clicked() {
+                    effects.open.push(OpenRequest::ConnectDialog);
+                }
             });
             return effects;
         };

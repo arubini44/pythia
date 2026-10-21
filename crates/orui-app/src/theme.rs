@@ -66,6 +66,13 @@ const LIGHT: Palette = Palette {
 
 pub fn install(ctx: &egui::Context) {
     orui_ui::icons::install(ctx);
+    // The UI font lacks arrows and some symbols; fall back to the
+    // monospace font (Hack) before the emoji fonts.
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.insert(1.min(family.len()), "Hack".to_owned());
+    }
+    ctx.set_fonts(fonts);
     ctx.style_mut_of(Theme::Dark, |s| apply(s, &DARK));
     ctx.style_mut_of(Theme::Light, |s| apply(s, &LIGHT));
 }

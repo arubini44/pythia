@@ -30,6 +30,7 @@ commands! {
     NewSqlWindow => "File: New SQL Window",
     CloseTab => "File: Close Window",
     CloseOtherTabs => "File: Close Other Windows",
+    Settings => "File: Settings…",
     Connect => "Session: Connect…",
     Disconnect => "Session: Disconnect",
     ExecuteAll => "Session: Execute (selection or all)",
@@ -84,6 +85,7 @@ impl Keymap {
             KeymapPreset::PlsqlDeveloper => vec![
                 (Command::NewSqlWindow, KeyboardShortcut::new(ctrl, Key::N)),
                 (Command::CloseTab, KeyboardShortcut::new(ctrl, Key::W)),
+                (Command::Settings, KeyboardShortcut::new(ctrl, Key::Comma)),
                 (Command::ExecuteAll, KeyboardShortcut::new(none, Key::F8)),
                 (
                     Command::ExecuteCurrent,

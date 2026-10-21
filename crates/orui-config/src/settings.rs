@@ -47,6 +47,13 @@ pub struct EditorSettings {
     pub font_size: f32,
     pub tab_width: usize,
     pub show_line_numbers: bool,
+    pub show_whitespace: bool,
+    pub highlight_current_line: bool,
+    /// Offer completions while typing (Ctrl+Space always works).
+    pub auto_complete: bool,
+    /// Identifier characters typed before completions appear.
+    pub auto_complete_min_chars: usize,
+    pub auto_complete_delay_ms: u64,
 }
 
 impl Default for EditorSettings {
@@ -55,6 +62,11 @@ impl Default for EditorSettings {
             font_size: 13.0,
             tab_width: 4,
             show_line_numbers: true,
+            show_whitespace: false,
+            highlight_current_line: true,
+            auto_complete: true,
+            auto_complete_min_chars: 2,
+            auto_complete_delay_ms: 150,
         }
     }
 }
