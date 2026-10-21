@@ -10,6 +10,7 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 orui-config = { path = "crates/orui-config" }
+orui-compare = { path = "crates/orui-compare" }
 orui-data = { path = "crates/orui-data" }
 orui-db = { path = "crates/orui-db" }
 orui-lsp-core = { path = "crates/orui-lsp-core" }
