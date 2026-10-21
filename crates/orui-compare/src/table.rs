@@ -551,7 +551,7 @@ pub fn load(
         };
         // NOT NULL checks are represented by `nullable`.
         if kind == ConstraintKind::Check
-            && condition.as_deref().is_some_and(|c| is_not_null_check(c))
+            && condition.as_deref().is_some_and(is_not_null_check)
         {
             continue;
         }

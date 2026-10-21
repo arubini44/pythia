@@ -2852,6 +2852,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "egui_extras",
+ "egui_kittest",
  "orui-data",
  "orui-db",
  "orui-plsql",
