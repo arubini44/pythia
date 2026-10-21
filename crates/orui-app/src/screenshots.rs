@@ -725,3 +725,48 @@ select to_char(add_months(date '2025-01-01', level - 1), 'Mon YYYY') as month,
     w.state.results[0].chart.as_mut().unwrap().kind = crate::chart_view::ChartKind::Line;
     save(&mut h, "result-chart-lines");
 }
+
+/// A result of a table with foreign keys offers its parent and child rows.
+#[test]
+fn foreign_key_links() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "create table orui_fk_p (id number primary key, name varchar2(20));
+create table orui_fk_c (id number primary key, p_id number references orui_fk_p);
+insert into orui_fk_p values (1, 'one');
+insert into orui_fk_c values (10, 1);
+select * from orui_fk_c;"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "script", |app| !app.test_focused_busy());
+    let start = Instant::now();
+    loop {
+        let w = h.state_mut().test_sql_window();
+        if !w.state.results[0].grid.links.is_empty() {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "no links");
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    let w = h.state_mut().test_sql_window();
+    let result = &w.state.results[0];
+    assert_eq!(result.grid.links.len(), 1);
+    assert!(result.grid.links[0].label.starts_with("ORUI_FK_P via P_ID"));
+    let relation = &result.relations[result.link_relations[0]];
+    let sql = crate::relations::query(relation, &result.columns, &result.rows[0]);
+    assert!(sql.contains("where ID = 1"), "{sql}");
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "drop table orui_fk_c purge;\ndrop table orui_fk_p purge;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}

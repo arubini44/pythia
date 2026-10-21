@@ -57,6 +57,8 @@ pub struct RunState {
     /// Request id of a "fetch more" in flight.
     pub fetching: Option<u64>,
     pub results: Vec<QueryResult>,
+    /// Foreign key lookups in flight: task id → result id.
+    pub relation_requests: BTreeMap<u64, u64>,
     pub plan: Option<Plan>,
     /// "Run with statistics": request id and report.
     pub statistics: Option<(u64, Option<Result<crate::statistics::Report, String>>)>,
@@ -120,6 +122,9 @@ pub struct QueryResult {
     pub filter: String,
     /// Shown as a chart instead of the grid.
     pub chart: Option<crate::chart_view::ChartState>,
+    /// Foreign keys of the queried table and, per grid link, its relation.
+    pub relations: Vec<crate::relations::Relation>,
+    pub link_relations: Vec<usize>,
 }
 
 pub struct Plan {
@@ -822,6 +827,8 @@ impl SqlWindow {
                     edit: None,
                     filter: String::new(),
                     chart: None,
+                    relations: Vec::new(),
+                    link_relations: Vec::new(),
                 };
                 let mut replace = None;
                 if let Some(Internal::EditQuery {
@@ -851,6 +858,29 @@ impl SqlWindow {
                     }
                 };
                 self.state.bottom = BottomTab::Result(index);
+                if let Some(table) = crate::data_edit::single_table(&self.state.results[index].sql) {
+                    let task_id = request_id();
+                    self.state.relation_requests.insert(task_id, id);
+                    let task: orui_db::TaskFn = Box::new(move |conn: &orui_db::oracle::Connection| {
+                        let relations = crate::relations::load(conn, &table)?;
+                        Ok(Box::new(relations) as Box<dyn std::any::Any + Send>)
+                    });
+                    effects.request(Target::Main, DbRequest::Task { id: task_id, task });
+                }
+            }
+            DbEvent::TaskDone { id, result } if self.state.relation_requests.contains_key(&id) => {
+                let result_id = self.state.relation_requests.remove(&id).unwrap_or_default();
+                let relations = result
+                    .ok()
+                    .and_then(|any| any.downcast::<Vec<crate::relations::Relation>>().ok())
+                    .map(|r| *r)
+                    .unwrap_or_default();
+                if let Some(result) = self.state.results.iter_mut().find(|r| r.id == result_id) {
+                    let (links, index) = crate::relations::links(&relations, &result.columns);
+                    result.grid.links = links;
+                    result.link_relations = index;
+                    result.relations = relations;
+                }
             }
             DbEvent::Rows {
                 id,
@@ -1276,6 +1306,17 @@ impl SqlWindow {
                 )
                 .show(ui);
                 state.selection_summary = out.selection_summary;
+                if let Some((link, row)) = result.grid.take_follow()
+                    && let Some(relation) =
+                        result.link_relations.get(link).and_then(|&r| result.relations.get(r))
+                    && let Some(connection) = cx.connection.clone()
+                {
+                    effects.open.push(crate::documents::OpenRequest::Sql {
+                        connection,
+                        text: crate::relations::query(relation, &result.columns, &result.rows[row]),
+                        run: true,
+                    });
+                }
                 let result = &state.results[i];
                 let is_open = state.results.len() == i + 1 && result.more;
                 if out.reached_end && is_open && state.running.is_none() && state.fetching.is_none()

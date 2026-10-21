@@ -20,6 +20,7 @@ mod monitor_window;
 mod object_view;
 mod plan_view;
 mod program_window;
+mod relations;
 mod reports;
 #[cfg(test)]
 mod screenshots;

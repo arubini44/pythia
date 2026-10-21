@@ -33,6 +33,21 @@ pub struct GridState {
     viewer: Option<(usize, usize)>,
     scroll_to_cursor: bool,
     edit: Option<Editing>,
+    /// Related rows reachable from a row (foreign keys), offered in the
+    /// context menu.
+    pub links: Vec<GridLink>,
+    /// A link was chosen: (index into `links`, row index into `rows`).
+    follow: Option<(usize, usize)>,
+}
+
+/// Rows related to a row, e.g. its parent through a foreign key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridLink {
+    pub label: String,
+    /// Child rows (one to many) rather than a parent row.
+    pub many: bool,
+    /// Result columns whose values identify the related rows.
+    pub columns: Vec<usize>,
 }
 
 /// Pending edits of an editable result, keyed by row index into `rows`.
@@ -96,6 +111,11 @@ impl GridState {
             self.anchor = None;
             self.cursor = None;
         }
+    }
+
+    /// The link the user chose in the context menu, with the row index.
+    pub fn take_follow(&mut self) -> Option<(usize, usize)> {
+        self.follow.take()
     }
 
     /// Fetched rows passing the filter.
@@ -847,6 +867,43 @@ fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut
             }
         }
     });
+    let row = state
+        .cursor
+        .and_then(|(view_row, _)| state.order.get(view_row).copied());
+    if let Some(row) = row
+        && !state.links.is_empty()
+    {
+        let mut chosen = None;
+        ui.separator();
+        for many in [false, true] {
+            let links: Vec<(usize, &GridLink)> = state
+                .links
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.many == many)
+                .collect();
+            if links.is_empty() {
+                continue;
+            }
+            let title = if many { "Child rows" } else { "Parent row" };
+            ui.menu_button(title, |ui| {
+                for (i, link) in links {
+                    // A NULL key has no related rows.
+                    let has_key = link
+                        .columns
+                        .iter()
+                        .all(|&c| rows[row].get(c).is_some_and(Option::is_some));
+                    if ui.add_enabled(has_key, egui::Button::new(&link.label)).clicked() {
+                        chosen = Some((i, row));
+                        ui.close();
+                    }
+                }
+            });
+        }
+        if chosen.is_some() {
+            state.follow = chosen;
+        }
+    }
     ui.separator();
     if ui.button("View value…").clicked() {
         state.viewer = state.cursor;

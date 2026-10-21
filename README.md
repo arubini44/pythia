@@ -29,6 +29,8 @@ for Linux, Windows and macOS.
 - Results in a virtualized grid: sorting, rectangular selection, aggregates,
   record view, value viewer, copy and export (CSV, TSV, JSON, Excel,
   INSERT statements, Markdown, HTML).
+- **Follow foreign keys**: right-click a row to open its parent row or its
+  child rows in any table referencing it.
 - **Chart any result** as bars or lines: the x axis defaults to the first text
   or date column, numeric columns become series; the chart follows the grid's
   filter and sort.

@@ -201,7 +201,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Cell, row, and column selection; aggregates of selection (sum, count, avg, min, max) in the status bar
 - [ ] Find in grid
 - [x] Highlight changed cells before commit
-- [ ] Foreign key navigation: jump to parent/child rows
+- [x] Foreign key navigation: jump to parent/child rows
 
 ### 5.7 Program Window (M4)
 
