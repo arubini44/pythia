@@ -5,6 +5,7 @@
 //! and painted, so large package bodies stay responsive. The editing logic
 //! lives in `state.rs` and is independent of egui.
 
+mod assist;
 mod find;
 mod highlight;
 mod history;
@@ -19,10 +20,12 @@ use std::ops::Range;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use self::assist::{Completion, Hover, Signature};
 use self::find::FindBar;
 use self::selection::Selection;
 use self::state::EditorState;
 
+pub use self::assist::{CompletionEntry, CompletionKind, CompletionTrigger};
 pub use self::search::SearchQuery;
 
 /// Display settings, typically from the user's settings.
@@ -36,6 +39,12 @@ pub struct EditorConfig {
     /// Highlight the line the cursor is on.
     pub highlight_current_line: bool,
     pub read_only: bool,
+    /// Identifier chars typed before completion is requested automatically.
+    pub auto_complete_min_chars: usize,
+    /// Typing pause before an automatic completion request.
+    pub auto_complete_delay_ms: u64,
+    /// How long the mouse must rest on a word before a hover request.
+    pub hover_delay_ms: u64,
 }
 
 impl Default for EditorConfig {
@@ -47,6 +56,9 @@ impl Default for EditorConfig {
             show_whitespace: false,
             highlight_current_line: true,
             read_only: false,
+            auto_complete_min_chars: 2,
+            auto_complete_delay_ms: 150,
+            hover_delay_ms: 400,
         }
     }
 }
@@ -85,6 +97,44 @@ pub struct EditorOutput {
     /// The marker area of the gutter was clicked on this 1-based line
     /// (e.g. to toggle a breakpoint).
     pub gutter_clicked: Option<usize>,
+    /// Completion items are wanted; answer with [`CodeEditor::show_completions`].
+    pub completion_request: Option<CompletionTrigger>,
+    /// Signature help is wanted at this byte offset (after `(` / `,`, or the
+    /// caret moved inside the parens of a shown hint); answer with
+    /// [`CodeEditor::show_signature`].
+    pub signature_request: Option<usize>,
+    /// The mouse rests on a word at this byte offset; answer with [`CodeEditor::show_hover`].
+    pub hover_request: Option<usize>,
+    /// Ctrl+click or F12 on the word at this byte offset.
+    pub goto_request: Option<usize>,
+    /// Shift+F12 on the word at this byte offset.
+    pub references_request: Option<usize>,
+}
+
+/// Requests collected during a frame.
+#[derive(Default)]
+struct Requests {
+    completion: Option<CompletionTrigger>,
+    signature: Option<usize>,
+    hover: Option<usize>,
+    goto: Option<usize>,
+    references: Option<usize>,
+}
+
+/// An automatic completion request waiting for the typing pause.
+#[derive(Debug, Clone, Copy)]
+struct PendingCompletion {
+    deadline: f64,
+    caret: usize,
+    revision: u64,
+}
+
+/// Where the mouse rests, for hover requests.
+#[derive(Debug, Clone, Copy)]
+struct HoverProbe {
+    word_start: usize,
+    since: f64,
+    requested: bool,
 }
 
 /// How the mouse is currently selecting.
@@ -92,8 +142,13 @@ pub struct EditorOutput {
 enum Drag {
     /// Plain drag from a char position.
     Chars { anchor: usize },
-    /// Alt+drag block selection from (line, visual column).
-    Block { from: (usize, usize) },
+    /// Alt+drag block selection from (line, visual column); `moved` is false
+    /// until the pointer moves (an Alt+click without moving adds a cursor).
+    Block {
+        from: (usize, usize),
+        at: usize,
+        moved: bool,
+    },
 }
 
 pub struct CodeEditor {
@@ -112,6 +167,20 @@ pub struct CodeEditor {
     page_rows: usize,
     pairs_cache: Option<(u64, Vec<matching::Pair>)>,
     width_cache: Option<(u64, usize)>,
+    completion: Option<Completion>,
+    pending_completion: Option<PendingCompletion>,
+    signature: Option<Signature>,
+    /// Caret for which the last signature request was made.
+    signature_caret: Option<usize>,
+    hover: Option<Hover>,
+    hover_probe: Option<HoverProbe>,
+    /// Byte ranges to box, valid for the given revision.
+    references: Option<(u64, Vec<Range<usize>>)>,
+    /// Word under the mouse while Ctrl is held (char range), drawn as a link.
+    link: Option<Range<usize>>,
+    /// Hover delay from the config, in seconds.
+    hover_delay: f64,
+    requests: Requests,
 }
 
 impl Default for CodeEditor {
@@ -135,6 +204,16 @@ impl CodeEditor {
             page_rows: 20,
             pairs_cache: None,
             width_cache: None,
+            completion: None,
+            pending_completion: None,
+            signature: None,
+            signature_caret: None,
+            hover: None,
+            hover_probe: None,
+            references: None,
+            link: None,
+            hover_delay: 0.4,
+            requests: Requests::default(),
         }
     }
 
@@ -274,6 +353,69 @@ impl CodeEditor {
     pub fn open_find(&mut self, replace: bool) {
         let seed = self.selected_text().filter(|t| !t.contains('\n'));
         self.find.open(replace, seed);
+    }
+
+    // ----- language assistance (answers to `EditorOutput` requests) -----
+
+    /// Opens the completion popup. `replace` is the byte range the accepted
+    /// item replaces (usually the identifier prefix before the caret);
+    /// typing afterwards extends it and filters the list. An empty or
+    /// non-matching list closes the popup.
+    pub fn show_completions(&mut self, replace: Range<usize>, items: Vec<CompletionEntry>) {
+        let rope = &self.state.rope;
+        let len = rope.len_bytes();
+        let chars =
+            rope.byte_to_char(replace.start.min(len))..rope.byte_to_char(replace.end.min(len));
+        self.completion = Completion::new(&self.state, chars, items);
+        self.pending_completion = None;
+    }
+
+    pub fn hide_completions(&mut self) {
+        self.completion = None;
+    }
+
+    pub fn is_completion_open(&self) -> bool {
+        self.completion.is_some()
+    }
+
+    /// Shows a signature hint above the caret. `active_param` is a byte
+    /// range within `label` that is emphasized.
+    pub fn show_signature(&mut self, label: String, active_param: Option<Range<usize>>) {
+        let caret = self.state.primary().head;
+        let open_paren = assist::enclosing_paren(&self.state.rope, caret);
+        self.signature = Some(Signature {
+            label,
+            active: active_param,
+            open_paren,
+        });
+        self.signature_caret = Some(caret);
+    }
+
+    pub fn hide_signature(&mut self) {
+        self.signature = None;
+        self.signature_caret = None;
+    }
+
+    /// Shows hover info for the word at byte `range` while the mouse stays on it.
+    pub fn show_hover(&mut self, range: Range<usize>, title: String, body: String) {
+        let rope = &self.state.rope;
+        let len = rope.len_bytes();
+        let range = rope.byte_to_char(range.start.min(len))..rope.byte_to_char(range.end.min(len));
+        self.hover = Some(Hover { range, title, body });
+    }
+
+    pub fn hide_hover(&mut self) {
+        self.hover = None;
+    }
+
+    /// Boxes the given byte ranges (e.g. references of the symbol under the
+    /// caret) until the text changes.
+    pub fn highlight_references(&mut self, ranges: Vec<Range<usize>>) {
+        self.references = Some((self.state.revision, ranges));
+    }
+
+    pub fn clear_references(&mut self) {
+        self.references = None;
     }
 
     fn pairs(&mut self) -> &[matching::Pair] {

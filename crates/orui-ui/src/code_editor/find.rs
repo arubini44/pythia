@@ -163,16 +163,16 @@ impl FindBar {
             };
             ui.label(status.small());
             if ui
-                .small_button("↑")
+                .small_button("⏶")
                 .on_hover_text("Previous (Shift+F3)")
                 .clicked()
             {
                 action = Some(FindAction::Prev);
             }
-            if ui.small_button("↓").on_hover_text("Next (F3)").clicked() {
+            if ui.small_button("⏷").on_hover_text("Next (F3)").clicked() {
                 action = Some(FindAction::Next);
             }
-            if ui.small_button("✕").on_hover_text("Close (Esc)").clicked() {
+            if ui.small_button("🗙").on_hover_text("Close (Esc)").clicked() {
                 action = Some(FindAction::Close);
             }
         });

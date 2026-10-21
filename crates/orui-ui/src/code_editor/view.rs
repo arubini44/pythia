@@ -9,12 +9,17 @@ use egui::{
 };
 use orui_plsql::TokenKind;
 
+use super::assist::{self, CompletionTrigger};
 use super::find::FindAction;
 use super::highlight::lex_line;
 use super::matching::pair_at;
 use super::selection::Selection;
-use super::text::{col_from_visual, line_end, line_start, line_text, pos_of, visual_col};
-use super::{CodeEditor, Drag, EditorConfig, EditorOutput, MarkerKind};
+use super::text::{
+    col_from_visual, is_word_char, line_end, line_start, line_text, pos_of, visual_col, word_range,
+};
+use super::{
+    CodeEditor, Drag, EditorConfig, EditorOutput, HoverProbe, MarkerKind, PendingCompletion,
+};
 use crate::editor::SyntaxTheme;
 
 /// Editor chrome colors, derived from the egui theme.
@@ -39,6 +44,7 @@ struct Palette {
     bookmark: Color32,
     execution: Color32,
     execution_line: Color32,
+    link: Color32,
 }
 
 impl Palette {
@@ -88,6 +94,7 @@ impl Palette {
                 24,
                 if dark { 38 } else { 60 },
             ),
+            link: v.hyperlink_color,
         }
     }
 }
@@ -129,6 +136,8 @@ impl Layout {
 }
 
 const BLINK_PERIOD: f64 = 1.1;
+/// Visible rows of the completion popup.
+const POPUP_ROWS: usize = 12;
 
 impl CodeEditor {
     pub fn ui(&mut self, ui: &mut Ui, config: &EditorConfig) -> EditorOutput {
@@ -140,12 +149,15 @@ impl CodeEditor {
         let theme = SyntaxTheme::for_visuals(ui.visuals());
         let pal = Palette::new(ui.visuals());
         let time = ui.input(|i| i.time);
+        self.hover_delay = config.hover_delay_ms as f64 / 1000.0;
 
         let mut find_action = None;
         if self.find.open {
             egui::Frame::new()
+                .fill(ui.visuals().panel_fill)
                 .inner_margin(egui::Margin::symmetric(6, 3))
                 .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
                     find_action = self.find.ui(ui, self.selection());
                 });
         }
@@ -212,11 +224,17 @@ impl CodeEditor {
                     let state = &self.state;
                     self.find.refresh(state.revision, || state.text());
                 }
+                self.update_assist(ui, focused, time);
 
                 self.paint(ui, &layout, config, &pal, &theme, &font, focused, time);
                 self.marker_tooltip(ui, &response, &layout);
 
                 let caret_rect = self.caret_rect(&layout);
+                if layout.visible_rect().contains(caret_rect.center()) {
+                    self.completion_popup(ui, caret_rect, char_w, &font, focused);
+                    self.signature_popup(ui, caret_rect, &font);
+                }
+                self.hover_popup(ui, &layout, &font);
                 if std::mem::take(&mut self.scroll_to_cursor) {
                     let margin = vec2(2.0 * char_w, row_h);
                     let target = Rect::from_min_max(
@@ -245,6 +263,7 @@ impl CodeEditor {
         self.goto_line_popup(ui, scroll.inner_rect, &scroll.inner);
 
         let (line, col) = self.line_col();
+        let requests = std::mem::take(&mut self.requests);
         EditorOutput {
             response: scroll.inner,
             cursor: self.cursor(),
@@ -252,6 +271,11 @@ impl CodeEditor {
             line_col: (line, col),
             changed: self.state.revision != revision_before,
             gutter_clicked,
+            completion_request: requests.completion,
+            signature_request: requests.signature,
+            hover_request: requests.hover,
+            goto_request: requests.goto,
+            references_request: requests.references,
         }
     }
 
@@ -270,6 +294,35 @@ impl CodeEditor {
             col_from_visual(&text, vcol, self.state.tab_width),
         );
         (line, vcol, char_pos)
+    }
+
+    /// Char index and word range of the identifier under a screen point.
+    fn word_under(&self, layout: &Layout, pos: Pos2) -> Option<(usize, Range<usize>)> {
+        let rope = &self.state.rope;
+        if pos.x < layout.gutter_left() + layout.gutter_w || pos.y < layout.origin.y {
+            return None;
+        }
+        let line = ((pos.y - layout.origin.y) / layout.row_h).floor() as usize;
+        if line >= rope.len_lines() {
+            return None;
+        }
+        let vcol = ((pos.x - layout.text_x()) / layout.char_w).floor().max(0.0) as usize;
+        let text = line_text(rope, line);
+        let tw = self.state.tab_width;
+        // Column of the char whose cell contains `vcol`.
+        let mut v = 0;
+        let col = text.chars().position(|c| {
+            let next = if c == '\t' { (v / tw + 1) * tw } else { v + 1 };
+            let hit = vcol < next;
+            v = next;
+            hit
+        })?;
+        let char_pos = line_start(rope, line) + col;
+        if !is_word_char(rope.char(char_pos)) {
+            return None;
+        }
+        let (a, b) = word_range(rope, char_pos);
+        Some((char_pos, a..b))
     }
 
     fn handle_pointer(
@@ -292,9 +345,24 @@ impl CodeEditor {
             return;
         };
         let in_gutter = pos.x < layout.gutter_left() + layout.gutter_w;
+        let word = if response.hovered() {
+            self.word_under(layout, pos)
+        } else {
+            None
+        };
+        self.link = word
+            .as_ref()
+            .filter(|_| mods.command && !down)
+            .map(|(_, r)| r.clone());
         if response.hovered() && !in_gutter {
-            ui.ctx().set_cursor_icon(CursorIcon::Text);
+            let icon = if self.link.is_some() {
+                CursorIcon::PointingHand
+            } else {
+                CursorIcon::Text
+            };
+            ui.ctx().set_cursor_icon(icon);
         }
+        self.probe_hover(ui, word.as_ref(), down, mods, time);
 
         if pressed && response.hovered() {
             response.request_focus();
@@ -310,11 +378,18 @@ impl CodeEditor {
                 return;
             }
             if mods.alt {
-                self.drag = Some(Drag::Block { from: (line, vcol) });
-                self.state.select_block((line, vcol), (line, vcol));
+                // Alt+drag selects a block; Alt+click adds a cursor on release.
+                self.drag = Some(Drag::Block {
+                    from: (line, vcol),
+                    at: char_pos,
+                    moved: false,
+                });
             } else if mods.command {
-                self.state.add_cursor(char_pos);
+                self.state.set_caret(char_pos);
                 self.drag = None;
+                if let Some((at, _)) = &word {
+                    self.requests.goto = Some(self.state.rope.char_to_byte(*at));
+                }
             } else if mods.shift {
                 let primary = self.state.primary().moved_to(char_pos, true);
                 self.state.set_selections(vec![primary], 0);
@@ -335,10 +410,25 @@ impl CodeEditor {
                         self.scroll_to_cursor = true;
                     }
                 }
-                Drag::Block { from } => self.state.select_block(from, (line, vcol)),
+                Drag::Block { from, at, moved } => {
+                    if moved || (line, vcol) != from {
+                        self.drag = Some(Drag::Block {
+                            from,
+                            at,
+                            moved: true,
+                        });
+                        self.state.select_block(from, (line, vcol));
+                    }
+                }
             }
         }
         if !down {
+            if let Some(Drag::Block {
+                at, moved: false, ..
+            }) = self.drag
+            {
+                self.state.add_cursor(at);
+            }
             self.drag = None;
         }
 
@@ -357,11 +447,23 @@ impl CodeEditor {
         let ro = config.read_only;
         let mut find = None;
         for event in events {
+            if let Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = &event
+                && self.completion_key(*key, *modifiers, time)
+            {
+                self.blink_epoch = time;
+                continue;
+            }
             match event {
                 Event::Text(text) if !ro => {
                     let text: String = text.chars().filter(|c| !c.is_control()).collect();
                     if !text.is_empty() {
                         self.state.insert(&text, time);
+                        self.after_typing(&text, config, time);
                     }
                 }
                 Event::Ime(ImeEvent::Commit(text)) if !ro && !text.is_empty() => {
@@ -438,6 +540,17 @@ impl CodeEditor {
             Key::F if ctrl => self.open_find(false),
             Key::H if ctrl && !ro => self.open_find(true),
             Key::G if ctrl => self.goto_line = Some(String::new()),
+            Key::Space if ctrl => {
+                let offset = self.cursor();
+                self.requests.completion = Some(CompletionTrigger {
+                    offset,
+                    explicit: true,
+                    trigger_char: None,
+                });
+                self.pending_completion = None;
+            }
+            Key::F12 if shift => self.requests.references = Some(self.cursor()),
+            Key::F12 => self.requests.goto = Some(self.cursor()),
             Key::F3 if self.find.query.text.is_empty() => self.open_find(false),
             Key::F3 => {
                 return Some(if shift {
@@ -496,6 +609,357 @@ impl CodeEditor {
         if let Some(range) = target {
             self.select(range);
         }
+    }
+
+    // ----- language assistance ------------------------------------------
+
+    /// Keys the completion popup handles itself. Returns true if consumed.
+    fn completion_key(&mut self, key: Key, m: Modifiers, time: f64) -> bool {
+        let Some(completion) = self.completion.as_mut() else {
+            return false;
+        };
+        if m.command || m.alt {
+            return false;
+        }
+        match key {
+            Key::ArrowUp => completion.move_selection(-1),
+            Key::ArrowDown => completion.move_selection(1),
+            Key::PageUp => completion.move_selection(-(POPUP_ROWS as isize)),
+            Key::PageDown => completion.move_selection(POPUP_ROWS as isize),
+            Key::Enter | Key::Tab => {
+                let completion = self.completion.take().expect("checked above");
+                completion.accept(&mut self.state, time);
+                self.scroll_to_cursor = true;
+                self.pending_completion = None;
+            }
+            Key::Escape => self.completion = None,
+            _ => return false,
+        }
+        true
+    }
+
+    /// Decides which requests typing `text` triggers.
+    fn after_typing(&mut self, text: &str, config: &EditorConfig, time: f64) {
+        let Some(last) = text.chars().last() else {
+            return;
+        };
+        if self.state.sels.len() != 1 {
+            self.pending_completion = None;
+            return;
+        }
+        let caret = self.state.primary().head;
+        match last {
+            '.' => {
+                self.completion = None;
+                self.pending_completion = None;
+                self.requests.completion = Some(CompletionTrigger {
+                    offset: self.state.rope.char_to_byte(caret),
+                    explicit: false,
+                    trigger_char: Some('.'),
+                });
+            }
+            '(' | ',' => {
+                self.pending_completion = None;
+                self.requests.signature = Some(self.state.rope.char_to_byte(caret));
+                self.signature_caret = Some(caret);
+            }
+            c if is_word_char(c) => {
+                let typed = assist::word_prefix_len(&self.state.rope, caret);
+                let enough = typed >= config.auto_complete_min_chars.max(1);
+                // With the popup open, typing just filters it.
+                self.pending_completion =
+                    (enough && self.completion.is_none()).then(|| PendingCompletion {
+                        deadline: time + config.auto_complete_delay_ms as f64 / 1000.0,
+                        caret,
+                        revision: self.state.revision,
+                    });
+            }
+            _ => self.pending_completion = None,
+        }
+    }
+
+    /// Per-frame bookkeeping: popup validity, debounce, signature tracking.
+    fn update_assist(&mut self, ui: &Ui, focused: bool, time: f64) {
+        if let Some(c) = self.completion.as_mut()
+            && (!focused || !c.update(&self.state))
+        {
+            self.completion = None;
+        }
+
+        if let Some(p) = self.pending_completion {
+            let caret = self.state.primary().head;
+            if caret != p.caret || self.state.revision != p.revision || !focused {
+                self.pending_completion = None;
+            } else if time >= p.deadline {
+                self.pending_completion = None;
+                self.requests.completion = Some(CompletionTrigger {
+                    offset: self.state.rope.char_to_byte(caret),
+                    explicit: false,
+                    trigger_char: None,
+                });
+            } else {
+                let wait = std::time::Duration::from_secs_f64(p.deadline - time);
+                ui.ctx().request_repaint_after(wait);
+            }
+        }
+
+        if let Some(sig) = &self.signature {
+            let caret = self.state.primary().head;
+            let paren = assist::enclosing_paren(&self.state.rope, caret);
+            if paren.is_none() || paren != sig.open_paren || !focused {
+                self.hide_signature();
+            } else if self.signature_caret != Some(caret) {
+                self.signature_caret = Some(caret);
+                self.requests.signature = Some(self.state.rope.char_to_byte(caret));
+            }
+        }
+
+        if self
+            .references
+            .as_ref()
+            .is_some_and(|(rev, _)| *rev != self.state.revision)
+        {
+            self.references = None;
+        }
+    }
+
+    /// Tracks the word under the mouse and requests hover info once it rests.
+    fn probe_hover(
+        &mut self,
+        ui: &Ui,
+        word: Option<&(usize, Range<usize>)>,
+        down: bool,
+        mods: Modifiers,
+        time: f64,
+    ) {
+        let Some((at, range)) = word.filter(|_| !down && !mods.command) else {
+            self.hover_probe = None;
+            self.hover = None;
+            return;
+        };
+        if self.hover.as_ref().is_some_and(|h| h.range != *range) {
+            self.hover = None;
+        }
+        let delay = self.hover_delay;
+        match &mut self.hover_probe {
+            Some(p) if p.word_start == range.start => {
+                if !p.requested && time - p.since >= delay {
+                    p.requested = true;
+                    self.requests.hover = Some(self.state.rope.char_to_byte(*at));
+                } else if !p.requested {
+                    let wait = std::time::Duration::from_secs_f64(delay - (time - p.since));
+                    ui.ctx().request_repaint_after(wait);
+                }
+            }
+            _ => {
+                self.hover_probe = Some(HoverProbe {
+                    word_start: range.start,
+                    since: time,
+                    requested: false,
+                });
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(delay));
+            }
+        }
+    }
+
+    fn completion_popup(
+        &mut self,
+        ui: &Ui,
+        caret: Rect,
+        char_w: f32,
+        font: &FontId,
+        focused: bool,
+    ) {
+        if !focused {
+            return;
+        }
+        let Some(completion) = self.completion.as_mut() else {
+            return;
+        };
+        let dark = ui.visuals().dark_mode;
+        let row_h = (caret.height() + 4.0).max(18.0);
+        let mut accept = None;
+        // Align the labels with the start of the word being completed.
+        let typed = self.state.primary().head.saturating_sub(completion.start());
+        let word_x = caret.min.x - typed as f32 * char_w;
+        egui::Area::new(ui.id().with("completion-popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos2(word_x - 29.0, caret.max.y + 2.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(3))
+                    .show(ui, |ui| {
+                        ui.set_width(400.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(row_h * POPUP_ROWS as f32)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                for (i, &item_idx) in completion.filtered.iter().enumerate() {
+                                    let item = &completion.items()[item_idx];
+                                    let selected = i == completion.selected;
+                                    let size = vec2(ui.available_width(), row_h);
+                                    let (rect, response) =
+                                        ui.allocate_exact_size(size, Sense::click());
+                                    let visuals = ui.visuals();
+                                    let painter = ui.painter();
+                                    if selected {
+                                        painter.rect_filled(rect, 3.0, visuals.selection.bg_fill);
+                                    } else if response.hovered() {
+                                        painter.rect_filled(
+                                            rect,
+                                            3.0,
+                                            visuals.widgets.hovered.weak_bg_fill,
+                                        );
+                                    }
+                                    let glyph_rect = Rect::from_center_size(
+                                        pos2(rect.min.x + 12.0, rect.center().y),
+                                        vec2(16.0, 16.0),
+                                    );
+                                    let color = item.kind.color(dark);
+                                    painter.rect_filled(
+                                        glyph_rect,
+                                        3.0,
+                                        color.gamma_multiply(0.22),
+                                    );
+                                    painter.text(
+                                        glyph_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        item.kind.glyph(),
+                                        FontId::monospace(font.size * 0.85),
+                                        color,
+                                    );
+                                    let text_color = if selected {
+                                        visuals.selection.stroke.color
+                                    } else {
+                                        visuals.text_color()
+                                    };
+                                    painter.text(
+                                        pos2(rect.min.x + 26.0, rect.center().y),
+                                        egui::Align2::LEFT_CENTER,
+                                        &item.label,
+                                        font.clone(),
+                                        text_color,
+                                    );
+                                    if !item.detail.is_empty() {
+                                        painter.text(
+                                            pos2(rect.max.x - 6.0, rect.center().y),
+                                            egui::Align2::RIGHT_CENTER,
+                                            &item.detail,
+                                            FontId::proportional(font.size * 0.9),
+                                            visuals.weak_text_color(),
+                                        );
+                                    }
+                                    if selected && completion.scroll_to_selected {
+                                        response.scroll_to_me(None);
+                                    }
+                                    if response.clicked() {
+                                        accept = Some(i);
+                                    }
+                                }
+                            });
+                        completion.scroll_to_selected = false;
+                    });
+            });
+        if let Some(i) = accept {
+            let mut completion = self.completion.take().expect("open");
+            completion.selected = i;
+            completion.accept(&mut self.state, ui.input(|i| i.time));
+            self.scroll_to_cursor = true;
+            self.focus_requested = true;
+            self.pending_completion = None;
+        }
+    }
+
+    fn signature_popup(&self, ui: &Ui, caret: Rect, font: &FontId) {
+        let Some(sig) = &self.signature else {
+            return;
+        };
+        if self.completion.is_some() {
+            return;
+        }
+        let visuals = ui.visuals();
+        let normal = TextFormat {
+            font_id: font.clone(),
+            color: visuals.text_color(),
+            ..Default::default()
+        };
+        let active = TextFormat {
+            font_id: font.clone(),
+            color: visuals.strong_text_color(),
+            underline: Stroke::new(1.0, visuals.strong_text_color()),
+            ..Default::default()
+        };
+        let label = &sig.label;
+        let valid = |r: &Range<usize>| {
+            r.start <= r.end
+                && r.end <= label.len()
+                && label.is_char_boundary(r.start)
+                && label.is_char_boundary(r.end)
+        };
+        let mut job = LayoutJob::default();
+        match sig.active.clone().filter(valid) {
+            Some(r) => {
+                job.append(&label[..r.start], 0.0, normal.clone());
+                job.append(&label[r.clone()], 0.0, active);
+                job.append(&label[r.end..], 0.0, normal);
+            }
+            None => job.append(label, 0.0, normal),
+        }
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        let height = galley.size().y + 10.0;
+        egui::Area::new(ui.id().with("signature-popup"))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .fixed_pos(pos2(caret.min.x - 8.0, caret.min.y - height - 4.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .show(ui, |ui| {
+                        ui.label(galley);
+                    });
+            });
+    }
+
+    fn hover_popup(&self, ui: &Ui, layout: &Layout, font: &FontId) {
+        let Some(hover) = &self.hover else {
+            return;
+        };
+        let rope = &self.state.rope;
+        let (line, col) = super::text::line_col(rope, hover.range.start.min(rope.len_chars()));
+        let vcol = visual_col(&line_text(rope, line), col, self.state.tab_width);
+        let pos = pos2(
+            layout.text_x() + vcol as f32 * layout.char_w,
+            layout.row_y(line) + layout.row_h + 2.0,
+        );
+        if !layout.visible_rect().contains(pos) {
+            return;
+        }
+        egui::Area::new(ui.id().with("hover-popup"))
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .fixed_pos(pos)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.set_max_width(520.0);
+                        if !hover.title.is_empty() {
+                            ui.label(
+                                egui::RichText::new(&hover.title)
+                                    .font(font.clone())
+                                    .strong(),
+                            );
+                        }
+                        if !hover.body.is_empty() {
+                            if !hover.title.is_empty() {
+                                ui.separator();
+                            }
+                            ui.label(&hover.body);
+                        }
+                    });
+            });
     }
 
     // ----- painting -----------------------------------------------------
@@ -599,6 +1063,19 @@ impl CodeEditor {
             out
         };
 
+        // References of the symbol under the caret.
+        if let Some((rev, refs)) = &self.references
+            && *rev == self.state.revision
+        {
+            let len = rope.len_bytes();
+            for r in refs {
+                let chars = rope.byte_to_char(r.start.min(len))..rope.byte_to_char(r.end.min(len));
+                for rect in range_rects(chars) {
+                    painter.rect_filled(rect, 2.0, pal.pair);
+                }
+            }
+        }
+
         // Search matches.
         if self.find.open && !self.find.matches.is_empty() && !lines.is_empty() {
             let vis_start = rope.char_to_byte(line_start(rope, lines.start));
@@ -689,6 +1166,13 @@ impl CodeEditor {
             }
             let galley = ui.fonts_mut(|f| f.layout_job(job));
             painter.galley(pos2(layout.text_x(), layout.row_y(l)), galley, pal.text);
+        }
+
+        // Ctrl+hover link underline.
+        if let Some(link) = &self.link {
+            for rect in range_rects(link.clone()) {
+                painter.hline(rect.x_range(), rect.max.y - 1.5, Stroke::new(1.0, pal.link));
+            }
         }
 
         // Error / warning squiggles.
