@@ -268,10 +268,19 @@ impl Editor {
         };
         self.inner.set_id_salt(id);
         let out = self.inner.ui(ui, &config);
+        // Names dragged from the object browser.
+        if !read_only && let Some(dropped) = out.response.dnd_release_payload::<DroppedText>() {
+            self.inner.insert_at_cursor(&dropped.0);
+            out.response.request_focus();
+        }
         self.refresh();
         out
     }
 }
+
+/// Text dragged onto an editor (e.g. an object name from the browser).
+#[derive(Debug, Clone)]
+pub struct DroppedText(pub String);
 
 /// The dotted path ending with the word at `offset`, e.g. `l_rec.name` when
 /// hovering `name` (or `l_rec` when hovering `l_rec`), with its byte range.

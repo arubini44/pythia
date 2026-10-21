@@ -245,6 +245,11 @@ impl Browser {
         self.invalid_only = true;
     }
 
+    #[cfg(test)]
+    pub fn selected(&self) -> Option<&ObjectRef> {
+        self.selected.as_ref()
+    }
+
     /// Expands a table with all its groups.
     #[cfg(test)]
     pub fn expand_table(&mut self, table: ObjectRef) -> Effects {
@@ -901,8 +906,13 @@ impl Browser {
                         text = text.color(ui.visuals().error_fg_color);
                     }
                     let selected = self.selected.as_ref() == Some(&r);
-                    let response =
-                        ui.add(egui::Button::selectable(selected, text).frame_when_inactive(false));
+                    let response = self.drag_source(ui, &r, |ui| {
+                        ui.add(
+                            egui::Button::selectable(selected, text)
+                                .frame_when_inactive(false)
+                                .sense(Sense::click_and_drag()),
+                        )
+                    });
                     let response = response.on_hover_ui(|ui| {
                         ui.label(RichText::new(r.qualified()).strong());
                         ui.label(object.object_type.dictionary_name().to_lowercase());
@@ -929,7 +939,13 @@ impl Browser {
                         Icon::Column
                     };
                     ui.add(icon.sized(ui, small));
-                    ui.label(RichText::new(c.name.to_lowercase()).monospace());
+                    let name = c.name.to_lowercase();
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(&name).monospace())
+                            .sense(Sense::drag())
+                            .selectable(false),
+                    );
+                    drag_text(ui, &label, name);
                     let null = if c.nullable { "" } else { " not null" };
                     let label = ui.weak(format!("{}{null}", c.data_type.to_lowercase()));
                     if let Some(comment) = &c.comment {
@@ -1066,8 +1082,13 @@ impl Browser {
                         ))
                         .monospace();
                     }
-                    let response =
-                        ui.add(egui::Button::selectable(selected, text).frame_when_inactive(false));
+                    let response = self.drag_source(ui, object, |ui| {
+                        ui.add(
+                            egui::Button::selectable(selected, text)
+                                .frame_when_inactive(false)
+                                .sense(Sense::click_and_drag()),
+                        )
+                    });
                     let response = response.on_hover_text(format!(
                         "{} {}",
                         object.object_type.dictionary_name().to_lowercase(),
@@ -1091,6 +1112,24 @@ impl Browser {
                 }
             }
         });
+    }
+
+    /// Lets an object's row be dragged into an editor, which inserts its
+    /// name (qualified when it's in another schema). `add` must sense drags.
+    fn drag_source(
+        &self,
+        ui: &mut Ui,
+        object: &ObjectRef,
+        add: impl FnOnce(&mut Ui) -> egui::Response,
+    ) -> egui::Response {
+        let name = if Some(object.owner.as_str()) == self.schema.as_deref() {
+            crate::documents::quote_ident(&object.name).to_lowercase()
+        } else {
+            object.qualified().to_lowercase()
+        };
+        let response = add(ui);
+        drag_text(ui, &response, name);
+        response
     }
 
     fn context_menu(&self, ui: &mut Ui, object: &ObjectRef, actions: &mut Vec<Action>) {
@@ -1439,6 +1478,28 @@ mod tests {
             template(Template::Update, &object, &cols),
             "update hr.emp\n   set name = :name,\n       sal = :sal\n where id = :id"
         );
+    }
+}
+
+/// Starts dragging `text` (for editors to insert) when `response` is
+/// dragged, with the text following the pointer.
+fn drag_text(ui: &Ui, response: &egui::Response, text: String) {
+    if response.drag_started() {
+        egui::DragAndDrop::set_payload(ui.ctx(), crate::editor::DroppedText(text.clone()));
+    }
+    if response.dragged()
+        && let Some(pos) = ui.ctx().pointer_interact_pos()
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        egui::Area::new(response.id.with("drag"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(pos + egui::vec2(12.0, 4.0))
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(RichText::new(text).monospace());
+                });
+            });
     }
 }
 

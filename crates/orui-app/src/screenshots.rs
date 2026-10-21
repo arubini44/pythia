@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use orui_config::{ConnectionProfile, Privilege};
 
 use crate::app::OruiApp;
@@ -1542,4 +1543,48 @@ fn browser_marks() {
     let marks = &h.state_mut().test_browser().marks;
     assert_eq!(marks.recent["orui@FREEPDB1"][0].name, "DEMO_PKG");
     assert_eq!(marks.favorites["orui@FREEPDB1"][0].name, "DEMO_EMPLOYEES");
+}
+
+/// Dragging a table from the browser into the editor inserts its name.
+#[test]
+fn drag_object_into_editor() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "select * from ".into(),
+        run: false,
+    });
+    h.state_mut()
+        .test_expand_browser(&[orui_db::ObjectType::Table]);
+    wait_until(&mut h, "browser", |app| !app.test_browser_loading());
+    h.run_steps(3);
+    let from = h.get_by_label("demo_employees").rect().center();
+    let to = egui::pos2(900.0, 250.0);
+    h.hover_at(from);
+    h.run_steps(1);
+    h.drag_at(from);
+    h.run_steps(1);
+    for i in 1..=10 {
+        h.hover_at(from + (to - from) * (i as f32 / 10.0));
+        h.run_steps(1);
+    }
+    h.drop_at(to);
+    h.run_steps(3);
+    let text = h.state_mut().test_sql_window().editor.text().to_owned();
+    assert!(text.contains("demo_employees"), "{text:?}");
+    // Rows still take clicks.
+    h.get_by_label("demo_departments").click();
+    h.run_steps(2);
+    assert_eq!(
+        h.state_mut()
+            .test_browser()
+            .selected()
+            .map(|o| o.name.as_str()),
+        Some("DEMO_DEPARTMENTS")
+    );
 }

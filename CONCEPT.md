@@ -240,7 +240,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Expand table → columns, indexes, constraints, triggers, FKs, references-by
 - [x] Expand package → procedures/functions with parameters (outline from parser)
 - [x] Dependencies view (uses / used by)
-- [ ] Drag object name into the editor (with options: name, `SELECT`, column list, call template)
+- [x] Drag object name into the editor (with options: name, `SELECT`, column list, call template) (names of objects and columns; templates via Generate)
 - [x] Recent objects and favorites
 - [x] Quick object finder (Ctrl+Shift+O style fuzzy search)
 - [ ] Metadata cache with background refresh
