@@ -770,3 +770,75 @@ select * from orui_fk_c;"
     });
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }
+
+/// The scheduler jobs window lists a job, runs it and shows the run.
+#[test]
+fn scheduler_jobs() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "begin
+  for j in (select job_name from user_scheduler_jobs where job_name like 'ORUI\\_%' escape '\\') loop
+    dbms_scheduler.drop_job(j.job_name, force => true);
+  end loop;
+  dbms_scheduler.create_job('ORUI_NIGHTLY_STATS', 'PLSQL_BLOCK',
+    'begin dbms_stats.gather_schema_stats(user); end;',
+    repeat_interval => 'FREQ=DAILY;BYHOUR=2', enabled => true,
+    comments => 'Refreshes optimizer statistics of the schema every night');
+  dbms_scheduler.create_job('ORUI_PURGE_LOGS', 'PLSQL_BLOCK', 'begin null; end;',
+    repeat_interval => 'FREQ=HOURLY', enabled => false);
+end;
+/"
+        .into(),
+        run: true,
+    });
+    wait_until(&mut h, "jobs created", |app| !app.test_focused_busy());
+    h.state_mut()
+        .test_command(crate::commands::Command::SchedulerJobs);
+    h.run_steps(2);
+    wait_until(&mut h, "jobs", |app| !app.test_focused_busy());
+    let jobs = h.state_mut().test_jobs_window();
+    assert!(
+        jobs.jobs()
+            .iter()
+            .any(|j| j.name == "ORUI_NIGHTLY_STATS" && j.enabled)
+    );
+    assert!(
+        jobs.jobs()
+            .iter()
+            .any(|j| j.name == "ORUI_PURGE_LOGS" && !j.enabled)
+    );
+    let effects = jobs.select("ORUI", "ORUI_NIGHTLY_STATS");
+    h.state_mut().test_apply(effects);
+    let effects = h.state_mut().test_jobs_window().run_action("run");
+    h.state_mut().test_apply(effects);
+    let start = Instant::now();
+    while h.state_mut().test_jobs_window().runs().is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(60), "no run logged");
+        std::thread::sleep(Duration::from_millis(500));
+        let effects = h.state_mut().test_jobs_window().refresh();
+        h.state_mut().test_apply(effects);
+        wait_until(&mut h, "refresh", |app| !app.test_focused_busy());
+    }
+    assert_eq!(
+        h.state_mut().test_jobs_window().runs()[0].status,
+        "SUCCEEDED"
+    );
+    save(&mut h, "scheduler-jobs");
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "begin
+  dbms_scheduler.drop_job('ORUI_NIGHTLY_STATS', force => true);
+  dbms_scheduler.drop_job('ORUI_PURGE_LOGS', force => true);
+end;
+/"
+        .into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}

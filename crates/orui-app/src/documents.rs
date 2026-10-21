@@ -153,6 +153,7 @@ pub enum DocKind {
     Import(crate::import_window::ImportWindow),
     DataSearch(crate::data_search::DataSearch),
     TableEditor(crate::table_editor::TableEditor),
+    Jobs(crate::jobs_window::JobsWindow),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -192,6 +193,7 @@ impl Document {
             DocKind::Import(i) => i.title(),
             DocKind::DataSearch(d) => d.title(),
             DocKind::TableEditor(t) => t.title(),
+            DocKind::Jobs(j) => j.title(),
         }
     }
 
@@ -216,6 +218,7 @@ impl Document {
             DocKind::Import(i) => i.is_busy(),
             DocKind::DataSearch(d) => d.is_busy(),
             DocKind::TableEditor(t) => t.is_busy(),
+            DocKind::Jobs(j) => j.is_busy(),
         }
     }
 
@@ -247,6 +250,7 @@ impl Document {
             DocKind::Import(i) => i.on_event(event),
             DocKind::DataSearch(d) => d.on_event(event),
             DocKind::TableEditor(t) => t.on_event(event),
+            DocKind::Jobs(j) => j.on_event(event),
         }
     }
 
@@ -261,6 +265,7 @@ impl Document {
             DocKind::Import(i) => i.ui(ui, cx),
             DocKind::DataSearch(d) => d.ui(ui, cx),
             DocKind::TableEditor(t) => t.ui(ui, cx),
+            DocKind::Jobs(j) => j.ui(ui, cx),
         }
     }
 

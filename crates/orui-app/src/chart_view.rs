@@ -188,7 +188,8 @@ pub fn ui(
     if names.len() > 1 {
         ui.horizontal_wrapped(|ui| {
             for (name, color) in &names {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                 ui.painter().rect_filled(rect, 2.0, *color);
                 ui.label(name);
                 ui.add_space(8.0);

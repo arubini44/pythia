@@ -51,10 +51,9 @@ select 'C', c.constraint_name, c.owner, c.table_name, rc.column_name, cc.column_
  where r.owner = :1 and r.table_name = :2 and r.constraint_type in ('P', 'U')
  order by 1, 4, 2, 7";
     let mut out: Vec<Relation> = Vec::new();
-    for row in conn.query_as::<(String, String, String, String, String, String, i64)>(
-        sql,
-        &[&owner, &name],
-    )? {
+    for row in conn
+        .query_as::<(String, String, String, String, String, String, i64)>(sql, &[&owner, &name])?
+    {
         let (kind, constraint, owner, table, ours, theirs, _) = row?;
         let child = kind == "C";
         match out.last_mut() {
@@ -202,7 +201,10 @@ mod tests {
             &columns,
             &[Some("O'Brien".into()), Some("20".into())],
         );
-        assert!(sql.ends_with("from HR.DEPARTMENTS\n where DEPARTMENT_ID = 20"), "{sql}");
+        assert!(
+            sql.ends_with("from HR.DEPARTMENTS\n where DEPARTMENT_ID = 20"),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -223,8 +225,11 @@ mod tests {
             &[],
         )
         .unwrap();
-        conn.execute("create table orui_rel_p (a number, b number, primary key (a, b))", &[])
-            .unwrap();
+        conn.execute(
+            "create table orui_rel_p (a number, b number, primary key (a, b))",
+            &[],
+        )
+        .unwrap();
         conn.execute(
             "create table orui_rel_c (id number primary key, pa number, pb number,
                constraint orui_rel_fk foreign key (pa, pb) references orui_rel_p)",

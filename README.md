@@ -69,6 +69,12 @@ for Linux, Windows and macOS.
 - Import CSV/Excel: drop a file, check inferred types (decimal commas,
   date formats), import into a new or existing table with array DML.
 
+**Scheduler jobs**
+- All DBMS_SCHEDULER jobs with state, schedule, last and next run; run now,
+  stop, enable, disable, drop; recent runs with errors.
+
+![Scheduler jobs](docs/screenshots/scheduler-jobs.png)
+
 **Safety**
 - Every window has its own session and transaction (multi-session); the
   status bar always shows pending transactions; production connections are

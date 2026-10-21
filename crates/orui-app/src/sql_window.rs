@@ -858,13 +858,15 @@ impl SqlWindow {
                     }
                 };
                 self.state.bottom = BottomTab::Result(index);
-                if let Some(table) = crate::data_edit::single_table(&self.state.results[index].sql) {
+                if let Some(table) = crate::data_edit::single_table(&self.state.results[index].sql)
+                {
                     let task_id = request_id();
                     self.state.relation_requests.insert(task_id, id);
-                    let task: orui_db::TaskFn = Box::new(move |conn: &orui_db::oracle::Connection| {
-                        let relations = crate::relations::load(conn, &table)?;
-                        Ok(Box::new(relations) as Box<dyn std::any::Any + Send>)
-                    });
+                    let task: orui_db::TaskFn =
+                        Box::new(move |conn: &orui_db::oracle::Connection| {
+                            let relations = crate::relations::load(conn, &table)?;
+                            Ok(Box::new(relations) as Box<dyn std::any::Any + Send>)
+                        });
                     effects.request(Target::Main, DbRequest::Task { id: task_id, task });
                 }
             }
@@ -1310,8 +1312,10 @@ impl SqlWindow {
                 .show(ui);
                 state.selection_summary = out.selection_summary;
                 if let Some((link, row)) = result.grid.take_follow()
-                    && let Some(relation) =
-                        result.link_relations.get(link).and_then(|&r| result.relations.get(r))
+                    && let Some(relation) = result
+                        .link_relations
+                        .get(link)
+                        .and_then(|&r| result.relations.get(r))
                     && let Some(connection) = cx.connection.clone()
                 {
                     effects.open.push(crate::documents::OpenRequest::Sql {

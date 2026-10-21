@@ -50,6 +50,7 @@ commands! {
     FindObject => "Tools: Find Database Object…",
     FindInSource => "Tools: Find in Database Source…",
     SearchData => "Tools: Search Data in Tables…",
+    SchedulerJobs => "Tools: Scheduler Jobs",
     ImportData => "Tools: Import Data (CSV, Excel)…",
     CompareSchemas => "Tools: Compare Schemas…",
     CompareData => "Tools: Compare Table Data…",

@@ -930,6 +930,10 @@ impl OruiApp {
                 let connection = self.current_connection();
                 self.add_doc(connection, DocKind::Import(Default::default()));
             }
+            Command::SchedulerJobs => {
+                let connection = self.current_connection();
+                self.add_doc(connection, DocKind::Jobs(Default::default()));
+            }
             Command::SearchData => {
                 let connection = self.current_connection();
                 self.add_doc(connection, DocKind::DataSearch(Default::default()));
@@ -1356,6 +1360,8 @@ impl OruiApp {
                 item(ui, Command::FindObject);
                 item(ui, Command::FindInSource);
                 item(ui, Command::SearchData);
+                ui.separator();
+                item(ui, Command::SchedulerJobs);
                 ui.separator();
                 item(ui, Command::ImportData);
                 ui.separator();
@@ -1978,6 +1984,14 @@ impl OruiApp {
             .get_mut(&id)
             .and_then(Document::sql_window)
             .expect("SQL window")
+    }
+
+    pub fn test_jobs_window(&mut self) -> &mut crate::jobs_window::JobsWindow {
+        let id = self.focused.expect("focused document");
+        match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+            Some(DocKind::Jobs(j)) => j,
+            _ => panic!("not a jobs window"),
+        }
     }
 
     pub fn test_sql_window_ref(&self) -> Option<&SqlWindow> {
