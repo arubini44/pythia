@@ -6,6 +6,10 @@ license.workspace = true
 
 [dependencies]
 egui.workspace = true
-egui_extras.workspace = true
+egui_extras = { workspace = true, features = ["svg"] }
 orui-db.workspace = true
 orui-plsql.workspace = true
+
+[dev-dependencies]
+resvg = { version = "0.45", default-features = false }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "png-format"] }
