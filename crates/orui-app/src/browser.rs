@@ -14,6 +14,7 @@ use orui_db::{
 use orui_ui::icons::{Icon, IconSize, paint_invalid_badge};
 
 use crate::documents::{Effects, ObjectRef, OpenRequest, Target, request_id};
+use crate::object_editor::{EditTarget, has_editor, has_grants};
 use crate::table_parts::{Part, PartKind, TableParts};
 
 enum Loaded<T> {
@@ -721,6 +722,15 @@ impl Browser {
                     if toggle || label.clicked() {
                         toggles.push(Node::Folder((*owner).to_owned(), *object_type));
                     }
+                    if has_editor(*object_type) {
+                        label.context_menu(|ui| {
+                            let kind = object_type.dictionary_name().to_lowercase();
+                            if ui.button(format!("New {kind}…")).clicked() {
+                                actions.push(Action::New((*owner).to_owned(), *object_type));
+                                ui.close();
+                            }
+                        });
+                    }
                 }
                 Row::Object {
                     object,
@@ -905,6 +915,12 @@ impl Browser {
         if t == ObjectType::Table {
             item(ui, "Edit table…", Action::EditTable(object.clone()));
         }
+        if has_editor(t) {
+            item(ui, "Edit…", Action::EditObject(object.clone()));
+        }
+        if has_grants(t) {
+            item(ui, "Grants…", Action::Grants(object.clone()));
+        }
         let mut generate = None;
         if t.has_data() {
             ui.menu_button("Generate", |ui| {
@@ -988,6 +1004,18 @@ impl Browser {
             Action::EditTable(object) => effects
                 .open
                 .push(OpenRequest::EditTable { connection, object }),
+            Action::New(owner, object_type) => effects.open.push(OpenRequest::EditObject {
+                connection,
+                target: EditTarget::New { owner, object_type },
+            }),
+            Action::EditObject(object) => effects.open.push(OpenRequest::EditObject {
+                connection,
+                target: EditTarget::Edit(object),
+            }),
+            Action::Grants(object) => effects.open.push(OpenRequest::EditObject {
+                connection,
+                target: EditTarget::Grants(object),
+            }),
             Action::Generate(object, kind) => {
                 let id = request_id();
                 let query = MetaQuery::Columns {
@@ -1071,6 +1099,10 @@ enum Action {
     Test(ObjectRef, Option<String>),
     Generate(ObjectRef, Template),
     EditTable(ObjectRef),
+    /// Form editor for a new object of this type in this schema.
+    New(String, ObjectType),
+    EditObject(ObjectRef),
+    Grants(ObjectRef),
 }
 
 /// Statements generated from a table's columns.

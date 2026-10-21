@@ -353,6 +353,27 @@ impl OruiApp {
                 }
             }
             OpenRequest::ConnectDialog => self.connect_dialog.show(self.last_profile.as_ref()),
+            OpenRequest::EditObject { connection, target } => {
+                let existing = self.docs.iter().find_map(|(id, d)| match &d.kind {
+                    DocKind::ObjectEditor(e)
+                        if e.target == target
+                            && d.connection.as_deref() == Some(connection.as_str())
+                            && !matches!(target, crate::object_editor::EditTarget::New { .. }) =>
+                    {
+                        Some(*id)
+                    }
+                    _ => None,
+                });
+                match existing {
+                    Some(id) => self.open_tab(Tab::Doc(id)),
+                    None => {
+                        self.add_doc(
+                            Some(connection),
+                            DocKind::ObjectEditor(crate::object_editor::ObjectEditor::new(target)),
+                        );
+                    }
+                }
+            }
             OpenRequest::EditTable { connection, object } => {
                 self.add_doc(
                     Some(connection),
@@ -2120,6 +2141,14 @@ impl OruiApp {
             .get_mut(&id)
             .and_then(Document::sql_window)
             .expect("SQL window")
+    }
+
+    pub fn test_object_editor(&mut self) -> &mut crate::object_editor::ObjectEditor {
+        let id = self.focused.expect("focused document");
+        match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+            Some(DocKind::ObjectEditor(e)) => e,
+            _ => panic!("not an object editor"),
+        }
     }
 
     pub fn test_jobs_window(&mut self) -> &mut crate::jobs_window::JobsWindow {
