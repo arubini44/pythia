@@ -2847,6 +2847,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "orui-compare"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui_extras",
+ "orui-data",
+ "orui-db",
+ "orui-plsql",
+ "orui-ui",
+ "similar",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "orui-config"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,18 @@
+[package]
+name = "orui-compare"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+egui_extras.workspace = true
+orui-data.workspace = true
+orui-db.workspace = true
+orui-plsql.workspace = true
+orui-ui.workspace = true
+similar = { version = "2", features = ["inline"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+
