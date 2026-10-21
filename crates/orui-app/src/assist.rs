@@ -25,7 +25,8 @@ pub struct Assist {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pending {
-    Complete,
+    /// Completion requested with the cursor at this byte offset.
+    Complete(usize),
     Signature(usize),
     Hover(usize),
     Goto(usize),
@@ -47,7 +48,16 @@ impl Assist {
         {
             // New dictionary data arrived: retry, unless the user moved on.
             let still_relevant = match p {
-                Pending::Complete => editor.inner().is_completion_open(),
+                Pending::Complete(at) => {
+                    // Still at the same place, or only typed more of the word.
+                    let cursor = editor.cursor();
+                    cursor >= at
+                        && editor.text().get(at..cursor).is_some_and(|typed| {
+                            typed
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_' || c == '$' || c == '#')
+                        })
+                }
                 _ => true,
             };
             self.pending = None;
@@ -56,7 +66,7 @@ impl Assist {
             }
         }
         if out.completion_request.is_some() {
-            work.push(Pending::Complete);
+            work.push(Pending::Complete(editor.cursor()));
         }
         work.extend(out.signature_request.map(Pending::Signature));
         work.extend(out.hover_request.map(Pending::Hover));
@@ -90,7 +100,7 @@ impl Assist {
         effects: &mut Effects,
     ) -> Vec<CatalogRequest> {
         match request {
-            Pending::Complete => {
+            Pending::Complete(_) => {
                 let completion = self.analysis.complete(editor.cursor(), catalog);
                 let entries = completion.items.into_iter().map(entry).collect();
                 editor.inner().show_completions(completion.replace, entries);

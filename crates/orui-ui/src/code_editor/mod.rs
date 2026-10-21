@@ -378,6 +378,14 @@ impl CodeEditor {
         self.completion.is_some()
     }
 
+    /// Labels in the open completion popup, best match first.
+    pub fn completion_labels(&self) -> Vec<&str> {
+        self.completion
+            .as_ref()
+            .map(|c| c.labels())
+            .unwrap_or_default()
+    }
+
     /// Shows a signature hint above the caret. `active_param` is a byte
     /// range within `label` that is emphasized.
     pub fn show_signature(&mut self, label: String, active_param: Option<Range<usize>>) {

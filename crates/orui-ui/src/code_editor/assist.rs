@@ -107,6 +107,17 @@ pub struct Completion {
 }
 
 impl Completion {
+    /// Labels currently offered, best match first.
+    pub fn labels(&self) -> Vec<&str> {
+        self.filtered
+            .iter()
+            .filter_map(|i| self.items.get(*i))
+            .map(|e| e.label.as_str())
+            .collect()
+    }
+}
+
+impl Completion {
     /// Opens a popup replacing the char range `replace`. Returns `None` if no
     /// item matches what is typed.
     pub fn new(

@@ -1392,6 +1392,13 @@ impl OruiApp {
             .expect("SQL window")
     }
 
+    pub fn test_sql_window_ref(&self) -> Option<&SqlWindow> {
+        match &self.docs.get(&self.focused?)?.kind {
+            DocKind::Sql(w) => Some(w),
+            _ => None,
+        }
+    }
+
     pub fn test_cx(&self) -> (DocId, Settings, Option<String>) {
         let id = self.focused.expect("focused document");
         (id, self.settings.clone(), self.docs[&id].connection.clone())

@@ -153,6 +153,15 @@ impl SqlWindow {
         }
     }
 
+    /// Whether the completion popup is open and offers `label` (tests).
+    #[cfg(test)]
+    pub fn completion_visible_with(&self, label: &str) -> bool {
+        self.editor
+            .completion_labels()
+            .iter()
+            .any(|l| l.eq_ignore_ascii_case(label))
+    }
+
     pub fn is_running(&self) -> bool {
         self.state.running.is_some() || self.state.fetching.is_some() || self.state.prompt.is_some()
     }

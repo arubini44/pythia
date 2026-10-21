@@ -353,3 +353,36 @@ fn data_editing() {
         "{messages:?}"
     );
 }
+
+/// Types `.` after a table alias in a real editor and waits for the
+/// completion popup, which needs a round trip to the dictionary.
+#[test]
+fn completion_popup() {
+    let Some((profile, password)) = profile() else {
+        eprintln!("ORUI_TEST_DB not set, skipping");
+        return;
+    };
+    for dark in [true, false] {
+        let mut h = harness(dark);
+        h.state_mut()
+            .test_connect(profile.clone(), password.clone());
+        wait_until(&mut h, "connection", |app| app.test_connected());
+        h.state_mut().test_open(OpenRequest::Sql {
+            connection: "orui@FREEPDB1".into(),
+            text: "select e\n  from demo_employees e\n where e.department_id = 20".into(),
+            run: false,
+        });
+        h.run_steps(3);
+        h.state_mut().test_sql_window().editor.select(8..8);
+        h.run_steps(3);
+        h.event(egui::Event::Text(".".into()));
+        wait_until(&mut h, "completion popup", |app| {
+            app.test_sql_window_ref()
+                .is_some_and(|w| w.completion_visible_with("SALARY"))
+        });
+        save(
+            &mut h,
+            &format!("08-completion-{}", if dark { "dark" } else { "light" }),
+        );
+    }
+}

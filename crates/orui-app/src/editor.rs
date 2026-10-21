@@ -104,6 +104,12 @@ impl Editor {
         self.refresh();
     }
 
+    /// Labels in the open completion popup.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by UI tests"))]
+    pub fn completion_labels(&self) -> Vec<&str> {
+        self.inner.completion_labels()
+    }
+
     /// The underlying widget, for code assistance popups.
     pub fn inner(&mut self) -> &mut CodeEditor {
         &mut self.inner
