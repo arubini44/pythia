@@ -1015,7 +1015,7 @@ fn viewer(
     let bytes = columns
         .get(c)
         .filter(|col| is_binary(col))
-        .and_then(|_| value.as_deref())
+        .and(value.as_deref())
         .and_then(decode_hex);
     let pretty = value
         .as_deref()
@@ -1088,7 +1088,7 @@ fn is_binary(col: &Column) -> bool {
 
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
     let text = text.trim();
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     (0..text.len())
