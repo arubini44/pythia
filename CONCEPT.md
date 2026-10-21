@@ -337,7 +337,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Actual execution plan via `DBMS_XPLAN.DISPLAY_CURSOR` with `GATHER_PLAN_STATISTICS`
 - [ ] SQL Monitor report viewer (if licensed)
 - [x] Statistics of the last execution (`V$MYSTAT` deltas: consistent gets, physical reads, ...)
-- [ ] PL/SQL profiler (`DBMS_HPROF`) with result view, hot lines in the editor
+- [x] PL/SQL profiler (`DBMS_HPROF`) with result view, hot lines in the editor (per subprogram and statement; double-click opens the line; no editor markers)
 - [x] Trace file helper (enable 10046 for session)
 
 ### 5.20 Session & Database Monitoring (M8)

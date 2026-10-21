@@ -56,6 +56,9 @@ for Linux, Windows and macOS.
 - **Debugger** (DBMS_DEBUG_JDWP): breakpoints with conditions and hit
   counts, break on exception, step over/into/out, call stack, variables
   including records and collections, watches, values on hover.
+- **Profiler** (DBMS_HPROF): profile a block or call and see self and
+  total time per subprogram and SQL statement; double-click jumps to the
+  code. Needs `EXECUTE` on `DBMS_HPROF`; profiling commits.
 - Find in database source (Ctrl+Alt+F) with regular expressions.
 
 ![Debugger stopped at a breakpoint](docs/screenshots/debugger.png)

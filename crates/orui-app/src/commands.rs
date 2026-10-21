@@ -53,6 +53,7 @@ commands! {
     ExplainPlan => "Session: Explain Plan",
     ExecuteWithStatistics => "Session: Run with Statistics (actual plan)",
     ExecuteToFile => "Session: Execute Query to File…",
+    Profile => "Session: Profile PL/SQL (DBMS_HPROF)",
     Cancel => "Session: Break (cancel execution)",
     Commit => "Session: Commit",
     Rollback => "Session: Rollback",

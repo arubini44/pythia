@@ -1210,3 +1210,76 @@ fn code_font() {
             .any(|l| l.contains("is not a TrueType or OpenType font"))
     );
 }
+
+/// Profiling a call shows where the time went, per subprogram.
+#[test]
+fn profiler() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "create or replace package orui_prof_pkg as
+  function slow_sum(p_n number) return number;
+  procedure report;
+end orui_prof_pkg;
+/
+create or replace package body orui_prof_pkg as
+  function slow_sum(p_n number) return number is
+    l_total number := 0;
+  begin
+    for i in 1 .. p_n loop
+      l_total := l_total + sqrt(i);
+    end loop;
+    return l_total;
+  end slow_sum;
+
+  procedure report is
+    l_count number;
+  begin
+    select count(*) into l_count from all_objects where rownum <= 2000;
+    dbms_output.put_line(slow_sum(200000) + l_count);
+  end report;
+end orui_prof_pkg;
+/"
+        .into(),
+        run: true,
+    });
+    wait_until(&mut h, "package", |app| !app.test_focused_busy());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "exec orui_prof_pkg.report".into(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::Profile);
+    wait_until(&mut h, "profile", |app| !app.test_focused_busy());
+    let w = h.state_mut().test_sql_window();
+    let Some((_, Some(result))) = &w.state.profile else {
+        panic!("no profile");
+    };
+    match result {
+        Ok(p) => {
+            let names: Vec<String> = p.rows.iter().map(|r| r.title()).collect();
+            assert!(
+                names.iter().any(|n| n == "ORUI.ORUI_PROF_PKG.SLOW_SUM"),
+                "{names:?}"
+            );
+            assert!(p.rows.iter().any(|r| r.object().is_some()));
+        }
+        // No EXECUTE on DBMS_HPROF here.
+        Err(e) if e.contains("grant execute") => return,
+        Err(e) => panic!("{e}"),
+    }
+    save(&mut h, "profiler");
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "drop package orui_prof_pkg;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}

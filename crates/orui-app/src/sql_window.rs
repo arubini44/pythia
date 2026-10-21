@@ -68,6 +68,8 @@ pub struct RunState {
     pub plan: Option<Plan>,
     /// "Run with statistics": request id and report.
     pub statistics: Option<(u64, Option<Result<crate::statistics::Report, String>>)>,
+    /// "Profile": request id and the DBMS_HPROF profile.
+    pub profile: Option<(u64, Option<Result<crate::profiler::Profile, String>>)>,
     pub messages: Vec<Message>,
     pub output: Vec<String>,
     pub bottom: BottomTab,
@@ -158,6 +160,7 @@ pub enum BottomTab {
     Result(usize),
     Plan,
     Statistics,
+    Profile,
     #[default]
     Messages,
     Output,
@@ -234,6 +237,11 @@ impl SqlWindow {
             || self
                 .state
                 .statistics
+                .as_ref()
+                .is_some_and(|(_, r)| r.is_none())
+            || self
+                .state
+                .profile
                 .as_ref()
                 .is_some_and(|(_, r)| r.is_none())
     }
@@ -452,6 +460,63 @@ impl SqlWindow {
         if self.state.to_file.is_some() {
             ui.ctx().request_repaint_after(Duration::from_millis(200));
         }
+        effects
+    }
+
+    /// Runs the PL/SQL block at the cursor under the hierarchical profiler.
+    pub fn profile(&mut self) -> Effects {
+        let mut effects = Effects::default();
+        if self.is_running() {
+            return effects;
+        }
+        let Some(stmt) = self.statements(true).into_iter().next() else {
+            return effects;
+        };
+        let sql = if self.substitution {
+            substitute(&stmt.sql, &self.defines)
+        } else {
+            stmt.sql
+        };
+        // A call (`exec p(1)` or `p(1)`) is profiled as a block.
+        let block = match stmt.kind {
+            StatementKind::PlSql => sql,
+            _ => {
+                let call = sql.trim().trim_end_matches(';');
+                let call = call
+                    .strip_prefix("exec ")
+                    .or_else(|| call.strip_prefix("EXEC "))
+                    .or_else(|| call.strip_prefix("execute "))
+                    .or_else(|| call.strip_prefix("EXECUTE "))
+                    .unwrap_or(call);
+                let first = orui_plsql::tokenize(call)
+                    .into_iter()
+                    .find(|t| !t.kind.is_trivia())
+                    .map(|t| call[t.span].to_ascii_uppercase());
+                if matches!(
+                    first.as_deref(),
+                    Some("SELECT" | "WITH" | "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "CREATE")
+                ) {
+                    self.warn("Profile works for PL/SQL blocks and procedure calls");
+                    self.state.bottom = BottomTab::Messages;
+                    return effects;
+                }
+                format!("begin\n  {call};\nend;")
+            }
+        };
+        if !find_binds(&block).is_empty() {
+            self.warn("Profile doesn't support bind variables yet; use literals");
+            self.state.bottom = BottomTab::Messages;
+            return effects;
+        }
+        let id = request_id();
+        self.state.profile = Some((id, None));
+        self.state.bottom = BottomTab::Profile;
+        let task: orui_db::TaskFn = Box::new(move |conn: &orui_db::oracle::Connection| {
+            let profile = crate::profiler::run(conn, &block)
+                .map_err(|e| orui_db::DbError::new(crate::profiler::explain(&e)))?;
+            Ok(Box::new(profile) as Box<dyn std::any::Any + Send>)
+        });
+        effects.request(Target::Own, DbRequest::Task { id, task });
         effects
     }
 
@@ -947,6 +1012,21 @@ impl SqlWindow {
                 }
             }
             DbEvent::TaskDone { id, result }
+                if self.state.profile.as_ref().is_some_and(|(p, _)| *p == id) =>
+            {
+                let profile = match result.map(|any| any.downcast::<crate::profiler::Profile>()) {
+                    Ok(Ok(profile)) => {
+                        self.warn(
+                            "Profiling committed the transaction (DBMS_HPROF writes its trace data)",
+                        );
+                        Ok(*profile)
+                    }
+                    Ok(Err(_)) => Err("unexpected result".to_owned()),
+                    Err(e) => Err(e.to_string()),
+                };
+                self.state.profile = Some((id, Some(profile)));
+            }
+            DbEvent::TaskDone { id, result }
                 if self.state.to_file.as_ref().is_some_and(|t| t.id == id) =>
             {
                 let Some(job) = self.state.to_file.take() else {
@@ -1214,6 +1294,9 @@ impl SqlWindow {
             if state.statistics.is_some() {
                 ui.selectable_value(&mut state.bottom, BottomTab::Statistics, "Statistics");
             }
+            if state.profile.is_some() {
+                ui.selectable_value(&mut state.bottom, BottomTab::Profile, "Profile");
+            }
             let label = match state.messages.iter().map(|m| m.level).max() {
                 Some(Level::Error) => RichText::new("Messages").color(ui.visuals().error_fg_color),
                 Some(Level::Warning) => RichText::new("Messages").color(ui.visuals().warn_fg_color),
@@ -1478,6 +1561,28 @@ impl SqlWindow {
                 }
                 _ => {
                     ui.spinner();
+                }
+            },
+            BottomTab::Profile => match &state.profile {
+                Some((_, Some(Ok(profile)))) => {
+                    if let Some((object, line)) = crate::profiler::ui(ui, profile)
+                        && let Some(connection) = cx.connection.clone()
+                    {
+                        effects.open.push(crate::documents::OpenRequest::ProgramAt {
+                            connection,
+                            object,
+                            line,
+                        });
+                    }
+                }
+                Some((_, Some(Err(e)))) => {
+                    ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                }
+                _ => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Profiling…");
+                    });
                 }
             },
             BottomTab::Statistics => match &state.statistics {
