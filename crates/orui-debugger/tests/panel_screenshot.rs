@@ -3,7 +3,9 @@
 
 use egui_kittest::Harness;
 use orui_debugger::ui::{DebugSession, State};
-use orui_debugger::{Frame, Location, StopReason, Unit, UnitType, Variable};
+use orui_debugger::{
+    Breakpoint, BreakpointOptions, Frame, Location, StopReason, Unit, UnitType, Variable, Watch,
+};
 
 fn var(name: &str, ty: &str, value: Option<&str>, children: Vec<Variable>) -> Variable {
     Variable {
@@ -21,11 +23,60 @@ fn panel() {
     };
     let demo = Unit::new("ORUI", "DBG_DEMO", UnitType::Procedure);
     let mut session = DebugSession::default();
+    let pkg = Unit::new("ORUI", "DBG_PKG", UnitType::PackageBody);
     session.toggle_breakpoint(demo.clone(), 10);
-    session.toggle_breakpoint(Unit::new("ORUI", "DBG_PKG", UnitType::PackageBody), 5);
-    session.state = State::Suspended {
-        reason: StopReason::Breakpoint,
+    session.toggle_breakpoint(demo.clone(), 13);
+    session.toggle_breakpoint(pkg.clone(), 5);
+    let at10 = Breakpoint {
+        unit: demo.clone(),
+        line: 10,
     };
+    session.set_options(
+        &at10,
+        BreakpointOptions {
+            condition: Some("i = 2 and l_name is not null".into()),
+            hit_count: Some(2),
+        },
+    );
+    session.hits.insert(at10, 2);
+    session.set_enabled(&Breakpoint { unit: pkg, line: 5 }, false);
+    session.watches = vec![
+        "l_rec.b".into(),
+        "dbg_pkg.g_count".into(),
+        "l_arr".into(),
+        "l_missing".into(),
+    ];
+    session.watch_values = vec![
+        Watch {
+            expression: "l_rec.b".into(),
+            value: Ok(var("B", "VARCHAR2", Some("bee"), vec![])),
+        },
+        Watch {
+            expression: "dbg_pkg.g_count".into(),
+            value: Ok(var("G_COUNT", "NUMBER", Some("41"), vec![])),
+        },
+        Watch {
+            expression: "l_arr".into(),
+            value: Ok(var(
+                "L_ARR",
+                "T_ARR",
+                Some("3 element(s)"),
+                vec![
+                    var("(1)", "NUMBER", Some("10"), vec![]),
+                    var("(2)", "NUMBER", Some("20"), vec![]),
+                ],
+            )),
+        },
+        Watch {
+            expression: "l_missing".into(),
+            value: Err("l_missing is unknown here".into()),
+        },
+    ];
+    session.state = State::Suspended {
+        reason: StopReason::Exception,
+    };
+    session.exception = Some("ORA-01476 (zero_divide)".into());
+    session.break_on_exception = true;
     session.stack = vec![
         Frame {
             location: Location {
@@ -72,6 +123,13 @@ fn panel() {
     for dark in [true, false] {
         let mut s = DebugSession::default();
         s.breakpoints = session.breakpoints.clone();
+        s.disabled = session.disabled.clone();
+        s.options = session.options.clone();
+        s.hits = session.hits.clone();
+        s.watches = session.watches.clone();
+        s.watch_values = session.watch_values.clone();
+        s.exception = session.exception.clone();
+        s.break_on_exception = session.break_on_exception;
         s.state = session.state.clone();
         s.stack = session.stack.clone();
         s.variables = session.variables.clone();

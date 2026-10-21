@@ -336,6 +336,15 @@ pub enum Event {
         thread: u64,
         location: Location,
     },
+    /// An exception was raised; `catch_location` is `None` when nothing
+    /// handles it.
+    Exception {
+        request: i32,
+        thread: u64,
+        location: Location,
+        exception: u64,
+        catch_location: Option<Location>,
+    },
     Other {
         kind: u8,
     },
@@ -344,6 +353,7 @@ pub enum Event {
 pub mod kind {
     pub const SINGLE_STEP: u8 = 1;
     pub const BREAKPOINT: u8 = 2;
+    pub const EXCEPTION: u8 = 4;
     pub const THREAD_START: u8 = 6;
     pub const THREAD_DEATH: u8 = 7;
     pub const CLASS_PREPARE: u8 = 8;
@@ -427,6 +437,23 @@ pub fn parse_events(data: &[u8], sizes: &IdSizes) -> Result<(u8, Vec<Event>)> {
                         thread,
                         location,
                     },
+                }
+            }
+            kind::EXCEPTION => {
+                let request = r.i32()?;
+                let thread = r.id(sizes.object)?;
+                let location = r.location(sizes)?;
+                let exception = match r.value(sizes)? {
+                    Value::Object { id, .. } | Value::String(id) => id,
+                    _ => 0,
+                };
+                let catch = r.location(sizes)?;
+                Event::Exception {
+                    request,
+                    thread,
+                    location,
+                    exception,
+                    catch_location: (catch.class != 0).then_some(catch),
                 }
             }
             // Unknown layouts: stop parsing this packet.
@@ -708,6 +735,21 @@ impl Jdwp {
         Ok(out)
     }
 
+    /// Values of static fields (ReferenceType.GetValues).
+    pub fn static_values(&mut self, class: u64, fields: &[u64]) -> Result<Vec<Value>> {
+        let mut out = self
+            .out()
+            .id(class, self.sizes.reference_type)
+            .i32(fields.len() as i32);
+        for f in fields {
+            out = out.id(*f, self.sizes.field);
+        }
+        let data = self.command(2, 6, out)?;
+        let mut r = In::new(&data);
+        let n = r.i32()?;
+        (0..n).map(|_| r.value(&self.sizes)).collect()
+    }
+
     pub fn methods(&mut self, class: u64) -> Result<Vec<MethodInfo>> {
         let data = self.command(2, 5, self.out().id(class, self.sizes.reference_type))?;
         let mut r = In::new(&data);
@@ -888,6 +930,15 @@ impl Jdwp {
             .id(thread, self.sizes.object)
             .i32(step::LINE)
             .i32(depth)
+    }
+
+    /// Exceptions of any class, caught and/or uncaught.
+    pub fn modifier_exception(&self, caught: bool, uncaught: bool) -> Out {
+        Out::default()
+            .u8(8)
+            .id(0, self.sizes.reference_type)
+            .u8(u8::from(caught))
+            .u8(u8::from(uncaught))
     }
 
     pub fn modifier_count(count: i32) -> Out {

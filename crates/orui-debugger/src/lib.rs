@@ -13,6 +13,7 @@
 //! - [`ui`]: an egui debugger panel and the breakpoint model.
 //! - [`jdwp`]: the wire protocol.
 
+mod condition;
 mod debugger;
 pub mod jdwp;
 pub mod target;
@@ -21,5 +22,6 @@ pub mod ui;
 
 pub use debugger::Debugger;
 pub use types::{
-    Breakpoint, DebugCommand, DebugEvent, Frame, Location, StopReason, Unit, UnitType, Variable,
+    Breakpoint, BreakpointOptions, DebugCommand, DebugEvent, Frame, Location, StopReason, Unit,
+    UnitType, Variable, Watch,
 };

@@ -1182,9 +1182,16 @@ impl SqlWindow {
             .min_size(80.0)
             .show(ui, |ui| effects.extend(self.bottom_ui(ui, cx)));
         egui::CentralPanel::default().show(ui, |ui| {
-            let out = self
+            let mut out = self
                 .editor
                 .ui(ui, ("sql-editor", cx.id), &cx.settings.editor);
+            // While debugging a block, hovering a variable shows its value.
+            if let (Some(offset), Some(debug)) = (out.hover_request, cx.debug) {
+                let block = orui_debugger::Unit::new("", "", orui_debugger::UnitType::Block);
+                if crate::editor::debug_hover(&mut self.editor, offset, debug, &block) {
+                    out.hover_request = None;
+                }
+            }
             effects.extend(self.assist.handle(&mut self.editor, &out, cx));
             self.assist.background(&mut self.editor, ui);
             self.state.line_col = self.editor.line_col();

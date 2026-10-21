@@ -27,13 +27,40 @@ pub fn run_under_debugger(
     result
 }
 
+/// How a debugged block ended: what it printed with DBMS_OUTPUT and its own
+/// error, if any.
+#[derive(Debug)]
+pub struct DebugOutcome {
+    pub output: Vec<String>,
+    pub error: Option<DbError>,
+}
+
 /// [`run_under_debugger`] as a task for `orui_db::DbRequest::Task`. The task
-/// result is `()` on success.
+/// result is a [`DebugOutcome`] (the block's error is part of it, so its
+/// output isn't lost).
 pub fn debug_task(host: String, port: u16, block: String) -> TaskFn {
     Box::new(move |conn: &Connection| {
-        run_under_debugger(conn, &host, port, &block)?;
-        Ok(Box::new(()) as Box<dyn std::any::Any + Send>)
+        let error = run_under_debugger(conn, &host, port, &block).err();
+        let output = read_output(conn).unwrap_or_default();
+        Ok(Box::new(DebugOutcome { output, error }) as Box<dyn std::any::Any + Send>)
     })
+}
+
+/// Drains the session's DBMS_OUTPUT buffer.
+pub fn read_output(conn: &Connection) -> Result<Vec<String>, DbError> {
+    use orui_db::oracle::sql_type::OracleType;
+    let mut stmt = conn
+        .statement("begin dbms_output.get_line(:1, :2); end;")
+        .build()?;
+    let mut lines = Vec::new();
+    loop {
+        stmt.execute(&[&OracleType::Varchar2(32767), &OracleType::Number(0, 0)])?;
+        let status: i32 = stmt.bind_value(2)?;
+        if status != 0 {
+            return Ok(lines);
+        }
+        lines.push(stmt.bind_value::<_, Option<String>>(1)?.unwrap_or_default());
+    }
 }
 
 /// SQL to recompile a unit with debug information.
