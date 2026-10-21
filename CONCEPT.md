@@ -112,7 +112,7 @@ orui/
 - [x] Read `tnsnames.ora` / `sqlnet.ora` (`TNS_ADMIN`, `ORACLE_HOME`) (aliases from `tnsnames.ora` incl. `IFILE`; `sqlnet.ora` is not read)
 - [x] Wallet / external authentication (`/@alias`)
 - [x] Connect as SYSDBA / SYSOPER / SYSBACKUP
-- [ ] Proxy user connect (`user[proxy]`)
+- [x] Proxy user connect (`user[proxy]`)
 - [x] Saved connections organized in folders, with colors and tags (e.g. red = production)
 - [x] Passwords in the OS keychain (`keyring`), never in plain text
 - [x] Production safety flags: read-only mode, confirm on commit, confirm DML/DDL

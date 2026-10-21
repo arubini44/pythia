@@ -231,8 +231,11 @@ impl ConnectDialog {
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
                 ui.label("Username");
-                let user = ui
-                    .add(egui::TextEdit::singleline(&mut self.form.username).desired_width(280.0));
+                let user = ui.add(
+                    egui::TextEdit::singleline(&mut self.form.username)
+                        .hint_text("user, or proxy[target] for proxy authentication")
+                        .desired_width(280.0),
+                );
                 if !self.focus_requested {
                     if self.form.username.is_empty() {
                         user.request_focus();

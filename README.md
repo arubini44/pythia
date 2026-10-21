@@ -135,6 +135,10 @@ license doesn't allow us to bundle. Install it once:
    Client directory or point `TNS_ADMIN` at it; orui then offers the aliases
    when connecting.
 
+Proxy authentication works with the usual `proxy_user[target_user]` user
+name; an empty user name with a wallet or OS authentication connects as
+`/@alias`.
+
 If the client can't be loaded, orui says so when you connect and shows these
 steps.
 
