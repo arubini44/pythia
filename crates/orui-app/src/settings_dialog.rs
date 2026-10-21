@@ -349,13 +349,13 @@ fn keyboard(ui: &mut Ui, s: &mut Settings, st: &mut KeysState) {
             Some((key, m)) => {
                 let mut modifiers = egui::Modifiers::NONE;
                 if m.command || m.ctrl || m.mac_cmd {
-                    modifiers = modifiers | egui::Modifiers::COMMAND;
+                    modifiers |= egui::Modifiers::COMMAND;
                 }
                 if m.shift {
-                    modifiers = modifiers | egui::Modifiers::SHIFT;
+                    modifiers |= egui::Modifiers::SHIFT;
                 }
                 if m.alt {
-                    modifiers = modifiers | egui::Modifiers::ALT;
+                    modifiers |= egui::Modifiers::ALT;
                 }
                 let shortcut = egui::KeyboardShortcut::new(modifiers, key);
                 st.notice = None;

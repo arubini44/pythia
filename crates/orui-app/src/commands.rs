@@ -234,9 +234,9 @@ pub fn parse_shortcut(text: &str) -> Option<KeyboardShortcut> {
     let mut key = None;
     for part in text.split('+').map(str::trim).filter(|p| !p.is_empty()) {
         match part.to_ascii_lowercase().as_str() {
-            "ctrl" | "cmd" | "command" => modifiers = modifiers | Modifiers::COMMAND,
-            "shift" => modifiers = modifiers | Modifiers::SHIFT,
-            "alt" | "option" => modifiers = modifiers | Modifiers::ALT,
+            "ctrl" | "cmd" | "command" => modifiers |= Modifiers::COMMAND,
+            "shift" => modifiers |= Modifiers::SHIFT,
+            "alt" | "option" => modifiers |= Modifiers::ALT,
             "esc" => key = Some(Key::Escape),
             "del" => key = Some(Key::Delete),
             "ins" => key = Some(Key::Insert),
