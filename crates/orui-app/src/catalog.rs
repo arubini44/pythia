@@ -401,3 +401,44 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod test_script_live {
+    use super::*;
+
+    #[test]
+    fn generated_test_block_runs() {
+        let Ok(spec) = std::env::var("ORUI_TEST_DB") else {
+            return;
+        };
+        let (cred, db) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        let conn = Connection::connect(user, pw, db).unwrap();
+        let members = members(&conn, &current_schema(&conn).unwrap(), "DEMO_PKG").unwrap();
+        let total = members
+            .iter()
+            .find(|m| m.name == "DEPARTMENT_TOTAL")
+            .expect("member");
+        let block = crate::test_script::test_block("demo_pkg.department_total", total);
+        let block = block
+            .lines()
+            .filter(|l| !l.starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        conn.execute("begin dbms_output.enable(null); end;", &[])
+            .unwrap();
+        conn.execute_named(&block, &[("p_department_id", &20)])
+            .unwrap();
+        let mut stmt = conn
+            .statement("begin dbms_output.get_line(:1, :2); end;")
+            .build()
+            .unwrap();
+        stmt.execute(&[
+            &orui_db::oracle::sql_type::OracleType::Varchar2(32767),
+            &orui_db::oracle::sql_type::OracleType::Number(0, 0),
+        ])
+        .unwrap();
+        let line: String = stmt.bind_value(1).unwrap();
+        assert!(line.starts_with("result = "), "{line}");
+    }
+}

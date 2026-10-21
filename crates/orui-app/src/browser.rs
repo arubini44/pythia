@@ -40,6 +40,11 @@ enum Pending {
         object: ObjectRef,
         verb: &'static str,
     },
+    /// Parameters of `member` (or the standalone unit) for a test script.
+    Test {
+        object: ObjectRef,
+        member: Option<String>,
+    },
 }
 
 /// One visible line of the tree.
@@ -56,7 +61,7 @@ enum Row<'a> {
         expandable: bool,
     },
     Column(&'a TableColumn),
-    Member(&'a Member),
+    Member(&'a Member, ObjectRef),
     Message {
         depth: usize,
         text: String,
@@ -188,8 +193,54 @@ impl Browser {
         }
     }
 
+    fn open_test(
+        &self,
+        answer: crate::catalog::Answer,
+        object: &ObjectRef,
+        member: Option<&str>,
+        effects: &mut Effects,
+        log: &mut Vec<String>,
+    ) {
+        let crate::catalog::Answer::Members(_, _, members) = answer else {
+            return;
+        };
+        let wanted = member.unwrap_or(&object.name);
+        let Some(found) = members.iter().find(|m| m.name.eq_ignore_ascii_case(wanted)) else {
+            log.push(format!("No parameters found for {wanted}"));
+            return;
+        };
+        let qualified = match member {
+            Some(name) => format!(
+                "{}.{}",
+                object.qualified(),
+                crate::documents::quote_ident(name)
+            ),
+            None => object.qualified(),
+        };
+        let text = crate::test_script::test_block(&qualified.to_lowercase(), found);
+        if let Some(connection) = self.connection.clone() {
+            effects.open.push(OpenRequest::Sql {
+                connection,
+                text,
+                run: false,
+            });
+        }
+    }
+
     pub fn on_event(&mut self, event: DbEvent, log: &mut Vec<String>) -> Effects {
         let mut effects = Effects::default();
+        if let DbEvent::TaskDone { id, result } = event {
+            if let Some(Pending::Test { object, member }) = self.pending.remove(&id) {
+                match result.map(|any| any.downcast::<crate::catalog::Answer>()) {
+                    Ok(Ok(answer)) => {
+                        self.open_test(*answer, &object, member.as_deref(), &mut effects, log)
+                    }
+                    Ok(Err(_)) => {}
+                    Err(e) => log.push(format!("Test script: {e}")),
+                }
+            }
+            return effects;
+        }
         let (id, result) = match event {
             DbEvent::Meta { id, result } => (id, result.map(Some)),
             DbEvent::Executed { id, .. } => (id, Ok(None)),
@@ -443,7 +494,7 @@ impl Browser {
                             error: false,
                         }),
                     Some(Loaded::Ready(Children::Members(members))) => {
-                        rows.extend(members.iter().map(Row::Member))
+                        rows.extend(members.iter().map(|m| Row::Member(m, r.clone())))
                     }
                     Some(Loaded::Failed(e)) => rows.push(Row::Message {
                         depth: 2,
@@ -572,7 +623,7 @@ impl Browser {
                         label.on_hover_text(comment);
                     }
                 }
-                Row::Member(m) => {
+                Row::Member(m, package) => {
                     ui.add_space(INDENT * 2.0 + small.points());
                     let icon = if m.is_function {
                         Icon::Function
@@ -580,8 +631,25 @@ impl Browser {
                         Icon::Procedure
                     };
                     ui.add(icon.sized(ui, small));
-                    ui.label(RichText::new(m.name.to_lowercase()).monospace());
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(m.name.to_lowercase()).monospace())
+                            .sense(Sense::click()),
+                    );
                     ui.weak(&m.signature);
+                    label.context_menu(|ui| {
+                        if ui.button("Test…").clicked() {
+                            actions.push(Action::Test(package.clone(), Some(m.name.clone())));
+                            ui.close();
+                        }
+                        if ui.button("Edit package body").clicked() {
+                            let body = ObjectRef {
+                                object_type: ObjectType::PackageBody,
+                                ..package.clone()
+                            };
+                            actions.push(Action::Edit(body));
+                            ui.close();
+                        }
+                    });
                 }
                 Row::Message { depth, text, error } => {
                     ui.add_space(INDENT * *depth as f32 + small.points());
@@ -608,6 +676,9 @@ impl Browser {
         }
         if t.has_source() {
             item(ui, "Edit", Action::Edit(object.clone()));
+        }
+        if matches!(t, ObjectType::Procedure | ObjectType::Function) {
+            item(ui, "Test…", Action::Test(object.clone(), None));
         }
         item(ui, "Describe", Action::Describe(object.clone()));
         ui.separator();
@@ -673,6 +744,21 @@ impl Browser {
             Action::CopyName(o) => ctx.copy_text(o.name.clone()),
             Action::CopyQualified(o) => ctx.copy_text(o.qualified()),
             Action::Drop(o) => self.confirm_drop = Some(o),
+            Action::Test(object, member) => {
+                let id = request_id();
+                let request = orui_lsp_core::CatalogRequest::Members {
+                    owner: object.owner.clone(),
+                    name: object.name.clone(),
+                };
+                self.pending.insert(id, Pending::Test { object, member });
+                effects.request(
+                    Target::Main,
+                    DbRequest::Task {
+                        id,
+                        task: crate::catalog::task(request),
+                    },
+                );
+            }
         }
     }
 
@@ -729,6 +815,7 @@ enum Action {
     CopyName(ObjectRef),
     CopyQualified(ObjectRef),
     Drop(ObjectRef),
+    Test(ObjectRef, Option<String>),
 }
 
 fn object_ref(o: &DbObject) -> ObjectRef {

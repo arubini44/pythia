@@ -19,6 +19,7 @@ mod program_window;
 mod screenshots;
 mod secrets;
 mod sql_window;
+mod test_script;
 mod theme;
 
 use std::fs::{self, File};
