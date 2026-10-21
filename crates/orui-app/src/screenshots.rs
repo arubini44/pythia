@@ -225,6 +225,11 @@ fn screenshots() {
             wait_until(&mut h, "monitor", |app| !app.test_focused_busy());
         }
         save(&mut h, &format!("07-monitor-{suffix}"));
+
+        h.state_mut()
+            .test_command(crate::commands::Command::CompareSchemas);
+        h.run_steps(5);
+        save(&mut h, &format!("09-compare-{suffix}"));
     }
 }
 
@@ -276,6 +281,7 @@ fn data_editing() {
             connection,
             catalog: None,
             catalog_revision: 0,
+            connections: &[],
         };
         let effects = app.test_sql_window().start_editing(0, &cx);
         app.test_apply(effects);
@@ -304,6 +310,7 @@ fn data_editing() {
             connection,
             catalog: None,
             catalog_revision: 0,
+            connections: &[],
         };
         let effects = app.test_sql_window().apply_changes(0, &cx);
         app.test_apply(effects);

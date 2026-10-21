@@ -5,6 +5,7 @@ mod assist;
 mod browser;
 mod catalog;
 mod commands;
+mod compare_window;
 mod connections;
 mod data_edit;
 mod dialogs;

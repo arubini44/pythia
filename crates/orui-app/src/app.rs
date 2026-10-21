@@ -239,6 +239,7 @@ impl OruiApp {
             connection: self.docs.get(&id).and_then(|d| d.connection.clone()),
             catalog: None,
             catalog_revision: self.catalog_revision,
+            connections: &[],
         }
     }
 
@@ -408,10 +409,11 @@ impl OruiApp {
             .and_then(|id| self.docs.get(&id))
             .and_then(|d| d.connection.clone());
         for (target, request) in effects.requests {
-            let Some(name) = connection
-                .as_deref()
-                .filter(|c| self.conns.get(c).is_some())
-            else {
+            let target_connection = match &target {
+                Target::Connection(c) => Some(c.clone()),
+                _ => connection.clone(),
+            };
+            let Some(name) = target_connection.filter(|c| self.conns.get(c).is_some()) else {
                 if let Some(id) = doc {
                     let event = DbEvent::Error(orui_db::DbError::new(
                         "Not connected. Connect first (Session → Connect…) or pick a connection for this window.",
@@ -421,15 +423,15 @@ impl OruiApp {
                 continue;
             };
             match (target, doc) {
-                (Target::Own, Some(id)) => {
-                    let conn = self.conns.get_mut(name).expect("checked above");
+                (Target::Own | Target::Connection(_), Some(id)) => {
+                    let conn = self.conns.get_mut(&name).expect("checked above");
                     conn.doc_session(id, &self.notify).session.send(request);
                 }
                 (_, doc) => {
                     if let (Some(id), Some(req)) = (doc, request_key(&request)) {
                         self.routes.insert(req, id);
                     }
-                    self.conns.send_main(name, request);
+                    self.conns.send_main(&name, request);
                 }
             }
         }
@@ -539,6 +541,7 @@ impl OruiApp {
             connection,
             catalog,
             catalog_revision: self.catalog_revision,
+            connections: &[],
         };
         let effects = doc.on_event(event, &cx);
         self.apply(Some(id), effects);
@@ -643,6 +646,18 @@ impl OruiApp {
                 }
             }
             Command::History => self.history_dialog.toggle(),
+            Command::CompareSchemas | Command::CompareData => {
+                let kind = if command == Command::CompareSchemas {
+                    crate::compare_window::CompareKind::Schema
+                } else {
+                    crate::compare_window::CompareKind::Data
+                };
+                let connection = self.current_connection();
+                self.add_doc(
+                    connection.clone(),
+                    DocKind::Compare(crate::compare_window::CompareWindow::new(kind, connection)),
+                );
+            }
             Command::MonitorDashboard
             | Command::MonitorSessions
             | Command::MonitorBlocking
@@ -739,6 +754,7 @@ impl OruiApp {
             connection,
             catalog,
             catalog_revision: self.catalog_revision,
+            connections: &[],
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
@@ -961,6 +977,9 @@ impl OruiApp {
             });
             ui.menu_button("Tools", |ui| {
                 item(ui, Command::FindObject);
+                ui.separator();
+                item(ui, Command::CompareSchemas);
+                item(ui, Command::CompareData);
             });
             ui.menu_button("Monitor", |ui| {
                 item(ui, Command::MonitorDashboard);
@@ -1408,6 +1427,11 @@ impl OruiApp {
         self.apply(self.focused, effects);
     }
 
+    pub fn test_command(&mut self, command: Command) {
+        let ctx = self.notify.0.clone();
+        self.run_command(&ctx, command);
+    }
+
     pub fn test_focused(&self) -> DocId {
         self.focused.expect("focused document")
     }
@@ -1523,6 +1547,7 @@ impl TabViewer for Viewer<'_> {
                     connection: doc.connection.clone(),
                     catalog: doc.connection.as_ref().and_then(|c| self.catalogs.get(c)),
                     catalog_revision: self.catalog_revision,
+                    connections: self.connections,
                 };
                 let effects = doc.ui(ui, &cx);
                 self.effects.push((*id, effects));

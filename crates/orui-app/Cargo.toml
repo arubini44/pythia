@@ -16,6 +16,7 @@ egui_dock.workspace = true
 egui_extras.workspace = true
 keyring.workspace = true
 rfd = "0.17"
+orui-compare.workspace = true
 orui-config.workspace = true
 orui-data.workspace = true
 orui-db.workspace = true

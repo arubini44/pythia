@@ -22,12 +22,14 @@ pub fn request_id() -> u64 {
 }
 
 /// Where a document wants a request to run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// The document's own session (its transaction).
     Own,
     /// The connection's main session (metadata lookups).
     Main,
+    /// The document's own session on another connection (compare tools).
+    Connection(String),
 }
 
 /// A stored object, as documents and the browser refer to it.
@@ -125,6 +127,7 @@ pub enum DocKind {
     Program(ProgramWindow),
     Object(ObjectView),
     Monitor(crate::monitor_window::MonitorWindow),
+    Compare(crate::compare_window::CompareWindow),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -146,6 +149,8 @@ pub struct DocContext<'a> {
     pub catalog: Option<&'a orui_lsp_core::CatalogCache>,
     /// Bumped whenever new dictionary data arrived.
     pub catalog_revision: u64,
+    /// Names of all open connections.
+    pub connections: &'a [String],
 }
 
 impl Document {
@@ -155,6 +160,7 @@ impl Document {
             DocKind::Program(w) => w.title(),
             DocKind::Object(v) => v.title(),
             DocKind::Monitor(m) => m.title(),
+            DocKind::Compare(c) => c.title(),
         }
     }
 
@@ -174,6 +180,7 @@ impl Document {
             DocKind::Program(w) => w.is_busy(),
             DocKind::Object(v) => v.is_loading(),
             DocKind::Monitor(m) => m.is_busy(),
+            DocKind::Compare(c) => c.is_busy(),
         }
     }
 
@@ -198,6 +205,7 @@ impl Document {
             DocKind::Program(w) => w.on_event(event),
             DocKind::Object(v) => v.on_event(event),
             DocKind::Monitor(m) => m.on_event(event),
+            DocKind::Compare(c) => c.on_event(event),
         }
     }
 
@@ -207,6 +215,7 @@ impl Document {
             DocKind::Program(w) => w.ui(ui, cx),
             DocKind::Object(v) => v.ui(ui, cx, self.connection.as_deref()),
             DocKind::Monitor(m) => m.ui(ui, cx),
+            DocKind::Compare(c) => c.ui(ui, cx),
         }
     }
 
@@ -216,7 +225,7 @@ impl Document {
             DocKind::Sql(_) => Effects::default(),
             DocKind::Program(w) => w.load(),
             DocKind::Object(v) => v.load(),
-            DocKind::Monitor(_) => Effects::default(),
+            DocKind::Monitor(_) | DocKind::Compare(_) => Effects::default(),
         }
     }
 
@@ -225,7 +234,7 @@ impl Document {
         match &self.kind {
             DocKind::Sql(w) => (Some(w.state.line_col), w.result_status()),
             DocKind::Program(w) => (Some(w.line_col()), None),
-            DocKind::Object(_) | DocKind::Monitor(_) => (None, None),
+            DocKind::Object(_) | DocKind::Monitor(_) | DocKind::Compare(_) => (None, None),
         }
     }
 }

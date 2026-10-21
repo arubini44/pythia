@@ -2845,6 +2845,7 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "keyring",
+ "orui-compare",
  "orui-config",
  "orui-data",
  "orui-db",

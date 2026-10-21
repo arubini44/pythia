@@ -41,6 +41,8 @@ commands! {
     ToggleAutocommit => "Session: Toggle Auto-Commit",
     History => "Edit: Recall Statement (history)",
     FindObject => "Tools: Find Database Object…",
+    CompareSchemas => "Tools: Compare Schemas…",
+    CompareData => "Tools: Compare Table Data…",
     MonitorDashboard => "Monitor: Dashboard",
     MonitorSessions => "Monitor: Sessions",
     MonitorBlocking => "Monitor: Blocking Sessions",
