@@ -74,6 +74,12 @@ impl Connection {
     pub fn any_pending_tx(&self) -> bool {
         self.main_pending_tx || self.docs.values().any(|d| d.pending_tx)
     }
+
+    /// Replaces a lost main session with a new one.
+    pub fn reconnect_main(&mut self, notify: &Notify) {
+        self.main = Session::connect(self.params.clone(), notify.callback());
+        self.main_pending_tx = false;
+    }
 }
 
 /// Wakes the UI when a session has news.
@@ -105,6 +111,7 @@ impl Connections {
             password,
             connect_string: profile.connect_string.clone(),
             privilege: profile.privilege,
+            init_sql: init_sql(&profile),
         };
         let name = profile.display_name();
         let main = Session::connect(params.clone(), notify.callback());
@@ -178,4 +185,23 @@ impl Connections {
             None => false,
         }
     }
+}
+
+/// Statements every session of `profile` runs after connecting.
+fn init_sql(profile: &ConnectionProfile) -> Vec<String> {
+    let mut out = Vec::new();
+    let schema = profile.default_schema.trim();
+    if !schema.is_empty() {
+        out.push(format!(
+            "alter session set current_schema = {}",
+            crate::documents::quote_ident(&schema.to_uppercase())
+        ));
+    }
+    let script = &profile.login_script;
+    for statement in orui_plsql::split_statements(script) {
+        if statement.kind != orui_plsql::StatementKind::SqlPlus {
+            out.push(statement.text(script).to_owned());
+        }
+    }
+    out
 }

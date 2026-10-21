@@ -361,6 +361,38 @@ impl ConnectDialog {
             ui.checkbox(&mut self.form.save_password, "Save password")
                 .on_hover_text("Stored in the operating system's keychain");
         });
+        egui::CollapsingHeader::new("Advanced")
+            .id_salt("connect-advanced")
+            .show(ui, |ui| {
+                egui::Grid::new("connect-advanced-grid")
+                    .num_columns(2)
+                    .spacing([10.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Default schema");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.form.default_schema)
+                                .hint_text("work in another schema after connecting")
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+                        ui.label("Login script");
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.form.login_script)
+                                .code_editor()
+                                .hint_text(
+                                    "alter session set nls_date_format = 'YYYY-MM-DD HH24:MI:SS';",
+                                )
+                                .desired_rows(3)
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+                    });
+                ui.label(
+                    RichText::new("Runs on every new session of this connection.")
+                        .small()
+                        .weak(),
+                );
+            });
 
         if let Some(error) = &self.error {
             ui.add_space(8.0);

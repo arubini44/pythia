@@ -1149,6 +1149,33 @@ impl OruiApp {
 
     fn pump_events(&mut self) {
         for (name, key, event) in self.conns.poll() {
+            let lost = match &event {
+                DbEvent::Failed { error, .. } | DbEvent::Error(error) => error.is_connection_lost(),
+                DbEvent::Meta {
+                    result: Err(error), ..
+                }
+                | DbEvent::TaskDone {
+                    result: Err(error), ..
+                } => error.is_connection_lost(),
+                _ => false,
+            };
+            if lost && let Some(conn) = self.conns.get_mut(&name) {
+                match key {
+                    SessionKey::Doc(id) => {
+                        // The next statement in this window opens a new session.
+                        conn.docs.remove(&id);
+                        self.deliver(
+                            id,
+                            DbEvent::Notice(
+                                "Connection lost. The next statement opens a new session; uncommitted changes were rolled back."
+                                    .into(),
+                            ),
+                        );
+                    }
+                    SessionKey::Main => conn.reconnect_main(&self.notify),
+                }
+                self.log(format!("{name}: connection lost, reconnecting"));
+            }
             match key {
                 SessionKey::Main => self.main_event(&name, event),
                 SessionKey::Doc(id) => match event {

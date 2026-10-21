@@ -46,6 +46,10 @@ pub struct ConnectionProfile {
     pub color: Option<[u8; 3]>,
     /// The password is stored in the OS keychain.
     pub save_password: bool,
+    /// Schema to work in after connecting (`ALTER SESSION SET CURRENT_SCHEMA`).
+    pub default_schema: String,
+    /// SQL run on every new session, e.g. NLS settings.
+    pub login_script: String,
 }
 
 impl ConnectionProfile {

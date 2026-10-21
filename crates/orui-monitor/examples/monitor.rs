@@ -70,6 +70,7 @@ fn main() -> eframe::Result {
         password: pass.into(),
         connect_string: db.into(),
         privilege: Privilege::Normal,
+        init_sql: Vec::new(),
     };
     eframe::run_native(
         "orui monitor",

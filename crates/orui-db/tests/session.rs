@@ -19,6 +19,7 @@ fn params() -> Option<ConnectParams> {
         password: password.into(),
         connect_string: connect_string.into(),
         privilege: Privilege::Normal,
+        init_sql: Vec::new(),
     })
 }
 
@@ -386,4 +387,71 @@ fn rowid_of_wrapped_query() {
     };
     assert_eq!(error.code, Some(1446));
     exec(&mut h, 4, "drop table orui_rowid_t purge");
+}
+
+#[test]
+fn login_script_runs_on_connect() {
+    let Some(mut params) = params() else {
+        return;
+    };
+    params.init_sql = vec!["alter session set nls_date_format = 'YYYY'".into()];
+    let (tx, wake) = mpsc::channel();
+    let session = Session::connect(params, move || {
+        let _ = tx.send(());
+    });
+    let mut h = Harness { session, wake };
+    assert!(matches!(h.next(), DbEvent::Connected(_)));
+    h.session.send(DbRequest::Execute {
+        id: 1,
+        sql: "select to_char(date '2024-06-01') from dual".into(),
+        max_rows: 1,
+        binds: vec![],
+    });
+    assert!(matches!(h.next_result(), DbEvent::QueryStarted { .. }));
+    let DbEvent::Rows { rows, .. } = h.next_result() else {
+        panic!("expected Rows")
+    };
+    assert_eq!(rows[0][0].as_deref(), Some("2024"));
+}
+
+#[test]
+fn killed_session_is_reported_as_lost() {
+    let (Some(mut h), Ok(dba)) = (Harness::connect(), std::env::var("ORUI_TEST_DB_DBA")) else {
+        return;
+    };
+    h.session.send(DbRequest::Execute {
+        id: 1,
+        sql:
+            "select sid || ',' || serial# from v$session where sid = sys_context('USERENV', 'SID')"
+                .into(),
+        max_rows: 1,
+        binds: vec![],
+    });
+    let DbEvent::QueryStarted { .. } = h.next_result() else {
+        panic!("expected rows")
+    };
+    let DbEvent::Rows { rows, .. } = h.next_result() else {
+        panic!("expected Rows")
+    };
+    let sid_serial = rows[0][0].clone().unwrap();
+    let (cred, db) = dba.rsplit_once('@').unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let admin = orui_db::oracle::Connection::connect(user, pw, db).unwrap();
+    admin
+        .execute(
+            &format!("alter system kill session '{sid_serial}' immediate"),
+            &[],
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    h.session.send(DbRequest::Execute {
+        id: 2,
+        sql: "select 1 from dual".into(),
+        max_rows: 1,
+        binds: vec![],
+    });
+    match h.next_result() {
+        DbEvent::Failed { error, .. } => assert!(error.is_connection_lost(), "{error:?}"),
+        other => panic!("expected failure, got {other:?}"),
+    }
 }

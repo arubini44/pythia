@@ -125,7 +125,18 @@ impl Worker {
             open_query: None,
         };
         match worker.on_connect() {
-            Ok(server) => worker.events.send(DbEvent::Connected(server)),
+            Ok(server) => {
+                worker.events.send(DbEvent::Connected(server));
+                for sql in &params.init_sql {
+                    if let Err(e) = worker.conn.execute(sql, &[]) {
+                        let e = DbError::from(e);
+                        worker.events.send(DbEvent::Notice(format!(
+                            "Login script: {e} ({})",
+                            sql.lines().next().unwrap_or_default()
+                        )));
+                    }
+                }
+            }
             Err(e) => worker.events.send(DbEvent::ConnectFailed(e)),
         }
 

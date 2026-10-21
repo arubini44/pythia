@@ -11,6 +11,8 @@ pub struct ConnectParams {
     pub password: String,
     pub connect_string: String,
     pub privilege: Privilege,
+    /// Statements run on every new session (login script, NLS, schema).
+    pub init_sql: Vec<String>,
 }
 
 impl fmt::Debug for ConnectParams {
@@ -215,6 +217,22 @@ impl DbError {
             message: message.into(),
             offset: None,
         }
+    }
+
+    /// The session is gone (network or instance failure, killed session).
+    pub fn is_connection_lost(&self) -> bool {
+        matches!(
+            self.code,
+            Some(28 | 1012 | 2396 | 3113 | 3114 | 3135 | 12537 | 12570)
+        ) || [
+            "DPI-1080",
+            "DPI-1010",
+            "ORA-03113",
+            "ORA-03114",
+            "ORA-03135",
+        ]
+        .iter()
+        .any(|c| self.message.contains(c))
     }
 
     /// True if the Oracle client libraries could not be loaded (DPI-1047).
