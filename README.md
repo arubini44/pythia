@@ -77,6 +77,8 @@ for Linux, Windows and macOS.
   scripts; data compare by key with sync DML.
 - Import CSV/Excel: drop a file, check inferred types (decimal commas,
   date formats), import into a new or existing table with array DML.
+  Per column: trim, date format, SQL expression (`upper(:value)`,
+  constants); bad rows can be skipped and logged to `<file>.bad.csv`.
 
 **Reports**
 - Built-in reports (invalid objects, unindexed foreign keys, largest

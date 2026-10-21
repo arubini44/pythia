@@ -13,6 +13,7 @@ name = "orui"
 path = "src/main.rs"
 
 [dependencies]
+csv = "1"
 regex.workspace = true
 anyhow.workspace = true
 eframe.workspace = true

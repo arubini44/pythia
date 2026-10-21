@@ -325,9 +325,9 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Import from CSV/TSV, XLSX, JSON
 - [x] Preview with detected types; column mapping to target table
 - [x] Create target table from file structure
-- [ ] Transformations: trim, date format, constant values, SQL expressions
+- [x] Transformations: trim, date format, constant values, SQL expressions
 - [x] Batch inserts via array DML, configurable commit interval
-- [ ] Error handling: stop, skip row, log bad rows to file
+- [x] Error handling: stop, skip row, log bad rows to file
 - [ ] Run SQL scripts as import (large `INSERT` scripts)
 - [ ] Optional: SQL*Loader control file generation
 

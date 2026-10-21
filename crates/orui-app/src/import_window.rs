@@ -42,8 +42,87 @@ struct State {
     /// Target column per source column (existing table).
     mapping: Vec<Option<String>>,
     commit: bool,
+    /// Per source column: how values are cleaned up and converted.
+    transforms: Vec<Transform>,
+    /// Insert the good rows and log rejected ones instead of stopping.
+    skip_errors: bool,
     run: Option<Run>,
     message: Option<(bool, String)>,
+}
+
+/// How a source column's values are cleaned up and converted.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Transform {
+    trim: bool,
+    /// Oracle date format, for date columns.
+    date_format: Option<String>,
+    /// SQL expression with `:value` for the converted value, e.g.
+    /// `upper(:value)`; a constant if it doesn't use `:value`.
+    expression: String,
+}
+
+impl Transform {
+    fn for_column(info: &ColumnInfo) -> Self {
+        Self {
+            trim: true,
+            date_format: match &info.kind {
+                import::Kind::Date { oracle_format } => Some((*oracle_format).to_owned()),
+                _ => None,
+            },
+            expression: String::new(),
+        }
+    }
+
+    /// The SQL for bind `:n`.
+    fn bind_expr(&self, n: usize, info: Option<&ColumnInfo>) -> String {
+        let base = match &self.date_format {
+            Some(format) => format!("to_date(:{n}, '{}')", format.replace('\'', "''")),
+            None => import::bind_expr(n, info),
+        };
+        let expression = self.expression.trim();
+        if expression.is_empty() {
+            base
+        } else {
+            replace_value(expression, &base)
+        }
+    }
+
+    fn value(&self, raw: Option<&str>, info: Option<&ColumnInfo>) -> Option<String> {
+        let raw = if self.trim { raw.map(str::trim) } else { raw };
+        import::bind_value(raw.filter(|v| !v.is_empty()), info)
+    }
+}
+
+/// Replaces `:value` (any case, as a whole word) in an expression.
+fn replace_value(expression: &str, with: &str) -> String {
+    let lower = expression.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut pos = 0;
+    while let Some(found) = lower[pos..].find(":value") {
+        let start = pos + found;
+        let end = start + ":value".len();
+        let word_end = lower[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        out.push_str(&expression[pos..start]);
+        out.push_str(if word_end {
+            with
+        } else {
+            &expression[start..end]
+        });
+        pos = end;
+    }
+    out.push_str(&expression[pos..]);
+    out
+}
+
+/// What an import did.
+struct Outcome {
+    inserted: usize,
+    rejected: usize,
+    /// Rejected rows with their errors, if any were skipped.
+    bad_file: Option<PathBuf>,
 }
 
 struct Loaded {
@@ -141,6 +220,10 @@ impl ImportWindow {
             }
         }));
         s.grid = GridState::default();
+        s.transforms = match &s.data {
+            Some(Ok(data)) => data.info.iter().map(Transform::for_column).collect(),
+            _ => Vec::new(),
+        };
         self.auto_map();
     }
 
@@ -180,12 +263,22 @@ impl ImportWindow {
             }
             DbEvent::TaskDone { id, result } if s.run.as_ref().is_some_and(|r| r.id == id) => {
                 s.run = None;
-                s.message = Some(match result.map(|any| any.downcast::<usize>()) {
-                    Ok(Ok(n)) if s.commit => (false, format!("Imported {n} rows and committed")),
-                    Ok(Ok(n)) => (
-                        false,
-                        format!("Imported {n} rows — commit (F10) or roll back (Shift+F10)"),
-                    ),
+                s.message = Some(match result.map(|any| any.downcast::<Outcome>()) {
+                    Ok(Ok(o)) => {
+                        let mut text = format!("Imported {} rows", o.inserted);
+                        if o.rejected > 0 {
+                            text.push_str(&format!(", skipped {} bad rows", o.rejected));
+                            if let Some(file) = &o.bad_file {
+                                text.push_str(&format!(" (see {})", file.display()));
+                            }
+                        }
+                        if s.commit {
+                            text.push_str(" and committed");
+                        } else {
+                            text.push_str(" — commit (F10) or roll back (Shift+F10)");
+                        }
+                        (o.rejected > 0, text)
+                    }
                     Ok(Err(_)) => (true, "unexpected result".into()),
                     Err(e) => (true, e.to_string()),
                 });
@@ -436,6 +529,54 @@ impl ImportWindow {
                     }
                 },
             });
+        egui::CollapsingHeader::new("Column options and errors")
+            .id_salt("import-options")
+            .show(ui, |ui| {
+                egui::Grid::new("import-transforms")
+                    .num_columns(4)
+                    .striped(true)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.strong("Column");
+                        ui.strong("Trim");
+                        ui.strong("Date format");
+                        ui.strong("SQL expression");
+                        ui.end_row();
+                        for (i, header) in data.sheet.headers.iter().enumerate() {
+                            let Some(t) = s.transforms.get_mut(i) else {
+                                continue;
+                            };
+                            ui.label(RichText::new(header).monospace());
+                            ui.checkbox(&mut t.trim, "");
+                            match &mut t.date_format {
+                                Some(format) => {
+                                    ui.add(
+                                        egui::TextEdit::singleline(format)
+                                            .font(egui::TextStyle::Monospace)
+                                            .desired_width(180.0),
+                                    );
+                                }
+                                None => {
+                                    ui.weak("—");
+                                }
+                            }
+                            ui.add(
+                                egui::TextEdit::singleline(&mut t.expression)
+                                    .hint_text("e.g. upper(:value), nvl(:value, 'n/a'), sysdate")
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(300.0),
+                            );
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("On errors");
+                    ui.selectable_value(&mut s.skip_errors, false, "Stop");
+                    ui.selectable_value(&mut s.skip_errors, true, "Skip the row")
+                        .on_hover_text("Bad rows are written to <file>.bad.csv with their errors");
+                });
+            });
         ui.horizontal(|ui| {
             ui.checkbox(&mut s.commit, "Commit when done");
             if let Some(run) = &s.run {
@@ -510,10 +651,12 @@ impl ImportWindow {
         };
         let create = (s.target == TargetTable::New).then(|| create_table_sql(&table, data));
         let names: Vec<String> = pairs.iter().map(|(_, n)| quote_ident(n)).collect();
+        let default = Transform::default();
+        let transform = |i: usize| s.transforms.get(i).unwrap_or(&default);
         let binds: Vec<String> = pairs
             .iter()
             .enumerate()
-            .map(|(n, (i, _))| import::bind_expr(n + 1, data.info.get(*i)))
+            .map(|(n, (i, _))| transform(*i).bind_expr(n + 1, data.info.get(*i)))
             .collect();
         let insert = format!(
             "insert into {} ({}) values ({})",
@@ -529,16 +672,24 @@ impl ImportWindow {
                 pairs
                     .iter()
                     .map(|(i, _)| {
-                        import::bind_value(
-                            row.get(*i).and_then(|v| v.as_deref()),
-                            data.info.get(*i),
-                        )
+                        transform(*i)
+                            .value(row.get(*i).and_then(|v| v.as_deref()), data.info.get(*i))
                     })
                     .collect()
             })
             .collect();
         let progress = Arc::new(AtomicUsize::new(0));
         let commit = s.commit;
+        // Rejected rows go next to the source file.
+        let bad_file = s.skip_errors.then(|| {
+            let path = s.path.clone().unwrap_or_else(|| PathBuf::from("import"));
+            let stem = path
+                .file_stem()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "import".into());
+            path.with_file_name(format!("{stem}.bad.csv"))
+        });
+        let headers: Vec<String> = pairs.iter().map(|(_, n)| n.clone()).collect();
         let id = request_id();
         s.run = Some(Run {
             id,
@@ -547,14 +698,27 @@ impl ImportWindow {
         });
         s.message = None;
         let task = Box::new(move |conn: &Connection| {
-            let n = run_import(conn, create.as_deref(), &insert, &rows, &progress, commit)?;
-            Ok(Box::new(n) as Box<dyn std::any::Any + Send>)
+            let outcome = run_import(
+                conn,
+                create.as_deref(),
+                &insert,
+                &rows,
+                &progress,
+                commit,
+                bad_file.as_deref().map(|f| (f, headers.as_slice())),
+            )?;
+            Ok(Box::new(outcome) as Box<dyn std::any::Any + Send>)
         });
         effects.request(Target::Own, DbRequest::Task { id, task });
         effects
     }
 }
 
+const BATCH: usize = 1000;
+
+/// Inserts `rows` with array DML. With `bad_file` (path, column names), rows
+/// the database rejects are skipped and written there with their errors;
+/// otherwise the first error stops the import.
 fn run_import(
     conn: &Connection,
     create: Option<&str>,
@@ -562,26 +726,83 @@ fn run_import(
     rows: &[Vec<Option<String>>],
     progress: &AtomicUsize,
     commit: bool,
-) -> Result<usize, DbError> {
+    bad_file: Option<(&std::path::Path, &[String])>,
+) -> Result<Outcome, DbError> {
     // Numbers are bound as dot-decimal text.
     conn.execute("alter session set nls_numeric_characters = '.,'", &[])?;
     if let Some(ddl) = create {
         conn.execute(ddl, &[])?;
     }
-    let mut batch = conn.batch(insert, 1000).build()?;
-    for (i, row) in rows.iter().enumerate() {
-        let params: Vec<&dyn orui_db::oracle::sql_type::ToSql> = row
-            .iter()
-            .map(|v| v as &dyn orui_db::oracle::sql_type::ToSql)
-            .collect();
-        batch.append_row(&params).map_err(|e| row_error(e, i))?;
-        progress.store(i + 1, Ordering::Relaxed);
+    let mut builder = conn.batch(insert, BATCH);
+    if bad_file.is_some() {
+        builder.with_batch_errors();
     }
-    batch.execute().map_err(|e| row_error(e, rows.len()))?;
+    let mut batch = builder.build()?;
+    let mut rejected: Vec<(usize, String)> = Vec::new();
+    for (start, chunk) in rows.chunks(BATCH).enumerate().map(|(n, c)| (n * BATCH, c)) {
+        for (offset, row) in chunk.iter().enumerate() {
+            let params: Vec<&dyn orui_db::oracle::sql_type::ToSql> = row
+                .iter()
+                .map(|v| v as &dyn orui_db::oracle::sql_type::ToSql)
+                .collect();
+            batch
+                .append_row(&params)
+                .map_err(|e| row_error(e, start + offset))?;
+        }
+        match batch.execute() {
+            Ok(()) => {}
+            Err(e) if bad_file.is_some() && e.batch_errors().is_some() => {
+                rejected.extend(e.batch_errors().into_iter().flatten().map(|e| {
+                    // The first line says what's wrong; the rest is help text.
+                    let first = e.message().lines().next().unwrap_or_default();
+                    (start + e.offset() as usize, first.trim().to_owned())
+                }));
+            }
+            Err(e) => return Err(row_error(e, start + chunk.len())),
+        }
+        progress.store(start + chunk.len(), Ordering::Relaxed);
+    }
+    let written = match bad_file {
+        Some((path, headers)) if !rejected.is_empty() => {
+            rejected.sort();
+            write_bad_rows(path, headers, rows, &rejected)
+                .map_err(|e| DbError::new(format!("{}: {e}", path.display())))?;
+            Some(path.to_owned())
+        }
+        _ => None,
+    };
     if commit {
         conn.commit()?;
     }
-    Ok(rows.len())
+    Ok(Outcome {
+        inserted: rows.len() - rejected.len(),
+        rejected: rejected.len(),
+        bad_file: written,
+    })
+}
+
+/// Rejected rows as CSV: the values, the 1-based data row and the error.
+fn write_bad_rows(
+    path: &std::path::Path,
+    headers: &[String],
+    rows: &[Vec<Option<String>>],
+    rejected: &[(usize, String)],
+) -> Result<(), orui_data::Error> {
+    let mut writer = csv::Writer::from_path(path).map_err(orui_data::Error::from)?;
+    let mut header: Vec<&str> = headers.iter().map(String::as_str).collect();
+    header.extend(["ROW", "ERROR"]);
+    writer.write_record(&header)?;
+    for (row, error) in rejected {
+        let mut record: Vec<String> = rows[*row]
+            .iter()
+            .map(|v| v.clone().unwrap_or_default())
+            .collect();
+        record.push((row + 1).to_string());
+        record.push(error.clone());
+        writer.write_record(&record)?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 fn row_error(e: orui_db::oracle::Error, row: usize) -> DbError {
@@ -648,4 +869,109 @@ fn is_workbook(path: &Path) -> bool {
             .as_deref(),
         Some("xlsx" | "xls" | "xlsb" | "xlsm" | "ods")
     )
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+
+    #[test]
+    fn expressions_wrap_the_value() {
+        assert_eq!(replace_value("upper(:value)", ":1"), "upper(:1)");
+        assert_eq!(
+            replace_value("nvl(:VALUE, :value2)", ":3"),
+            "nvl(:3, :value2)"
+        );
+        assert_eq!(replace_value("sysdate", ":1"), "sysdate");
+        let t = Transform {
+            trim: true,
+            date_format: Some("DD.MM.YYYY".into()),
+            expression: "trunc(:value, 'MM')".into(),
+        };
+        assert_eq!(
+            t.bind_expr(2, None),
+            "trunc(to_date(:2, 'DD.MM.YYYY'), 'MM')"
+        );
+        assert_eq!(t.value(Some("  x "), None).as_deref(), Some("x"));
+        assert_eq!(t.value(Some("   "), None), None);
+    }
+
+    #[test]
+    fn skips_and_logs_bad_rows() {
+        let Ok(spec) = std::env::var("ORUI_TEST_DB") else {
+            return;
+        };
+        let (cred, db) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        let conn = Connection::connect(user, pw, db).unwrap();
+        let _ = conn.execute("drop table orui_import_bad purge", &[]);
+        conn.execute(
+            "create table orui_import_bad (id number primary key, name varchar2(5))",
+            &[],
+        )
+        .unwrap();
+        let rows: Vec<Vec<Option<String>>> = [
+            ("1", "ann"),
+            ("2", "bob"),
+            ("1", "dup"),
+            ("3", "much too long"),
+            ("4", "eve"),
+        ]
+        .iter()
+        .map(|(id, name)| vec![Some((*id).into()), Some((*name).into())])
+        .collect();
+        let bad = std::env::temp_dir().join(format!("orui-bad-{}.csv", std::process::id()));
+        let headers = ["ID".to_owned(), "NAME".to_owned()];
+        let outcome = run_import(
+            &conn,
+            None,
+            "insert into orui_import_bad (id, name) values (to_number(:1), upper(:2))",
+            &rows,
+            &AtomicUsize::new(0),
+            false,
+            Some((&bad, &headers)),
+        )
+        .unwrap();
+        assert_eq!((outcome.inserted, outcome.rejected), (3, 2));
+        let text = std::fs::read_to_string(&bad).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "ID,NAME,ROW,ERROR");
+        assert!(lines[1].starts_with("1,dup,3,ORA-00001"), "{text}");
+        assert!(
+            lines[2].starts_with("3,much too long,4,\"ORA-12899"),
+            "{text}"
+        );
+        let names: Vec<String> = conn
+            .query_as::<String>("select name from orui_import_bad order by id", &[])
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(names, ["ANN", "BOB", "EVE"]);
+        conn.rollback().unwrap();
+        conn.execute("drop table orui_import_bad purge", &[])
+            .unwrap();
+        std::fs::remove_file(bad).unwrap();
+
+        // Without skipping, the first bad row stops the import.
+        conn.execute(
+            "create table orui_import_bad (id number primary key, name varchar2(5))",
+            &[],
+        )
+        .unwrap();
+        let err = run_import(
+            &conn,
+            None,
+            "insert into orui_import_bad (id, name) values (to_number(:1), :2)",
+            &rows,
+            &AtomicUsize::new(0),
+            false,
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err.message.contains("ORA-00001"), "{err}");
+        conn.rollback().unwrap();
+        conn.execute("drop table orui_import_bad purge", &[])
+            .unwrap();
+    }
 }
