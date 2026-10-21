@@ -852,6 +852,14 @@ impl OruiApp {
                     self.execute(id, command == Command::ExecuteCurrent);
                 }
             }
+            Command::ExecuteWithStatistics => {
+                if let Some(id) = self.focused
+                    && let Some(w) = self.docs.get_mut(&id).and_then(Document::sql_window)
+                {
+                    let effects = w.execute_with_statistics();
+                    self.apply(Some(id), effects);
+                }
+            }
             Command::ExplainPlan => {
                 if let Some(id) = self.focused
                     && let Some(w) = self.docs.get_mut(&id).and_then(Document::sql_window)
@@ -1275,6 +1283,7 @@ impl OruiApp {
                 item(ui, Command::ExecuteAll);
                 item(ui, Command::ExecuteCurrent);
                 item(ui, Command::ExplainPlan);
+                item(ui, Command::ExecuteWithStatistics);
                 item(ui, Command::Cancel);
                 ui.separator();
                 item(ui, Command::Commit);

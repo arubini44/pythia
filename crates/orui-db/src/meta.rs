@@ -573,14 +573,17 @@ fn explain_plan(conn: &Connection, sql: &str) -> Result<MetaResult, DbError> {
         &[],
     )?;
     let rows = conn.query(
-        "select lpad(' ', 2 * depth) || operation || nvl2(options, ' ' || options, '') as operation, \
+        "select id, parent_id, depth, operation || nvl2(options, ' ' || options, '') as operation, \
                 nvl2(object_name, nvl2(object_owner, object_owner || '.', '') || object_name, '') as object, \
-                cost, cardinality as \"ROWS\", bytes, \
+                cost, cardinality as \"ROWS\", bytes, time, \
                 access_predicates as access_pred, filter_predicates as filter_pred \
            from plan_table where statement_id = :1 order by id",
         &[&statement_id],
     )?;
-    let result = table_result(rows, &["COST", "ROWS", "BYTES"]);
+    let result = table_result(
+        rows,
+        &["ID", "PARENT_ID", "DEPTH", "COST", "ROWS", "BYTES", "TIME"],
+    );
     conn.execute(
         "delete from plan_table where statement_id = :1",
         &[&statement_id],

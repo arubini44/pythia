@@ -40,6 +40,7 @@ commands! {
     ExecuteAll => "Session: Execute (selection or all)",
     ExecuteCurrent => "Session: Execute Current Statement",
     ExplainPlan => "Session: Explain Plan",
+    ExecuteWithStatistics => "Session: Run with Statistics (actual plan)",
     Cancel => "Session: Break (cancel execution)",
     Commit => "Session: Commit",
     Rollback => "Session: Rollback",
@@ -121,6 +122,10 @@ impl Keymap {
                     KeyboardShortcut::new(ctrl, Key::Enter),
                 ),
                 (Command::ExplainPlan, KeyboardShortcut::new(none, Key::F5)),
+                (
+                    Command::ExecuteWithStatistics,
+                    KeyboardShortcut::new(ctrl, Key::F5),
+                ),
                 (Command::Cancel, KeyboardShortcut::new(shift, Key::Escape)),
                 (Command::Commit, KeyboardShortcut::new(none, Key::F10)),
                 (Command::Rollback, KeyboardShortcut::new(shift, Key::F10)),

@@ -53,6 +53,8 @@ pub struct RunState {
     pub fetching: Option<u64>,
     pub results: Vec<QueryResult>,
     pub plan: Option<Plan>,
+    /// "Run with statistics": request id and report.
+    pub statistics: Option<(u64, Option<Result<crate::statistics::Report, String>>)>,
     pub messages: Vec<Message>,
     pub output: Vec<String>,
     pub bottom: BottomTab,
@@ -111,8 +113,8 @@ pub struct QueryResult {
 
 pub struct Plan {
     pub id: u64,
-    pub grid: GridState,
-    pub result: Option<Result<TableData, String>>,
+    pub view: crate::plan_view::PlanView,
+    pub result: Option<Result<Vec<crate::plan_view::PlanRow>, String>>,
 }
 
 pub struct Message {
@@ -133,6 +135,7 @@ pub enum Level {
 pub enum BottomTab {
     Result(usize),
     Plan,
+    Statistics,
     #[default]
     Messages,
     Output,
@@ -202,7 +205,14 @@ impl SqlWindow {
     }
 
     pub fn is_running(&self) -> bool {
-        self.state.running.is_some() || self.state.fetching.is_some() || self.state.prompt.is_some()
+        self.state.running.is_some()
+            || self.state.fetching.is_some()
+            || self.state.prompt.is_some()
+            || self
+                .state
+                .statistics
+                .as_ref()
+                .is_some_and(|(_, r)| r.is_none())
     }
 
     pub fn statements(&self, current_only: bool) -> Vec<PendingStatement> {
@@ -309,6 +319,46 @@ impl SqlWindow {
         effects
     }
 
+    /// Runs the current query fetching all rows, then shows the actual plan
+    /// and session statistics.
+    pub fn execute_with_statistics(&mut self) -> Effects {
+        let mut effects = Effects::default();
+        if self.is_running() {
+            return effects;
+        }
+        let Some(stmt) = self.statements(true).into_iter().next() else {
+            return effects;
+        };
+        let first = orui_plsql::tokenize(&stmt.sql)
+            .into_iter()
+            .find(|t| !t.kind.is_trivia())
+            .map(|t| stmt.sql[t.span].to_ascii_uppercase());
+        if !matches!(first.as_deref(), Some("SELECT" | "WITH")) {
+            self.warn("Run with statistics works for queries");
+            self.state.bottom = BottomTab::Messages;
+            return effects;
+        }
+        if !find_binds(&stmt.sql).is_empty() {
+            self.warn("Run with statistics doesn't support bind variables yet; use literals");
+            self.state.bottom = BottomTab::Messages;
+            return effects;
+        }
+        let sql = if self.substitution {
+            substitute(&stmt.sql, &self.defines)
+        } else {
+            stmt.sql
+        };
+        let id = request_id();
+        self.state.statistics = Some((id, None));
+        self.state.bottom = BottomTab::Statistics;
+        let task: orui_db::TaskFn = Box::new(move |conn: &orui_db::oracle::Connection| {
+            let report = crate::statistics::run(conn, &sql)?;
+            Ok(Box::new(report) as Box<dyn std::any::Any + Send>)
+        });
+        effects.request(Target::Own, DbRequest::Task { id, task });
+        effects
+    }
+
     /// Runs `EXPLAIN PLAN` for the current statement (on the main session).
     pub fn explain(&mut self) -> Effects {
         let mut effects = Effects::default();
@@ -323,7 +373,7 @@ impl SqlWindow {
         self.state.plan = Some(Plan {
             id,
             result: None,
-            grid: GridState::default(),
+            view: Default::default(),
         });
         self.state.bottom = BottomTab::Plan;
         let sql = substitute(&stmt.sql, &self.defines);
@@ -808,10 +858,26 @@ impl SqlWindow {
                     self.info(format!("{dropped} remaining statement(s) skipped"));
                 }
             }
+            DbEvent::TaskDone { id, result }
+                if self
+                    .state
+                    .statistics
+                    .as_ref()
+                    .is_some_and(|(s, _)| *s == id) =>
+            {
+                let report = match result.map(|any| any.downcast::<crate::statistics::Report>()) {
+                    Ok(Ok(report)) => Ok(*report),
+                    Ok(Err(_)) => Err("unexpected result".to_owned()),
+                    Err(e) => Err(e.to_string()),
+                };
+                self.state.statistics = Some((id, Some(report)));
+            }
             DbEvent::Meta { id, result } => {
                 if let Some(plan) = self.state.plan.as_mut().filter(|p| p.id == id) {
                     plan.result = Some(match result {
-                        Ok(MetaResult::Table { columns, rows }) => Ok((columns, rows)),
+                        Ok(MetaResult::Table { columns, rows }) => {
+                            Ok(crate::plan_view::rows(&columns, &rows))
+                        }
                         Ok(_) => Err("unexpected result".into()),
                         Err(e) => Err(e.to_string()),
                     });
@@ -902,6 +968,9 @@ impl SqlWindow {
             }
             if state.plan.is_some() {
                 ui.selectable_value(&mut state.bottom, BottomTab::Plan, "Plan");
+            }
+            if state.statistics.is_some() {
+                ui.selectable_value(&mut state.bottom, BottomTab::Statistics, "Statistics");
             }
             let label = match state.messages.iter().map(|m| m.level).max() {
                 Some(Level::Error) => RichText::new("Messages").color(ui.visuals().error_fg_color),
@@ -1081,11 +1150,11 @@ impl SqlWindow {
             }
             BottomTab::Plan => match state.plan.as_mut() {
                 Some(Plan {
-                    result: Some(Ok((columns, rows))),
-                    grid,
+                    result: Some(Ok(rows)),
+                    view,
                     ..
                 }) => {
-                    ResultGrid::new(columns, rows, grid, ("plan", cx.id)).show(ui);
+                    view.ui(ui, rows, egui::Id::new(("plan", cx.id)));
                 }
                 Some(Plan {
                     result: Some(Err(e)),
@@ -1095,6 +1164,18 @@ impl SqlWindow {
                 }
                 _ => {
                     ui.spinner();
+                }
+            },
+            BottomTab::Statistics => match &state.statistics {
+                Some((_, Some(Ok(report)))) => statistics_ui(ui, report),
+                Some((_, Some(Err(e)))) => {
+                    ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                }
+                _ => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Running and fetching all rows…");
+                    });
                 }
             },
             BottomTab::Result(_) | BottomTab::Messages => {
@@ -1261,6 +1342,58 @@ impl SqlWindow {
             fmt_duration(r.elapsed)
         ))
     }
+}
+
+/// Session statistics next to the actual execution plan.
+fn statistics_ui(ui: &mut Ui, report: &crate::statistics::Report) {
+    ui.label(
+        RichText::new(format!(
+            "{} rows fetched in {}",
+            report.rows,
+            fmt_duration(report.elapsed)
+        ))
+        .strong(),
+    );
+    ui.add_space(4.0);
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(300.0);
+            match &report.stats {
+                Ok(stats) => {
+                    egui::Grid::new("stats")
+                        .striped(true)
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            for (name, value) in stats {
+                                ui.label(name);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(RichText::new(value.to_string()).monospace());
+                                    },
+                                );
+                                ui.end_row();
+                            }
+                        });
+                }
+                Err(e) => {
+                    ui.colored_label(ui.visuals().warn_fg_color, e.as_str());
+                }
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::both()
+            .id_salt("xplan")
+            .auto_shrink(false)
+            .show(ui, |ui| match &report.plan {
+                Ok(plan) => {
+                    ui.add(egui::Label::new(RichText::new(plan).monospace()).extend());
+                }
+                Err(e) => {
+                    ui.colored_label(ui.visuals().warn_fg_color, e.as_str());
+                }
+            });
+    });
 }
 
 const DESCRIBE_SQL: &str = "select column_name as \"Name\", \

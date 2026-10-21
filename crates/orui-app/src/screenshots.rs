@@ -207,6 +207,19 @@ fn screenshots() {
             run: true,
         });
         wait_until(&mut h, "query", |app| !app.test_focused_busy());
+        if dark {
+            h.state_mut()
+                .test_command(crate::commands::Command::ExplainPlan);
+            wait_until(&mut h, "plan", |app| {
+                app.test_sql_window_ref()
+                    .is_some_and(|w| w.state.plan.as_ref().is_some_and(|p| p.result.is_some()))
+            });
+            save(&mut h, "13-plan-dark");
+            h.state_mut()
+                .test_command(crate::commands::Command::ExecuteWithStatistics);
+            wait_until(&mut h, "statistics", |app| !app.test_focused_busy());
+            save(&mut h, "14-statistics-dark");
+        }
         h.state_mut()
             .test_expand_browser(&[orui_db::ObjectType::Table, orui_db::ObjectType::Package]);
         wait_until(&mut h, "browser", |app| !app.test_browser_loading());

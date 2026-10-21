@@ -16,6 +16,7 @@ mod icons_ext;
 mod import_window;
 mod monitor_window;
 mod object_view;
+mod plan_view;
 mod program_window;
 #[cfg(test)]
 mod screenshots;
@@ -23,6 +24,7 @@ mod secrets;
 mod settings_dialog;
 mod source_search;
 mod sql_window;
+mod statistics;
 mod test_script;
 mod theme;
 
