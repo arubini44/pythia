@@ -1,0 +1,128 @@
+name: Release
+
+# Builds packages for every platform and publishes them as a GitHub release
+# when a version tag is pushed:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PACKAGER_VERSION: "0.11.8"
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            formats: deb,appimage
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            formats: wix,nsis
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            formats: app,dmg
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            formats: app,dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cargo-packager
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-packager@${{ env.CARGO_PACKAGER_VERSION }}
+
+      # AppImage tooling runs through FUSE on the runner.
+      - name: Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfuse2
+
+      - name: Build packages
+        shell: bash
+        run: |
+          cargo packager --release -p orui-app \
+            --target ${{ matrix.target }} \
+            --formats ${{ matrix.formats }} \
+            --out-dir dist
+        env:
+          # Optional signing material; see docs/RELEASING.md.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Plain binary archive
+        shell: bash
+        run: |
+          bin=orui
+          [ "${{ runner.os }}" = "Windows" ] && bin=orui.exe
+          mkdir -p dist/archive
+          cp "target/${{ matrix.target }}/release/$bin" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE dist/archive/
+          cd dist/archive
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "../orui-${{ github.ref_name }}-${{ matrix.name }}.zip" .
+          else
+            tar czf "../orui-${{ github.ref_name }}-${{ matrix.name }}.tar.gz" .
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orui-${{ matrix.name }}
+          path: |
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.msi
+            dist/*-setup.exe
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: true
