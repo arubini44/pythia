@@ -290,6 +290,12 @@ fn screenshots() {
                 "{hits:?}"
             );
             save(&mut h, "15-data-search-dark");
+            h.state_mut().test_open(OpenRequest::EditTable {
+                connection: "orui@FREEPDB1".into(),
+                object: object("DEMO_EMPLOYEES", orui_db::ObjectType::Table),
+            });
+            wait_until(&mut h, "table definition", |app| !app.test_focused_busy());
+            save(&mut h, "16-table-editor-dark");
         }
     }
 }

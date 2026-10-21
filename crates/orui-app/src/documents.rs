@@ -112,6 +112,11 @@ pub enum OpenRequest {
         connection: String,
         object: ObjectRef,
     },
+    /// Edit a table's structure.
+    EditTable {
+        connection: String,
+        object: ObjectRef,
+    },
     /// Open a program window and put the cursor on a 1-based line.
     ProgramAt {
         connection: String,
@@ -147,6 +152,7 @@ pub enum DocKind {
     Search(crate::source_search::SourceSearch),
     Import(crate::import_window::ImportWindow),
     DataSearch(crate::data_search::DataSearch),
+    TableEditor(crate::table_editor::TableEditor),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -185,6 +191,7 @@ impl Document {
             DocKind::Search(s) => s.title(),
             DocKind::Import(i) => i.title(),
             DocKind::DataSearch(d) => d.title(),
+            DocKind::TableEditor(t) => t.title(),
         }
     }
 
@@ -208,6 +215,7 @@ impl Document {
             DocKind::Search(s) => s.is_busy(),
             DocKind::Import(i) => i.is_busy(),
             DocKind::DataSearch(d) => d.is_busy(),
+            DocKind::TableEditor(t) => t.is_busy(),
         }
     }
 
@@ -215,6 +223,7 @@ impl Document {
         match &self.kind {
             DocKind::Program(w) => w.is_dirty(),
             DocKind::Sql(w) => w.is_dirty(),
+            DocKind::TableEditor(t) => t.is_dirty(),
             _ => false,
         }
     }
@@ -237,6 +246,7 @@ impl Document {
             DocKind::Search(s) => s.on_event(event),
             DocKind::Import(i) => i.on_event(event),
             DocKind::DataSearch(d) => d.on_event(event),
+            DocKind::TableEditor(t) => t.on_event(event),
         }
     }
 
@@ -250,6 +260,7 @@ impl Document {
             DocKind::Search(s) => s.ui(ui, cx),
             DocKind::Import(i) => i.ui(ui, cx),
             DocKind::DataSearch(d) => d.ui(ui, cx),
+            DocKind::TableEditor(t) => t.ui(ui, cx),
         }
     }
 
@@ -259,6 +270,7 @@ impl Document {
             DocKind::Sql(_) => Effects::default(),
             DocKind::Program(w) => w.load(),
             DocKind::Object(v) => v.load(),
+            DocKind::TableEditor(t) => t.load(),
             _ => Effects::default(),
         }
     }

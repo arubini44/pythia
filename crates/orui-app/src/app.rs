@@ -344,6 +344,12 @@ impl OruiApp {
                 }
             }
             OpenRequest::ConnectDialog => self.connect_dialog.show(self.last_profile.as_ref()),
+            OpenRequest::EditTable { connection, object } => {
+                self.add_doc(
+                    Some(connection),
+                    DocKind::TableEditor(crate::table_editor::TableEditor::new(object)),
+                );
+            }
             OpenRequest::InsertText { text } => {
                 match self
                     .focused

@@ -738,6 +738,9 @@ impl Browser {
             item(ui, "Test…", Action::Test(object.clone(), None));
         }
         item(ui, "Describe", Action::Describe(object.clone()));
+        if t == ObjectType::Table {
+            item(ui, "Edit table…", Action::EditTable(object.clone()));
+        }
         let mut generate = None;
         if t.has_data() {
             ui.menu_button("Generate", |ui| {
@@ -818,6 +821,9 @@ impl Browser {
             Action::CopyName(o) => ctx.copy_text(o.name.clone()),
             Action::CopyQualified(o) => ctx.copy_text(o.qualified()),
             Action::Drop(o) => self.confirm_drop = Some(o),
+            Action::EditTable(object) => effects
+                .open
+                .push(OpenRequest::EditTable { connection, object }),
             Action::Generate(object, kind) => {
                 let id = request_id();
                 let query = MetaQuery::Columns {
@@ -900,6 +906,7 @@ enum Action {
     Drop(ObjectRef),
     Test(ObjectRef, Option<String>),
     Generate(ObjectRef, Template),
+    EditTable(ObjectRef),
 }
 
 /// Statements generated from a table's columns.
