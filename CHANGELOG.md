@@ -6,6 +6,52 @@ All notable changes to orui are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+**Editor**
+- Code folding, numbered bookmarks and snippets with placeholders; folds
+  and bookmarks are saved with the workspace.
+- Rename a local symbol in place (Shift+F6).
+- SQL\*Plus commands get their own highlighting.
+- Files keep their encoding (UTF-8, UTF-8 BOM, Windows-1252) and line
+  endings.
+- Configurable keyboard shortcuts (Settings → Keyboard) and a code font
+  from a font file.
+
+**Results**
+- Bar and line charts for any result.
+- Foreign key navigation: open a row's parent or child rows.
+- Hide columns; paste Excel ranges into editable results; edit long text
+  and dates (with a calendar) in a dialog.
+- Execute a query straight into a file (CSV, TSV, JSON, INSERT, Markdown)
+  with progress and cancel.
+
+**Tools**
+- Project panel: folders under git with status, diff with the last commit
+  or with the database, schema export to one file per object, deployment
+  of changed files.
+- Profiler (DBMS_HPROF) for blocks and calls.
+- Scheduler jobs window: run, stop, enable, disable, drop, run history.
+- Form editors for sequences, views, synonyms, indexes and grants.
+- Export tables tool with a WHERE per table, DDL, delimiter and NULL text.
+- Import: per-column trim, date format and SQL expressions; skip and log
+  bad rows.
+- Saved user reports with parameters.
+- Find in source searches views and job actions and filters by kind and
+  name; data search finds columns by name.
+- Object browser: favorites, recently opened objects, filters for invalid
+  or recently changed objects, indexes/constraints/triggers/referencing
+  tables under tables, drag names into editors.
+- Debugger: watches, values on hover, conditional and hit-count
+  breakpoints, enabling/disabling breakpoints, break on exceptions.
+- Program windows: Update spec copies changed signatures from the body.
+
+### Fixed
+- DBMS_OUTPUT of a debugged block reaches the Output tab.
+- Light theme: text fields in dialogs were white on white.
+- ORA-01805 (time zone regions with Instant Client Basic Light) is
+  explained.
+
 ## [0.1.0] - 2026-10-22
 
 First release.
