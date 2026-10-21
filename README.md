@@ -70,21 +70,53 @@ for Linux, Windows and macOS.
   marked red and ask before commit; read-only connections; passwords live
   in the OS keychain.
 
-## Building and running
+## Installing
 
-Requirements: Rust (stable), and the [Oracle Instant
-Client](https://www.oracle.com/database/technologies/instant-client.html)
-(Basic or Basic Light) at runtime.
+Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
+macOS (`.dmg`) are attached to each [GitHub
+release](https://github.com/ortic/orui/releases).
+
+orui talks to Oracle through the **Oracle Instant Client**, which Oracle's
+license doesn't allow us to bundle. Install it once:
+
+1. Download *Basic* or *Basic Light* for your platform from
+   <https://www.oracle.com/database/technologies/instant-client/downloads.html>.
+2. Unpack it, e.g. to `/opt/oracle/instantclient_23` or `C:\oracle\instantclient_23`.
+3. Make it findable:
+   - **Linux:** `sudo apt install libaio1t64` (or `libaio1` on older
+     distributions), then either set `LD_LIBRARY_PATH=/opt/oracle/instantclient_23`
+     or register it once with
+     `echo /opt/oracle/instantclient_23 | sudo tee /etc/ld.so.conf.d/oracle.conf && sudo ldconfig`.
+   - **Windows:** add the directory to `PATH` (System Properties → Environment
+     Variables) and install the Visual C++ redistributable it lists.
+   - **macOS:** set `DYLD_LIBRARY_PATH` or copy the libraries next to the app
+     as described in Oracle's instructions.
+4. Optional: put your `tnsnames.ora` into `network/admin` inside the Instant
+   Client directory or point `TNS_ADMIN` at it; orui then offers the aliases
+   when connecting.
+
+If the client can't be loaded, orui says so when you connect and shows these
+steps.
+
+## Building from source
+
+Requirements: Rust (stable) and the Instant Client as above.
 
 ```sh
 cargo build --release
-# Linux: point the loader at Instant Client
 LD_LIBRARY_PATH=/path/to/instantclient ./target/release/orui
 ```
 
-On Windows put the Instant Client directory on `PATH`, on macOS on
-`DYLD_LIBRARY_PATH`. orui explains what's missing if it can't load the
-client.
+Packages are built with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager)
+(`cargo install cargo-packager --locked`):
+
+```sh
+cargo packager --release -p orui-app            # all formats of this platform
+cargo packager --release -p orui-app -f deb     # just one
+```
+
+The output lands in `target/packages`. Releases are built by
+`.github/workflows/release.yml` when a `v*` tag is pushed.
 
 ## Development
 

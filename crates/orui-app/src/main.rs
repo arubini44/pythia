@@ -59,7 +59,8 @@ fn run(renderer: eframe::Renderer, paths: Option<Paths>) -> eframe::Result {
             .with_title("orui")
             .with_app_id("orui")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([640.0, 400.0]),
+            .with_min_inner_size([640.0, 400.0])
+            .with_icon(window_icon()),
         persistence_path: paths.as_ref().map(|p| p.data_dir.join("workspace.ron")),
         ..Default::default()
     };
@@ -68,6 +69,12 @@ fn run(renderer: eframe::Renderer, paths: Option<Paths>) -> eframe::Result {
         options,
         Box::new(move |cc| Ok(Box::new(app::OruiApp::new(cc, paths)))),
     )
+}
+
+/// The application icon, embedded at build time.
+fn window_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon/orui-256.png"))
+        .expect("embedded icon is a valid PNG")
 }
 
 /// Logs to stderr and to `<data dir>/logs/orui.log`. `RUST_LOG` overrides the filter.

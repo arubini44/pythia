@@ -28,9 +28,11 @@ use crate::{secrets, theme};
 use orui_ui::icons::{Icon, icon_label};
 
 const WORKSPACE_KEY: &str = "orui-workspace-v2";
-const MISSING_CLIENT_HINT: &str = "Oracle Instant Client could not be loaded. Install it from \
-     oracle.com and put its directory on LD_LIBRARY_PATH (Linux), PATH (Windows) or \
-     DYLD_LIBRARY_PATH (macOS).";
+const MISSING_CLIENT_HINT: &str = "Oracle Instant Client could not be loaded. Download the \
+     Basic or Basic Light package from \
+     https://www.oracle.com/database/technologies/instant-client/downloads.html, unpack it and put \
+     its directory on LD_LIBRARY_PATH (Linux), PATH (Windows) or DYLD_LIBRARY_PATH (macOS). On \
+     Linux it also needs libaio.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileAction {

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.ortic.orui</id>
+  <name>orui</name>
+  <summary>Fast, native IDE for Oracle SQL and PL/SQL</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="com.ortic">
+    <name>Remo Laubacher</name>
+  </developer>
+  <description>
+    <p>
+      orui covers the daily work of an Oracle developer in one responsive,
+      keyboard-first application: writing and running SQL, editing and
+      compiling PL/SQL, debugging, browsing objects, editing data, comparing
+      schemas and monitoring sessions.
+    </p>
+    <ul>
+      <li>Code editor with context-aware completion and navigation</li>
+      <li>Result grids with in-place editing and export to CSV, Excel and more</li>
+      <li>PL/SQL debugger with breakpoints, stepping and variables</li>
+      <li>Session monitoring with a blocking tree, AWR/ASH and a trace analyzer</li>
+      <li>Schema and data compare with sync scripts</li>
+    </ul>
+    <p>Requires the Oracle Instant Client, which is installed separately.</p>
+  </description>
+  <launchable type="desktop-id">orui.desktop</launchable>
+  <url type="homepage">https://github.com/ortic/orui</url>
+  <categories>
+    <category>Development</category>
+    <category>Database</category>
+  </categories>
+  <provides>
+    <binary>orui</binary>
+  </provides>
+  <screenshots>
+    <screenshot type="default">
+      <caption>SQL window with object browser and result grid</caption>
+      <image>https://raw.githubusercontent.com/ortic/orui/master/docs/screenshots/sql-window.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-22"/>
+  </releases>
+</component>
