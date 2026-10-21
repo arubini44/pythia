@@ -2416,6 +2416,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "orui-lsp-core"
+version = "0.1.0"
+dependencies = [
+ "insta",
+ "orui-plsql",
+]
+
+[[package]]
 name = "orui-plsql"
 version = "0.1.0"
 dependencies = [

@@ -43,7 +43,7 @@ pub fn parse_tokens(src: &str, tokens: &[Token]) -> Ast {
         let next_start = statements.get(i + 1).map_or(src.len(), |s| s.range.start);
         let first = significant.partition_point(|t| t.span.start < stmt.range.start);
         let last = significant.partition_point(|t| t.span.end <= stmt.range.end);
-        let extent_end = extent_end(src, &significant, stmt, last, next_start);
+        let extent_end = extent_end(src, &significant, last, next_start);
         let mut parser = Parser {
             src,
             toks: &significant[..last.max(first)],
@@ -65,16 +65,7 @@ pub fn parse_tokens(src: &str, tokens: &[Token]) -> Ast {
 
 /// A statement's extent ends at its terminator (`;` or `/`) if one follows,
 /// else where the next statement starts.
-fn extent_end(
-    src: &str,
-    sig: &[Token],
-    stmt: &splitter::Statement,
-    last: usize,
-    next_start: usize,
-) -> usize {
-    if src[..stmt.range.end].ends_with(';') && stmt.kind != SplitKind::Sql {
-        return stmt.range.end;
-    }
+fn extent_end(src: &str, sig: &[Token], last: usize, next_start: usize) -> usize {
     match sig.get(last) {
         Some(t) if t.span.start < next_start && matches!(&src[t.span.clone()], ";" | "/") => {
             t.span.start
@@ -143,7 +134,7 @@ fn closed_q_string(text: &str) -> bool {
         c => c,
     };
     let inner = &rest[open.len_utf8()..];
-    inner.len() >= close.len_utf8() + 1
+    inner.len() > close.len_utf8()
         && inner.ends_with('\'')
         && inner[..inner.len() - 1].ends_with(close)
 }

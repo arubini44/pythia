@@ -11,6 +11,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 orui-config = { path = "crates/orui-config" }
 orui-db = { path = "crates/orui-db" }
+orui-lsp-core = { path = "crates/orui-lsp-core" }
 orui-plsql = { path = "crates/orui-plsql" }
 orui-ui = { path = "crates/orui-ui" }
 

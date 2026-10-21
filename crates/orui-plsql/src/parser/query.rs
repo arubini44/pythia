@@ -304,10 +304,11 @@ impl Parser<'_> {
                 item_begin = self.pos;
                 continue;
             }
-            if clause == Clause::From && case_depth == 0 {
-                if self.from_item(q, scope, &mut expect_table) {
-                    continue;
-                }
+            if clause == Clause::From
+                && case_depth == 0
+                && self.table_ref(q, scope, &mut expect_table)
+            {
+                continue;
             }
             if self.is_punct(0, "(") {
                 if self.is_any(1, &["SELECT", "WITH"]) {
@@ -391,7 +392,7 @@ impl Parser<'_> {
 
     /// Handles table references in a FROM clause. Returns true if it consumed
     /// tokens.
-    fn from_item(&mut self, q: QueryId, scope: ScopeId, expect_table: &mut bool) -> bool {
+    fn table_ref(&mut self, q: QueryId, scope: ScopeId, expect_table: &mut bool) -> bool {
         if *expect_table {
             let start = self.start();
             if self.is_punct(0, "(") && self.is_any(1, &["SELECT", "WITH"]) {
