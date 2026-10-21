@@ -631,3 +631,58 @@ fn deployment_script() {
     assert_eq!(w.state.results[0].rows[0][0].as_deref(), Some("2"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Compiling a package body that someone else changed in the meantime asks
+/// before overwriting.
+#[test]
+fn compile_conflict() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let body = ObjectRef {
+        owner: "ORUI".into(),
+        name: "DEMO_PKG".into(),
+        object_type: orui_db::ObjectType::PackageBody,
+    };
+    h.state_mut().test_open(OpenRequest::Program {
+        connection: "orui@FREEPDB1".into(),
+        object: body.clone(),
+    });
+    wait_until(&mut h, "source", |app| !app.test_focused_busy());
+    let program = h.state().test_focused();
+    let source = h.state_mut().test_program().active_source();
+
+    // Someone else recompiles the body a moment later.
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let sql = source
+        .trim_end()
+        .trim_end_matches('/')
+        .trim_end()
+        .to_owned();
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: format!("{}\n/\n", sql.replacen("end demo_pkg;", "  -- changed by someone else\nend demo_pkg;", 1)),
+        run: true,
+    });
+    wait_until(&mut h, "other compile", |app| !app.test_focused_busy());
+    h.state_mut().test_close_focused();
+    h.state_mut().test_focus(program);
+
+    let effects = h.state_mut().test_program().compile(false);
+    h.state_mut().test_apply_focused(effects);
+    wait_until(&mut h, "check", |app| !app.test_focused_busy());
+    assert!(h.state_mut().test_program().has_conflict());
+    save(&mut h, "17-compile-conflict-dark");
+
+    let effects = h.state_mut().test_program().overwrite();
+    h.state_mut().test_apply_focused(effects);
+    wait_until(&mut h, "compile", |app| !app.test_focused_busy());
+    let message = h.state_mut().test_program().message();
+    assert!(
+        matches!(&message, Some((false, m)) if m.contains("compiled")),
+        "{message:?}"
+    );
+}

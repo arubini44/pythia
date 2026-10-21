@@ -2108,6 +2108,18 @@ impl OruiApp {
         self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, text)));
     }
 
+    pub fn test_program(&mut self) -> &mut ProgramWindow {
+        let id = self.focused.expect("focused");
+        match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+            Some(DocKind::Program(w)) => w,
+            _ => panic!("not a program window"),
+        }
+    }
+
+    pub fn test_apply_focused(&mut self, effects: Effects) {
+        self.apply(self.focused, effects);
+    }
+
     pub fn test_command(&mut self, command: Command) {
         let ctx = self.notify.0.clone();
         self.run_command(&ctx, command);

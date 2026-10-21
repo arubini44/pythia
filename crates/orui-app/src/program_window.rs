@@ -47,6 +47,22 @@ struct State {
     message: Option<(bool, String)>,
     /// Line to show once the part's source has loaded: (part, line).
     pending_goto: Option<(usize, usize)>,
+    /// LAST_DDL_TIME of each part when loaded or last compiled here.
+    ddl_times: HashMap<usize, Option<String>>,
+    /// Requests reading LAST_DDL_TIME: id → (part, purpose).
+    ddl_requests: HashMap<u64, (usize, DdlCheck)>,
+    /// The part was changed in the database by someone else: (part, time).
+    conflict: Option<(usize, String)>,
+    /// Concurrent-change checks still running before a compile.
+    checks_pending: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DdlCheck {
+    /// Remember the time (after load or compile).
+    Remember,
+    /// Compare before compiling.
+    BeforeCompile,
 }
 
 impl ProgramWindow {
@@ -135,7 +151,9 @@ impl ProgramWindow {
     }
 
     pub fn is_busy(&self) -> bool {
-        !self.state.loading.is_empty() || !self.state.compiling.is_empty()
+        !self.state.loading.is_empty()
+            || !self.state.compiling.is_empty()
+            || self.state.checks_pending > 0
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -153,6 +171,10 @@ impl ProgramWindow {
         let mut effects = Effects::default();
         if self.is_dirty() {
             return effects;
+        }
+        self.state.conflict = None;
+        for i in 0..self.parts.len() {
+            effects.extend(self.ddl_time(i, DdlCheck::Remember));
         }
         for (i, part) in self.parts.iter().enumerate() {
             let id = request_id();
@@ -183,10 +205,66 @@ impl ProgramWindow {
             vec![self.active]
         };
         self.state.message = None;
-        self.compile_next()
+        self.state.conflict = None;
+        // Check every part for changes by others before compiling anything
+        // (compiling the spec touches the body's DDL time).
+        let known: Vec<usize> = self
+            .state
+            .compile_queue
+            .iter()
+            .copied()
+            .filter(|i| self.state.ddl_times.get(i).is_some_and(Option::is_some))
+            .collect();
+        if known.is_empty() {
+            return self.compile_part();
+        }
+        let mut effects = Effects::default();
+        self.state.checks_pending = known.len();
+        for part in known {
+            effects.extend(self.ddl_time(part, DdlCheck::BeforeCompile));
+        }
+        effects
     }
 
-    fn compile_next(&mut self) -> Effects {
+    #[cfg(test)]
+    pub fn has_conflict(&self) -> bool {
+        self.state.conflict.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn message(&self) -> Option<(bool, String)> {
+        self.state.message.clone()
+    }
+
+    /// Compiles despite a detected concurrent change.
+    pub fn overwrite(&mut self) -> Effects {
+        self.state.conflict = None;
+        self.compile_part()
+    }
+
+    /// Reads the part's LAST_DDL_TIME from the database.
+    fn ddl_time(&mut self, part: usize, check: DdlCheck) -> Effects {
+        let mut effects = Effects::default();
+        let (owner, name) = (self.object.owner.clone(), self.object.name.clone());
+        let object_type = self.parts[part].object_type.dictionary_name();
+        let id = request_id();
+        self.state.ddl_requests.insert(id, (part, check));
+        let task: orui_db::TaskFn = Box::new(move |conn: &orui_db::oracle::Connection| {
+            let time = conn
+                .query_row_as::<Option<String>>(
+                    "select max(to_char(last_ddl_time, 'YYYY-MM-DD HH24:MI:SS')) from all_objects \
+                      where owner = :1 and object_name = :2 and object_type = :3",
+                    &[&owner, &name, &object_type],
+                )
+                .map_err(orui_db::DbError::from)?;
+            Ok(Box::new(time) as Box<dyn std::any::Any + Send>)
+        });
+        effects.request(Target::Main, DbRequest::Task { id, task });
+        effects
+    }
+
+    /// Compiles the next queued part without checking.
+    fn compile_part(&mut self) -> Effects {
         let mut effects = Effects::default();
         while let Some(i) = self.state.compile_queue.pop() {
             let sql = runnable(self.parts[i].editor.text());
@@ -210,6 +288,34 @@ impl ProgramWindow {
     }
 
     pub fn on_event(&mut self, event: DbEvent) -> Effects {
+        if let DbEvent::TaskDone { id, result } = &event
+            && let Some((part, check)) = self.state.ddl_requests.remove(id)
+        {
+            let now: Option<String> = match result {
+                Ok(any) => any.downcast_ref::<Option<String>>().cloned().flatten(),
+                Err(_) => None,
+            };
+            match check {
+                DdlCheck::Remember => {
+                    self.state.ddl_times.insert(part, now);
+                }
+                DdlCheck::BeforeCompile => {
+                    self.state.checks_pending = self.state.checks_pending.saturating_sub(1);
+                    let known = self.state.ddl_times.get(&part).cloned().flatten();
+                    if let (Some(known), Some(now)) = (known, now)
+                        && now > known
+                        && self.state.conflict.is_none()
+                    {
+                        self.active = part;
+                        self.state.conflict = Some((part, now));
+                    }
+                    if self.state.checks_pending == 0 && self.state.conflict.is_none() {
+                        return self.compile_part();
+                    }
+                }
+            }
+            return Effects::default();
+        }
         match event {
             DbEvent::Meta { id, result } => {
                 if let Some(i) = self.state.loading.remove(&id) {
@@ -248,7 +354,9 @@ impl ProgramWindow {
                         self.active = i;
                         self.state.compile_queue.clear();
                     }
-                    return self.compile_next();
+                    let mut effects = self.ddl_time(i, DdlCheck::Remember);
+                    effects.extend(self.compile_part());
+                    return effects;
                 }
             }
             DbEvent::Failed { id, error, .. } => {
@@ -348,6 +456,41 @@ impl ProgramWindow {
             }
         });
 
+        if let Some((conflicted, time)) = self.state.conflict.clone() {
+            let what = match self.parts[conflicted].object_type {
+                ObjectType::PackageBody | ObjectType::TypeBody => "body",
+                ObjectType::Package | ObjectType::Type => "specification",
+                _ => "source",
+            };
+            let warn = ui.visuals().warn_fg_color;
+            egui::Frame::new().fill(warn.gamma_multiply(0.15)).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(orui_ui::icons::Icon::Warning.image(ui));
+                    ui.label(
+                        RichText::new(format!(
+                            "The {what} was changed in the database at {time}, after you opened it. Compiling would overwrite those changes."
+                        ))
+                        .color(warn),
+                    );
+                    if ui.button("Overwrite").clicked() {
+                        effects.extend(self.overwrite());
+                    }
+                    if ui.button("Reload from database").on_hover_text("Discards your changes to this part").clicked() {
+                        self.state.conflict = None;
+                        self.state.compile_queue.clear();
+                        for part in &mut self.parts {
+                            part.saved = part.editor.text().to_owned();
+                        }
+                        effects.extend(self.load());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.state.conflict = None;
+                        self.state.compile_queue.clear();
+                    }
+                });
+            });
+            ui.add_space(4.0);
+        }
         let Some(part) = self.parts.get_mut(self.active) else {
             return effects;
         };
