@@ -1,0 +1,937 @@
+//! Painting and input handling for [`CodeEditor`].
+
+use std::ops::Range;
+
+use egui::text::{LayoutJob, TextFormat};
+use egui::{
+    Color32, CursorIcon, Event, EventFilter, FontId, ImeEvent, Key, Modifiers, Pos2, Rect, Sense,
+    Shape, Stroke, Ui, pos2, vec2,
+};
+use orui_plsql::TokenKind;
+
+use super::find::FindAction;
+use super::highlight::lex_line;
+use super::matching::pair_at;
+use super::selection::Selection;
+use super::text::{col_from_visual, line_end, line_start, line_text, pos_of, visual_col};
+use super::{CodeEditor, Drag, EditorConfig, EditorOutput, MarkerKind};
+use crate::editor::SyntaxTheme;
+
+/// Editor chrome colors, derived from the egui theme.
+struct Palette {
+    text: Color32,
+    bg: Color32,
+    gutter_bg: Color32,
+    gutter_line: Color32,
+    line_number: Color32,
+    line_number_current: Color32,
+    current_line: Color32,
+    selection: Color32,
+    selection_inactive: Color32,
+    find_match: Color32,
+    find_current: Color32,
+    pair: Color32,
+    caret: Color32,
+    whitespace: Color32,
+    error: Color32,
+    warning: Color32,
+    breakpoint: Color32,
+    bookmark: Color32,
+    execution: Color32,
+    execution_line: Color32,
+}
+
+impl Palette {
+    fn new(v: &egui::Visuals) -> Self {
+        let dark = v.dark_mode;
+        let selection = v.selection.bg_fill;
+        Self {
+            text: v.text_color(),
+            bg: v.extreme_bg_color,
+            gutter_bg: v.extreme_bg_color,
+            gutter_line: v.widgets.noninteractive.bg_stroke.color,
+            line_number: v.weak_text_color().gamma_multiply(0.8),
+            line_number_current: v.text_color(),
+            current_line: if dark {
+                Color32::from_white_alpha(9)
+            } else {
+                Color32::from_black_alpha(9)
+            },
+            selection,
+            selection_inactive: selection.gamma_multiply(0.45),
+            find_match: Color32::from_rgba_unmultiplied(255, 170, 0, if dark { 50 } else { 70 }),
+            find_current: Color32::from_rgba_unmultiplied(
+                255,
+                150,
+                0,
+                if dark { 130 } else { 150 },
+            ),
+            pair: if dark {
+                Color32::from_white_alpha(30)
+            } else {
+                Color32::from_black_alpha(25)
+            },
+            caret: if dark {
+                Color32::from_rgb(0xae, 0xaf, 0xad)
+            } else {
+                Color32::from_rgb(0x10, 0x10, 0x10)
+            },
+            whitespace: v.weak_text_color().gamma_multiply(0.5),
+            error: v.error_fg_color,
+            warning: v.warn_fg_color,
+            breakpoint: Color32::from_rgb(0xe5, 0x39, 0x35),
+            bookmark: Color32::from_rgb(0x42, 0x85, 0xf4),
+            execution: Color32::from_rgb(0xf5, 0xc5, 0x18),
+            execution_line: Color32::from_rgba_unmultiplied(
+                245,
+                197,
+                24,
+                if dark { 38 } else { 60 },
+            ),
+        }
+    }
+}
+
+/// Geometry of the current frame. All rects in screen coordinates.
+struct Layout {
+    /// Top-left of the (virtual) content.
+    origin: Pos2,
+    /// Visible part of the content, relative to `origin`.
+    viewport: Rect,
+    row_h: f32,
+    char_w: f32,
+    gutter_w: f32,
+    marker_w: f32,
+}
+
+impl Layout {
+    fn text_x(&self) -> f32 {
+        self.origin.x + self.gutter_w
+    }
+
+    fn row_y(&self, line: usize) -> f32 {
+        self.origin.y + line as f32 * self.row_h
+    }
+
+    fn gutter_left(&self) -> f32 {
+        self.origin.x + self.viewport.min.x
+    }
+
+    fn visible_rect(&self) -> Rect {
+        self.viewport.translate(self.origin.to_vec2())
+    }
+
+    fn visible_lines(&self, n_lines: usize) -> Range<usize> {
+        let first = (self.viewport.min.y / self.row_h).floor().max(0.0) as usize;
+        let last = ((self.viewport.max.y / self.row_h).ceil() as usize + 1).min(n_lines);
+        first.min(last)..last
+    }
+}
+
+const BLINK_PERIOD: f64 = 1.1;
+
+impl CodeEditor {
+    pub fn ui(&mut self, ui: &mut Ui, config: &EditorConfig) -> EditorOutput {
+        self.state.tab_width = config.tab_width.max(1);
+        let id = self.id_salt.unwrap_or_else(|| ui.id().with("code-editor"));
+        let revision_before = self.state.revision;
+        let font = FontId::monospace(config.font_size);
+        let (row_h, char_w) = ui.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, 'M')));
+        let theme = SyntaxTheme::for_visuals(ui.visuals());
+        let pal = Palette::new(ui.visuals());
+        let time = ui.input(|i| i.time);
+
+        let mut find_action = None;
+        if self.find.open {
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(6, 3))
+                .show(ui, |ui| {
+                    find_action = self.find.ui(ui, self.selection());
+                });
+        }
+
+        let n_lines = self.state.rope.len_lines();
+        let digits = n_lines.to_string().len().max(3);
+        let marker_w = (row_h * 1.1).round();
+        let gutter_w = if config.show_line_numbers {
+            marker_w + (digits as f32 + 1.5) * char_w
+        } else {
+            marker_w + char_w * 0.5
+        };
+        let content_w = gutter_w + (self.max_line_chars() as f32 + 4.0) * char_w;
+        let content_h = (n_lines as f32 + 3.0) * row_h;
+
+        let mut gutter_clicked = None;
+        let scroll = egui::ScrollArea::both()
+            .id_salt(id.with("scroll"))
+            .auto_shrink(false)
+            .show_viewport(ui, |ui, viewport| {
+                let size = vec2(
+                    content_w.max(viewport.width()),
+                    content_h.max(viewport.height()),
+                );
+                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                let response = ui.interact(rect, id, Sense::click_and_drag());
+                let layout = Layout {
+                    origin: rect.min,
+                    viewport,
+                    row_h,
+                    char_w,
+                    gutter_w,
+                    marker_w,
+                };
+                self.page_rows = ((viewport.height() / row_h) as usize)
+                    .saturating_sub(1)
+                    .max(1);
+
+                if std::mem::take(&mut self.focus_requested) {
+                    response.request_focus();
+                }
+                self.handle_pointer(ui, &response, &layout, &mut gutter_clicked, time);
+                let focused = response.has_focus();
+                if focused {
+                    ui.memory_mut(|m| {
+                        m.set_focus_lock_filter(
+                            id,
+                            EventFilter {
+                                tab: true,
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                                escape: true,
+                            },
+                        );
+                    });
+                    if let Some(action) = self.handle_keys(ui, config, time) {
+                        find_action = Some(action);
+                    }
+                }
+                if let Some(action) = find_action.take() {
+                    self.run_find(action, time, &response);
+                }
+                if self.find.open {
+                    let state = &self.state;
+                    self.find.refresh(state.revision, || state.text());
+                }
+
+                self.paint(ui, &layout, config, &pal, &theme, &font, focused, time);
+                self.marker_tooltip(ui, &response, &layout);
+
+                let caret_rect = self.caret_rect(&layout);
+                if std::mem::take(&mut self.scroll_to_cursor) {
+                    let margin = vec2(2.0 * char_w, row_h);
+                    let target = Rect::from_min_max(
+                        pos2(
+                            caret_rect.min.x - gutter_w - margin.x,
+                            caret_rect.min.y - margin.y,
+                        ),
+                        caret_rect.max + margin,
+                    );
+                    ui.scroll_to_rect(target, None);
+                }
+                if focused {
+                    let visible = layout.visible_rect();
+                    ui.ctx().output_mut(|o| {
+                        o.ime = Some(egui::output::IMEOutput {
+                            purpose: Default::default(),
+                            rect: visible,
+                            cursor_rect: caret_rect,
+                            should_interrupt_composition: false,
+                        });
+                    });
+                }
+                response
+            });
+
+        self.goto_line_popup(ui, scroll.inner_rect, &scroll.inner);
+
+        let (line, col) = self.line_col();
+        EditorOutput {
+            response: scroll.inner,
+            cursor: self.cursor(),
+            selection: self.selection(),
+            line_col: (line, col),
+            changed: self.state.revision != revision_before,
+            gutter_clicked,
+        }
+    }
+
+    // ----- input --------------------------------------------------------
+
+    /// Char position under a screen point: (line, visual column, char index).
+    fn hit(&self, layout: &Layout, pos: Pos2) -> (usize, usize, usize) {
+        let n = self.state.rope.len_lines();
+        let line =
+            (((pos.y - layout.origin.y) / layout.row_h).floor().max(0.0) as usize).min(n - 1);
+        let vcol = ((pos.x - layout.text_x()) / layout.char_w).round().max(0.0) as usize;
+        let text = line_text(&self.state.rope, line);
+        let char_pos = pos_of(
+            &self.state.rope,
+            line,
+            col_from_visual(&text, vcol, self.state.tab_width),
+        );
+        (line, vcol, char_pos)
+    }
+
+    fn handle_pointer(
+        &mut self,
+        ui: &Ui,
+        response: &egui::Response,
+        layout: &Layout,
+        gutter_clicked: &mut Option<usize>,
+        time: f64,
+    ) {
+        let (pressed, down, pos, mods) = ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.interact_pos(),
+                i.modifiers,
+            )
+        });
+        let Some(pos) = pos else {
+            return;
+        };
+        let in_gutter = pos.x < layout.gutter_left() + layout.gutter_w;
+        if response.hovered() && !in_gutter {
+            ui.ctx().set_cursor_icon(CursorIcon::Text);
+        }
+
+        if pressed && response.hovered() {
+            response.request_focus();
+            self.blink_epoch = time;
+            let (line, vcol, char_pos) = self.hit(layout, pos);
+            if in_gutter {
+                if pos.x < layout.gutter_left() + layout.marker_w {
+                    *gutter_clicked = Some(line + 1);
+                } else {
+                    self.state.select_line_at(char_pos);
+                    self.drag = None;
+                }
+                return;
+            }
+            if mods.alt {
+                self.drag = Some(Drag::Block { from: (line, vcol) });
+                self.state.select_block((line, vcol), (line, vcol));
+            } else if mods.command {
+                self.state.add_cursor(char_pos);
+                self.drag = None;
+            } else if mods.shift {
+                let primary = self.state.primary().moved_to(char_pos, true);
+                self.state.set_selections(vec![primary], 0);
+                self.drag = Some(Drag::Chars {
+                    anchor: primary.anchor,
+                });
+            } else {
+                self.state.set_caret(char_pos);
+                self.drag = Some(Drag::Chars { anchor: char_pos });
+            }
+        } else if down && let Some(drag) = self.drag {
+            let (line, vcol, char_pos) = self.hit(layout, pos);
+            match drag {
+                Drag::Chars { anchor } => {
+                    if self.state.primary() != Selection::new(anchor, char_pos) {
+                        self.state
+                            .set_selections(vec![Selection::new(anchor, char_pos)], 0);
+                        self.scroll_to_cursor = true;
+                    }
+                }
+                Drag::Block { from } => self.state.select_block(from, (line, vcol)),
+            }
+        }
+        if !down {
+            self.drag = None;
+        }
+
+        if !in_gutter {
+            let (_, _, char_pos) = self.hit(layout, pos);
+            if response.triple_clicked() {
+                self.state.select_line_at(char_pos);
+            } else if response.double_clicked() {
+                self.state.select_word_at(char_pos);
+            }
+        }
+    }
+
+    fn handle_keys(&mut self, ui: &Ui, config: &EditorConfig, time: f64) -> Option<FindAction> {
+        let events = ui.input(|i| i.events.clone());
+        let ro = config.read_only;
+        let mut find = None;
+        for event in events {
+            match event {
+                Event::Text(text) if !ro => {
+                    let text: String = text.chars().filter(|c| !c.is_control()).collect();
+                    if !text.is_empty() {
+                        self.state.insert(&text, time);
+                    }
+                }
+                Event::Ime(ImeEvent::Commit(text)) if !ro && !text.is_empty() => {
+                    self.state.insert(&text, time)
+                }
+                Event::Copy => ui.ctx().copy_text(self.state.copy_text()),
+                Event::Cut if ro => ui.ctx().copy_text(self.state.copy_text()),
+                Event::Cut => {
+                    let text = self.state.cut(time);
+                    ui.ctx().copy_text(text);
+                }
+                Event::Paste(text) if !ro => self.state.paste(&text, time),
+                Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
+                    if let Some(action) = self.handle_key(key, modifiers, ro, time) {
+                        find = Some(action);
+                    }
+                }
+                _ => continue,
+            }
+            self.blink_epoch = time;
+            self.scroll_to_cursor = true;
+        }
+        find
+    }
+
+    fn handle_key(&mut self, key: Key, m: Modifiers, ro: bool, time: f64) -> Option<FindAction> {
+        let (ctrl, shift, alt) = (m.command, m.shift, m.alt);
+        let st = &mut self.state;
+        match key {
+            Key::ArrowLeft => st.move_left(shift, ctrl),
+            Key::ArrowRight => st.move_right(shift, ctrl),
+            Key::ArrowUp if alt && !ro => st.move_lines(true, time),
+            Key::ArrowDown if alt && !ro => st.move_lines(false, time),
+            Key::ArrowUp => st.move_vertical(-1, shift),
+            Key::ArrowDown => st.move_vertical(1, shift),
+            Key::Home if ctrl => st.move_doc_start(shift),
+            Key::Home => st.move_home(shift),
+            Key::End if ctrl => st.move_doc_end(shift),
+            Key::End => st.move_end(shift),
+            Key::PageUp => st.move_vertical(-(self.page_rows as isize), shift),
+            Key::PageDown => st.move_vertical(self.page_rows as isize, shift),
+            Key::Enter if !ro && !ctrl && !alt => st.newline(time),
+            Key::Backspace if !ro => st.backspace(ctrl, time),
+            Key::Delete if !ro => st.delete(ctrl, time),
+            Key::Tab if !ro && !ctrl && shift => st.outdent_lines(time),
+            Key::Tab if !ro && !ctrl => st.tab(time),
+            Key::Escape => {
+                if self.goto_line.is_some() {
+                    self.goto_line = None;
+                } else if self.find.open {
+                    return Some(FindAction::Close);
+                } else {
+                    st.single_cursor();
+                }
+            }
+            Key::A if ctrl => st.select_all(),
+            Key::Z if ctrl && shift && !ro => {
+                st.redo();
+            }
+            Key::Z if ctrl && !ro => {
+                st.undo();
+            }
+            Key::Y if ctrl && !ro => {
+                st.redo();
+            }
+            Key::D if ctrl && !ro => st.duplicate_lines(time),
+            Key::Slash if ctrl && !ro => st.toggle_comment(time),
+            Key::U if ctrl && !ro => st.change_case(shift, time),
+            Key::F if ctrl => self.open_find(false),
+            Key::H if ctrl && !ro => self.open_find(true),
+            Key::G if ctrl => self.goto_line = Some(String::new()),
+            Key::F3 if self.find.query.text.is_empty() => self.open_find(false),
+            Key::F3 => {
+                return Some(if shift {
+                    FindAction::Prev
+                } else {
+                    FindAction::Next
+                });
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn run_find(&mut self, action: FindAction, time: f64, response: &egui::Response) {
+        let state = &self.state;
+        self.find.refresh(state.revision, || state.text());
+        let sel_start = self.selection().map_or(self.cursor(), |r| r.start);
+        let sel_end = self.selection().map_or(self.cursor(), |r| r.end);
+        let target = match action {
+            FindAction::Search => self.find.step(sel_start, true),
+            FindAction::Next => self.find.step(sel_end, true),
+            FindAction::Prev => self.find.step(sel_start, false),
+            FindAction::Replace => {
+                let current = self.selection().filter(|s| self.find.matches.contains(s));
+                if let Some(range) = current {
+                    let text = self.state.text();
+                    let replacements = self.find.replacements(&text, &[range]);
+                    let inserted = self.state.replace_byte_ranges(replacements, time);
+                    let after = inserted
+                        .first()
+                        .map_or(sel_end, |r| self.state.rope.char_to_byte(r.end));
+                    let state = &self.state;
+                    self.find.refresh(state.revision, || state.text());
+                    self.find.step(after, true)
+                } else {
+                    self.find.step(sel_end, true)
+                }
+            }
+            FindAction::ReplaceAll => {
+                let text = self.state.text();
+                let replacements = self.find.replacements(&text, &self.find.matches.clone());
+                if !replacements.is_empty() {
+                    self.state.history.seal();
+                    self.state.replace_byte_ranges(replacements, time);
+                    self.state.history.seal();
+                }
+                None
+            }
+            FindAction::Close => {
+                self.find.open = false;
+                self.find.scope = None;
+                response.request_focus();
+                None
+            }
+        };
+        if let Some(range) = target {
+            self.select(range);
+        }
+    }
+
+    // ----- painting -----------------------------------------------------
+
+    fn caret_rect(&self, layout: &Layout) -> Rect {
+        let head = self.state.primary().head;
+        let (line, col) = super::text::line_col(&self.state.rope, head);
+        let vcol = visual_col(
+            &line_text(&self.state.rope, line),
+            col,
+            self.state.tab_width,
+        );
+        let x = layout.text_x() + vcol as f32 * layout.char_w;
+        let y = layout.row_y(line);
+        Rect::from_min_size(pos2(x, y), vec2(2.0, layout.row_h))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint(
+        &mut self,
+        ui: &Ui,
+        layout: &Layout,
+        config: &EditorConfig,
+        pal: &Palette,
+        theme: &SyntaxTheme,
+        font: &FontId,
+        focused: bool,
+        time: f64,
+    ) {
+        // Bracket / keyword pair under the caret (needs `&mut self` for the cache).
+        let pair = {
+            let primary = self.state.primary();
+            if primary.is_empty() && caret_on_pairable(&self.state.rope, primary.head) {
+                let caret_byte = self.state.rope.char_to_byte(primary.head);
+                pair_at(self.pairs(), caret_byte).cloned()
+            } else {
+                None
+            }
+        };
+
+        let painter = ui.painter();
+        let visible = layout.visible_rect();
+        painter.rect_filled(visible, 0.0, pal.bg);
+
+        let rope = &self.state.rope;
+        let tw = self.state.tab_width;
+        let lines = layout.visible_lines(rope.len_lines());
+        let texts: Vec<String> = lines.clone().map(|l| line_text(rope, l)).collect();
+        let text_of = |l: usize| texts[l - lines.start].as_str();
+        let full_row = |l: usize| {
+            Rect::from_min_size(
+                pos2(visible.min.x, layout.row_y(l)),
+                vec2(visible.width(), layout.row_h),
+            )
+        };
+
+        // Line backgrounds: debugger position, current line.
+        for m in &self.markers {
+            let l = m.line.wrapping_sub(1);
+            if m.kind == MarkerKind::ExecutionPoint && lines.contains(&l) {
+                painter.rect_filled(full_row(l), 0.0, pal.execution_line);
+            }
+        }
+        let primary = self.state.primary();
+        let caret_line = rope.char_to_line(primary.head);
+        if config.highlight_current_line && lines.contains(&caret_line) {
+            painter.rect_filled(full_row(caret_line), 0.0, pal.current_line);
+        }
+
+        // Range highlights in char coordinates.
+        let range_rects = |range: Range<usize>| -> Vec<Rect> {
+            let mut out = Vec::new();
+            if range.is_empty() {
+                return out;
+            }
+            let (l0, l1) = (rope.char_to_line(range.start), rope.char_to_line(range.end));
+            for l in l0.max(lines.start)..=l1.min(lines.end.saturating_sub(1)) {
+                if !lines.contains(&l) {
+                    continue;
+                }
+                let (ls, le) = (line_start(rope, l), line_end(rope, l));
+                let s = range.start.max(ls);
+                let e = range.end.min(le);
+                let text = text_of(l);
+                let vs = visual_col(text, s.saturating_sub(ls), tw);
+                let ve = visual_col(text, e.saturating_sub(ls), tw);
+                let newline = if range.end > le {
+                    layout.char_w * 0.6
+                } else {
+                    0.0
+                };
+                let x0 = layout.text_x() + vs as f32 * layout.char_w;
+                let x1 = layout.text_x() + ve as f32 * layout.char_w + newline;
+                if x1 > x0 {
+                    out.push(Rect::from_min_max(
+                        pos2(x0, layout.row_y(l)),
+                        pos2(x1, layout.row_y(l) + layout.row_h),
+                    ));
+                }
+            }
+            out
+        };
+
+        // Search matches.
+        if self.find.open && !self.find.matches.is_empty() && !lines.is_empty() {
+            let vis_start = rope.char_to_byte(line_start(rope, lines.start));
+            let vis_end = rope.char_to_byte(line_end(rope, lines.end - 1));
+            let first = self.find.matches.partition_point(|m| m.end < vis_start);
+            for (i, m) in self.find.matches.iter().enumerate().skip(first) {
+                if m.start > vis_end {
+                    break;
+                }
+                let color = if self.find.current == Some(i) {
+                    pal.find_current
+                } else {
+                    pal.find_match
+                };
+                let chars = rope.byte_to_char(m.start)..rope.byte_to_char(m.end);
+                for r in range_rects(chars) {
+                    painter.rect_filled(r, 2.0, color);
+                }
+            }
+        }
+
+        // Selections.
+        let sel_color = if focused {
+            pal.selection
+        } else {
+            pal.selection_inactive
+        };
+        for s in &self.state.sels {
+            for r in range_rects(s.range()) {
+                painter.rect_filled(r, 2.0, sel_color);
+            }
+        }
+
+        if let Some(pair) = pair {
+            for r in [pair.open, pair.close] {
+                let chars = rope.byte_to_char(r.start)..rope.byte_to_char(r.end);
+                for rect in range_rects(chars) {
+                    painter.rect_filled(rect, 2.0, pal.pair);
+                    painter.rect_stroke(
+                        rect,
+                        2.0,
+                        Stroke::new(1.0, pal.pair.gamma_multiply(2.0)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+        }
+
+        // Text.
+        for l in lines.clone() {
+            let text = text_of(l);
+            if text.is_empty() {
+                continue;
+            }
+            let (tokens, _) = lex_line(text, self.state.highlighter.state(l));
+            let mut job = LayoutJob::default();
+            let mut vcol = 0;
+            for token in tokens {
+                let ws = token.kind == TokenKind::Whitespace;
+                let mut piece = String::with_capacity(token.range.len());
+                for c in text[token.range].chars() {
+                    if c == '\t' {
+                        let n = tw - vcol % tw;
+                        piece.push(if config.show_whitespace { '→' } else { ' ' });
+                        piece.extend(std::iter::repeat_n(' ', n - 1));
+                        vcol += n;
+                    } else {
+                        piece.push(if ws && config.show_whitespace && c == ' ' {
+                            '·'
+                        } else {
+                            c
+                        });
+                        vcol += 1;
+                    }
+                }
+                let color = if ws {
+                    pal.whitespace
+                } else {
+                    theme.color(token.kind)
+                };
+                let format = TextFormat {
+                    font_id: font.clone(),
+                    color,
+                    italics: matches!(token.kind, TokenKind::LineComment | TokenKind::BlockComment),
+                    ..Default::default()
+                };
+                job.append(&piece, 0.0, format);
+            }
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            painter.galley(pos2(layout.text_x(), layout.row_y(l)), galley, pal.text);
+        }
+
+        // Error / warning squiggles.
+        for m in &self.markers {
+            let l = m.line.wrapping_sub(1);
+            let color = match m.kind {
+                MarkerKind::Error => pal.error,
+                MarkerKind::Warning => pal.warning,
+                _ => continue,
+            };
+            if !lines.contains(&l) {
+                continue;
+            }
+            let text = text_of(l);
+            let indent = super::text::indent_of(text).chars().count();
+            let len = text.chars().count();
+            let (v0, v1) = (
+                visual_col(text, indent, tw),
+                visual_col(text, len, tw).max(visual_col(text, indent, tw) + 1),
+            );
+            let y = layout.row_y(l) + layout.row_h - 2.0;
+            let (x0, x1) = (
+                layout.text_x() + v0 as f32 * layout.char_w,
+                layout.text_x() + v1 as f32 * layout.char_w,
+            );
+            let step = 2.5;
+            let points: Vec<Pos2> = (0..=((x1 - x0) / step) as usize)
+                .map(|i| {
+                    pos2(
+                        x0 + i as f32 * step,
+                        y + if i % 2 == 0 { -1.2 } else { 1.2 },
+                    )
+                })
+                .collect();
+            painter.add(Shape::line(points, Stroke::new(1.0, color)));
+        }
+
+        // Carets.
+        let blink_on = ((time - self.blink_epoch) % BLINK_PERIOD) < BLINK_PERIOD * 0.6;
+        if focused {
+            if blink_on {
+                for s in &self.state.sels {
+                    let (line, col) = super::text::line_col(rope, s.head);
+                    if !lines.contains(&line) {
+                        continue;
+                    }
+                    let vcol = visual_col(text_of(line), col, tw);
+                    let x = layout.text_x() + vcol as f32 * layout.char_w;
+                    let r = Rect::from_min_size(
+                        pos2(x - 0.5, layout.row_y(line)),
+                        vec2(2.0, layout.row_h),
+                    );
+                    painter.rect_filled(r, 0.0, pal.caret);
+                }
+            }
+            let phase = (time - self.blink_epoch) % BLINK_PERIOD;
+            let next = if blink_on {
+                BLINK_PERIOD * 0.6 - phase
+            } else {
+                BLINK_PERIOD - phase
+            };
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(next.max(0.01)));
+        }
+
+        self.paint_gutter(ui, layout, config, pal, font, &lines, caret_line);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_gutter(
+        &self,
+        ui: &Ui,
+        layout: &Layout,
+        config: &EditorConfig,
+        pal: &Palette,
+        font: &FontId,
+        lines: &Range<usize>,
+        caret_line: usize,
+    ) {
+        let painter = ui.painter();
+        let visible = layout.visible_rect();
+        let x0 = layout.gutter_left();
+        let gutter = Rect::from_min_max(
+            pos2(x0, visible.min.y),
+            pos2(x0 + layout.gutter_w, visible.max.y),
+        );
+        painter.rect_filled(gutter, 0.0, pal.gutter_bg);
+        painter.vline(
+            gutter.max.x - 0.5,
+            gutter.y_range(),
+            Stroke::new(1.0, pal.gutter_line),
+        );
+
+        if config.show_line_numbers {
+            let right = gutter.max.x - layout.char_w * 0.75;
+            for l in lines.clone() {
+                let color = if l == caret_line {
+                    pal.line_number_current
+                } else {
+                    pal.line_number
+                };
+                painter.text(
+                    pos2(right, layout.row_y(l)),
+                    egui::Align2::RIGHT_TOP,
+                    (l + 1).to_string(),
+                    font.clone(),
+                    color,
+                );
+            }
+        }
+
+        for m in &self.markers {
+            let l = m.line.wrapping_sub(1);
+            if !lines.contains(&l) {
+                continue;
+            }
+            let center = pos2(
+                x0 + layout.marker_w * 0.5,
+                layout.row_y(l) + layout.row_h * 0.5,
+            );
+            let r = layout.row_h * 0.3;
+            match m.kind {
+                MarkerKind::Breakpoint => {
+                    painter.circle_filled(center, r * 1.15, pal.breakpoint);
+                }
+                MarkerKind::Error => {
+                    painter.circle_filled(center, r, pal.error);
+                    let d = r * 0.5;
+                    let s = Stroke::new(1.5, pal.bg);
+                    painter.line_segment([center + vec2(-d, -d), center + vec2(d, d)], s);
+                    painter.line_segment([center + vec2(-d, d), center + vec2(d, -d)], s);
+                }
+                MarkerKind::Warning => {
+                    let pts = vec![
+                        center + vec2(0.0, -r * 1.1),
+                        center + vec2(r * 1.1, r * 0.9),
+                        center + vec2(-r * 1.1, r * 0.9),
+                    ];
+                    painter.add(Shape::convex_polygon(pts, pal.warning, Stroke::NONE));
+                }
+                MarkerKind::Bookmark => {
+                    let rect = Rect::from_center_size(center, vec2(r * 1.4, r * 2.0));
+                    painter.rect_filled(rect, 1.5, pal.bookmark);
+                }
+                MarkerKind::ExecutionPoint => {
+                    let pts = vec![
+                        center + vec2(-r, -r),
+                        center + vec2(r * 1.2, 0.0),
+                        center + vec2(-r, r),
+                    ];
+                    painter.add(Shape::convex_polygon(
+                        pts,
+                        pal.execution,
+                        Stroke::new(1.0, pal.execution.gamma_multiply(0.6)),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn marker_tooltip(&self, ui: &Ui, response: &egui::Response, layout: &Layout) {
+        if self.markers.is_empty() || !response.hovered() {
+            return;
+        }
+        let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
+            return;
+        };
+        let line = ((pos.y - layout.origin.y) / layout.row_h).floor() as usize + 1;
+        let messages: Vec<&str> = self
+            .markers
+            .iter()
+            .filter(|m| m.line == line && !m.message.is_empty())
+            .map(|m| m.message.as_str())
+            .collect();
+        if messages.is_empty() {
+            return;
+        }
+        let in_gutter = pos.x < layout.gutter_left() + layout.gutter_w;
+        let on_error_line = self
+            .markers
+            .iter()
+            .any(|m| m.line == line && matches!(m.kind, MarkerKind::Error | MarkerKind::Warning));
+        if in_gutter || on_error_line {
+            response.clone().on_hover_ui_at_pointer(|ui| {
+                for msg in messages {
+                    ui.label(egui::RichText::new(msg).monospace());
+                }
+            });
+        }
+    }
+
+    fn goto_line_popup(&mut self, ui: &Ui, editor_rect: Rect, editor: &egui::Response) {
+        let Some(input) = self.goto_line.as_mut() else {
+            return;
+        };
+        let n = self.state.rope.len_lines();
+        let mut close = false;
+        let mut target = None;
+        egui::Area::new(editor.id.with("goto-line"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos2(
+                editor_rect.center().x - 110.0,
+                editor_rect.min.y + 8.0,
+            ))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Go to line (1–{n}):"));
+                        let field = ui.add(egui::TextEdit::singleline(input).desired_width(70.0));
+                        field.request_focus();
+                        if field.lost_focus() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                            close = true;
+                            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                                target = input.trim().parse::<usize>().ok();
+                            }
+                        }
+                    });
+                });
+            });
+        if close {
+            self.goto_line = None;
+            self.focus_requested = true;
+            if let Some(line) = target {
+                self.goto_line(line.clamp(1, n));
+            }
+        }
+    }
+}
+
+/// Whether the caret touches a bracket or a block keyword (avoids computing
+/// pairs for every caret move).
+fn caret_on_pairable(rope: &ropey::Rope, pos: usize) -> bool {
+    let len = rope.len_chars();
+    let is_bracket = |c: char| matches!(c, '(' | ')' | '[' | ']');
+    if (pos < len && is_bracket(rope.char(pos))) || (pos > 0 && is_bracket(rope.char(pos - 1))) {
+        return true;
+    }
+    let (a, b) = super::text::word_range(rope, pos.min(len));
+    if b <= a || b - a > 5 {
+        return false;
+    }
+    let word = rope.slice(a..b).to_string();
+    ["BEGIN", "END", "IF", "LOOP", "CASE"]
+        .iter()
+        .any(|k| word.eq_ignore_ascii_case(k))
+}

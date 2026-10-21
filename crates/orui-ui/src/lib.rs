@@ -1,5 +1,6 @@
 //! Reusable widgets: code editor and data grid.
 
+pub mod code_editor;
 mod editor;
 mod grid;
 

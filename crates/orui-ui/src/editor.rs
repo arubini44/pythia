@@ -63,7 +63,7 @@ impl SyntaxTheme {
         }
     }
 
-    fn color(&self, kind: TokenKind) -> Color32 {
+    pub fn color(&self, kind: TokenKind) -> Color32 {
         match kind {
             TokenKind::Keyword => self.keyword,
             TokenKind::String | TokenKind::QString => self.string,
