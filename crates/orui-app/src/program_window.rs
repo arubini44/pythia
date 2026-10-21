@@ -14,8 +14,14 @@ pub struct ProgramWindow {
     pub object: ObjectRef,
     pub parts: Vec<Part>,
     pub active: usize,
+    #[serde(default = "yes")]
+    pub show_outline: bool,
     #[serde(skip)]
     state: State,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -57,6 +63,7 @@ impl ProgramWindow {
             .position(|p| p.object_type == object.object_type)
             .unwrap_or(0);
         Self {
+            show_outline: true,
             object: ObjectRef {
                 object_type: spec_type,
                 ..object
@@ -245,6 +252,7 @@ impl ProgramWindow {
                 }
                 effects.extend(self.load());
             }
+            ui.toggle_value(&mut self.show_outline, "Outline");
             if busy {
                 ui.spinner();
             }
@@ -292,6 +300,27 @@ impl ProgramWindow {
                         });
                 });
         }
+        if self.show_outline {
+            egui::Panel::right(egui::Id::new(("program-outline", cx.id)))
+                .resizable(true)
+                .default_size(240.0)
+                .show(ui, |ui| {
+                    let mut jump = None;
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            if part.assist.outline().is_empty() {
+                                ui.weak("No declarations");
+                            }
+                            for item in part.assist.outline() {
+                                outline_item(ui, item, 0, &mut jump);
+                            }
+                        });
+                    if let Some(range) = jump {
+                        part.editor.select(range);
+                    }
+                });
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             let out = part.editor.ui(
                 ui,
@@ -299,6 +328,7 @@ impl ProgramWindow {
                 &cx.settings.editor,
             );
             effects.extend(part.assist.handle(&mut part.editor, &out, cx));
+            part.assist.background(&mut part.editor, ui);
         });
         effects
     }
@@ -317,6 +347,56 @@ impl Part {
 
     fn is_dirty(&self) -> bool {
         self.editor.text() != self.saved
+    }
+}
+
+/// One outline entry with its children, indented by depth.
+fn outline_item(
+    ui: &mut Ui,
+    item: &orui_lsp_core::OutlineItem,
+    depth: usize,
+    jump: &mut Option<std::ops::Range<usize>>,
+) {
+    use orui_lsp_core::OutlineKind as K;
+    use orui_ui::icons::{Icon, IconSize};
+    let icon = match item.kind {
+        K::PackageSpec => Icon::Package,
+        K::PackageBody => Icon::PackageBody,
+        K::Procedure => Icon::Procedure,
+        K::Function => Icon::Function,
+        K::Trigger => Icon::Trigger,
+        K::Type | K::TypeDecl => Icon::Type,
+        K::TypeBody => Icon::TypeBody,
+        K::Cursor => Icon::Grid,
+        K::Exception => Icon::Warning,
+        K::Variable | K::Constant => Icon::Column,
+        K::Block | K::Statement => Icon::Text,
+    };
+    // Variables of nested scopes would only add noise.
+    if depth > 1
+        && matches!(
+            item.kind,
+            K::Variable | K::Constant | K::Statement | K::Block
+        )
+    {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(depth as f32 * 14.0);
+        ui.spacing_mut().item_spacing.x = 5.0;
+        ui.add(icon.sized(ui, IconSize::Small));
+        let r = ui.add(
+            egui::Button::new(RichText::new(item.name.to_lowercase()).monospace()).frame(false),
+        );
+        if r.clicked() {
+            *jump = Some(item.name_span.clone());
+        }
+        if !item.detail.is_empty() {
+            r.on_hover_text(&item.detail);
+        }
+    });
+    for child in &item.children {
+        outline_item(ui, child, depth + 1, jump);
     }
 }
 

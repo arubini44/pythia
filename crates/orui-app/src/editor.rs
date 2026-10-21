@@ -16,6 +16,10 @@ pub struct Editor {
     inner: CodeEditor,
     text: String,
     revision: u64,
+    /// Compile errors from the database.
+    compile_markers: Vec<Marker>,
+    /// Syntax problems found while typing.
+    syntax_markers: Vec<Marker>,
 }
 
 impl Default for Editor {
@@ -45,6 +49,8 @@ impl Editor {
             inner,
             text,
             revision,
+            compile_markers: Vec::new(),
+            syntax_markers: Vec::new(),
         }
     }
 
@@ -94,8 +100,33 @@ impl Editor {
         self.inner.request_focus();
     }
 
+    /// Compile error markers (replacing the previous ones).
     pub fn set_markers(&mut self, markers: Vec<Marker>) {
-        self.inner.set_markers(markers);
+        self.compile_markers = markers;
+        self.push_markers();
+    }
+
+    /// Syntax markers from live analysis (replacing the previous ones).
+    pub fn set_syntax_markers(&mut self, markers: Vec<Marker>) {
+        self.syntax_markers = markers;
+        self.push_markers();
+    }
+
+    fn push_markers(&mut self) {
+        // Compile errors are authoritative; skip syntax markers on their lines.
+        let mut all = self.compile_markers.clone();
+        all.extend(
+            self.syntax_markers
+                .iter()
+                .filter(|m| !self.compile_markers.iter().any(|c| c.line == m.line))
+                .cloned(),
+        );
+        self.inner.set_markers(all);
+    }
+
+    /// Changes whenever the text changes.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Replaces the selection (or inserts at the cursor), as one undo step.

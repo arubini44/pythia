@@ -788,6 +788,7 @@ impl SqlWindow {
                 .editor
                 .ui(ui, ("sql-editor", cx.id), &cx.settings.editor);
             effects.extend(self.assist.handle(&mut self.editor, &out, cx));
+            self.assist.background(&mut self.editor, ui);
             self.state.line_col = self.editor.line_col();
         });
         effects.extend(self.prompt_ui(ui.ctx(), cx));

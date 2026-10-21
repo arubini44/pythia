@@ -8,15 +8,21 @@
 use orui_db::ObjectType;
 use orui_lsp_core::{
     Analysis, Catalog, CatalogRequest, CompletionKind as LspKind, Definition, EmptyCatalog,
+    OutlineItem, Severity,
 };
 use orui_ui::code_editor::{CompletionEntry, CompletionKind, EditorOutput};
 
 use crate::documents::{DocContext, Effects, ObjectRef, OpenRequest};
-use crate::editor::Editor;
+use crate::editor::{Editor, Marker, MarkerKind};
 
 #[derive(Default)]
 pub struct Assist {
     analysis: Analysis,
+    /// Editor revision the analysis (diagnostics, outline) reflects.
+    analyzed_revision: Option<u64>,
+    /// When the text last changed without being analyzed yet (egui time).
+    changed_at: Option<f64>,
+    outline: Vec<OutlineItem>,
     /// Request waiting for dictionary data.
     pending: Option<Pending>,
     /// Catalog revision the pending request last ran against.
@@ -33,6 +39,52 @@ enum Pending {
 }
 
 impl Assist {
+    /// Re-analyzes the text shortly after typing stops: refreshes syntax
+    /// markers and the outline. Call every frame after `Editor::ui`.
+    pub fn background(&mut self, editor: &mut Editor, ui: &egui::Ui) {
+        const IDLE: f64 = 0.35;
+        if self.analyzed_revision == Some(editor.revision()) {
+            return;
+        }
+        let now = ui.input(|i| i.time);
+        // Analyze right away the first time (just opened / loaded).
+        let changed_at = *self
+            .changed_at
+            .get_or_insert(if self.analyzed_revision.is_none() {
+                now - IDLE
+            } else {
+                now
+            });
+        if now - changed_at < IDLE {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(IDLE));
+            return;
+        }
+        self.changed_at = None;
+        self.analyzed_revision = Some(editor.revision());
+        self.analysis.update(editor.text());
+        let text = editor.text();
+        let markers = self
+            .analysis
+            .diagnostics()
+            .iter()
+            .map(|d| Marker {
+                line: text[..d.span.start.min(text.len())].matches('\n').count() + 1,
+                kind: match d.severity {
+                    Severity::Error => MarkerKind::Error,
+                    Severity::Warning => MarkerKind::Warning,
+                },
+                message: d.message.clone(),
+            })
+            .collect();
+        self.outline = self.analysis.outline();
+        editor.set_syntax_markers(markers);
+    }
+
+    pub fn outline(&self) -> &[OutlineItem] {
+        &self.outline
+    }
+
     /// Handles the editor's requests of this frame; call after `Editor::ui`.
     pub fn handle(&mut self, editor: &mut Editor, out: &EditorOutput, cx: &DocContext) -> Effects {
         let mut effects = Effects::default();
