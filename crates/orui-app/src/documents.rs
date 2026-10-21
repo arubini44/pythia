@@ -118,6 +118,8 @@ pub enum OpenRequest {
         object: ObjectRef,
         line: usize,
     },
+    /// Insert text at the cursor of the focused SQL window (or a new one).
+    InsertText { text: String },
     /// Open the connection manager.
     ConnectDialog,
     /// Show this connection in the object browser.

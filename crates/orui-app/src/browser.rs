@@ -40,6 +40,12 @@ enum Pending {
         object: ObjectRef,
         verb: &'static str,
     },
+    /// Columns for a generated statement.
+    Generate {
+        object: ObjectRef,
+        kind: Template,
+    },
+    RecompileSchema(String),
     /// Parameters of `member` (or the standalone unit) for a test script.
     Test {
         object: ObjectRef,
@@ -241,6 +247,22 @@ impl Browser {
             }
             return effects;
         }
+        if let DbEvent::Meta { id, result } = &event
+            && let Some(Pending::Generate { object, kind }) = self.pending.get(id)
+        {
+            let (object, kind) = (object.clone(), *kind);
+            self.pending.remove(id);
+            match result {
+                Ok(MetaResult::Columns(cols)) => {
+                    effects.open.push(OpenRequest::InsertText {
+                        text: template(kind, &object, cols),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => log.push(format!("Generate: {e}")),
+            }
+            return effects;
+        }
         let (id, result) = match event {
             DbEvent::Meta { id, result } => (id, result.map(Some)),
             DbEvent::Executed { id, .. } => (id, Ok(None)),
@@ -275,6 +297,13 @@ impl Browser {
                 let ty = object.object_type.dictionary_name().to_lowercase();
                 log.push(format!("{ty} {} {verb}", object.qualified()));
                 self.refresh(&mut effects);
+            }
+            (Pending::RecompileSchema(owner), Ok(_)) => {
+                log.push(format!("Recompiled invalid objects in {owner}"));
+                self.refresh(&mut effects);
+            }
+            (Pending::RecompileSchema(owner), Err(e)) => {
+                log.push(format!("Recompiling {owner} failed: {e}"));
             }
             (Pending::Action { object, verb }, Err(e)) => {
                 log.push(format!("{} {} failed: {e}", verb, object.qualified()));
@@ -382,6 +411,30 @@ impl Browser {
             }
             if orui_ui::icons::icon_button(ui, Icon::Refresh, "Refresh").clicked() {
                 self.refresh(&mut effects);
+            }
+            if orui_ui::icons::icon_button(
+                ui,
+                Icon::Compile,
+                "Recompile invalid objects in this schema",
+            )
+            .clicked()
+                && let Some(owner) = self.schema.clone()
+            {
+                let id = request_id();
+                let sql = format!(
+                    "begin dbms_utility.compile_schema(schema => '{}', compile_all => false); end;",
+                    owner.replace('\'', "''")
+                );
+                self.pending.insert(id, Pending::RecompileSchema(owner));
+                effects.request(
+                    Target::Main,
+                    DbRequest::Execute {
+                        id,
+                        sql,
+                        max_rows: 1,
+                        binds: Vec::new(),
+                    },
+                );
             }
         });
         ui.add(
@@ -685,6 +738,22 @@ impl Browser {
             item(ui, "Test…", Action::Test(object.clone(), None));
         }
         item(ui, "Describe", Action::Describe(object.clone()));
+        let mut generate = None;
+        if t.has_data() {
+            ui.menu_button("Generate", |ui| {
+                for kind in [
+                    Template::Select,
+                    Template::Insert,
+                    Template::Update,
+                    Template::ColumnList,
+                ] {
+                    if ui.button(kind.label()).clicked() {
+                        generate = Some(Action::Generate(object.clone(), kind));
+                        ui.close();
+                    }
+                }
+            });
+        }
         ui.separator();
         if t.has_source() || matches!(t, ObjectType::View | ObjectType::MaterializedView) {
             item(ui, "Compile", Action::Compile(object.clone()));
@@ -697,6 +766,7 @@ impl Browser {
         );
         ui.separator();
         item(ui, "Drop…", Action::Drop(object.clone()));
+        actions.extend(generate);
     }
 
     fn action(
@@ -748,6 +818,15 @@ impl Browser {
             Action::CopyName(o) => ctx.copy_text(o.name.clone()),
             Action::CopyQualified(o) => ctx.copy_text(o.qualified()),
             Action::Drop(o) => self.confirm_drop = Some(o),
+            Action::Generate(object, kind) => {
+                let id = request_id();
+                let query = MetaQuery::Columns {
+                    owner: object.owner.clone(),
+                    table: object.name.clone(),
+                };
+                self.pending.insert(id, Pending::Generate { object, kind });
+                effects.request(Target::Main, DbRequest::Meta { id, query });
+            }
             Action::Test(object, member) => {
                 let id = request_id();
                 let request = orui_lsp_core::CatalogRequest::Members {
@@ -820,6 +899,80 @@ enum Action {
     CopyQualified(ObjectRef),
     Drop(ObjectRef),
     Test(ObjectRef, Option<String>),
+    Generate(ObjectRef, Template),
+}
+
+/// Statements generated from a table's columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Template {
+    Select,
+    Insert,
+    Update,
+    ColumnList,
+}
+
+impl Template {
+    fn label(self) -> &'static str {
+        match self {
+            Template::Select => "SELECT statement",
+            Template::Insert => "INSERT statement",
+            Template::Update => "UPDATE statement",
+            Template::ColumnList => "Column list",
+        }
+    }
+}
+
+/// Builds the statement for `kind` with binds named after the columns.
+fn template(kind: Template, object: &ObjectRef, cols: &[TableColumn]) -> String {
+    let name = |c: &TableColumn| crate::documents::quote_ident(&c.name).to_lowercase();
+    let table = object.qualified().to_lowercase();
+    let names: Vec<String> = cols.iter().map(name).collect();
+    match kind {
+        Template::ColumnList => names.join(", "),
+        Template::Select => {
+            let alias = object
+                .name
+                .chars()
+                .next()
+                .unwrap_or('t')
+                .to_ascii_lowercase();
+            let list: Vec<String> = names.iter().map(|n| format!("{alias}.{n}")).collect();
+            format!("select {}\n  from {table} {alias}", list.join(",\n       "))
+        }
+        Template::Insert => {
+            let binds: Vec<String> = cols
+                .iter()
+                .map(|c| format!(":{}", c.name.to_lowercase()))
+                .collect();
+            format!(
+                "insert into {table}\n  ({})\nvalues\n  ({})",
+                names.join(", "),
+                binds.join(", ")
+            )
+        }
+        Template::Update => {
+            let mut keys: Vec<&TableColumn> =
+                cols.iter().filter(|c| c.pk_position.is_some()).collect();
+            keys.sort_by_key(|c| c.pk_position);
+            let sets: Vec<String> = cols
+                .iter()
+                .filter(|c| c.pk_position.is_none())
+                .map(|c| format!("{} = :{}", name(c), c.name.to_lowercase()))
+                .collect();
+            let wheres: Vec<String> = if keys.is_empty() {
+                vec!["1 = 0 -- TODO: no primary key".into()]
+            } else {
+                keys.iter()
+                    .map(|c| format!("{} = :{}", name(c), c.name.to_lowercase()))
+                    .collect()
+            };
+            format!(
+                "update {table}\n   set {}\n where {}",
+                sets.join(",\n       "),
+                wheres.join("\n   and ")
+            )
+        }
+    }
 }
 
 fn object_ref(o: &DbObject) -> ObjectRef {
@@ -827,5 +980,47 @@ fn object_ref(o: &DbObject) -> ObjectRef {
         owner: o.owner.clone(),
         name: o.name.clone(),
         object_type: o.object_type,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col(name: &str, pk: Option<u32>) -> TableColumn {
+        TableColumn {
+            name: name.into(),
+            data_type: "NUMBER".into(),
+            nullable: pk.is_none(),
+            default: None,
+            comment: None,
+            pk_position: pk,
+        }
+    }
+
+    #[test]
+    fn templates() {
+        let object = ObjectRef {
+            owner: "HR".into(),
+            name: "EMP".into(),
+            object_type: ObjectType::Table,
+        };
+        let cols = [col("ID", Some(1)), col("NAME", None), col("SAL", None)];
+        assert_eq!(
+            template(Template::ColumnList, &object, &cols),
+            "id, name, sal"
+        );
+        assert_eq!(
+            template(Template::Select, &object, &cols),
+            "select e.id,\n       e.name,\n       e.sal\n  from hr.emp e"
+        );
+        assert_eq!(
+            template(Template::Insert, &object, &cols),
+            "insert into hr.emp\n  (id, name, sal)\nvalues\n  (:id, :name, :sal)"
+        );
+        assert_eq!(
+            template(Template::Update, &object, &cols),
+            "update hr.emp\n   set name = :name,\n       sal = :sal\n where id = :id"
+        );
     }
 }

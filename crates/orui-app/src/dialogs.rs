@@ -9,7 +9,7 @@ use orui_db::{DbObject, ObjectType};
 use orui_ui::icons::Icon;
 
 use crate::commands::{Command, Keymap, fuzzy_score};
-use crate::documents::ObjectRef;
+use crate::documents::{DocId, ObjectRef};
 use crate::history::History;
 use crate::secrets;
 
@@ -25,6 +25,8 @@ pub struct ConnectDialog {
     search: String,
     confirm_delete: bool,
     focus_requested: bool,
+    /// Net service names from tnsnames.ora (read when the dialog opens).
+    tns_aliases: Vec<String>,
 }
 
 pub struct ConnectRequest {
@@ -59,6 +61,7 @@ const COLORS: [[u8; 3]; 8] = [
 impl ConnectDialog {
     pub fn show(&mut self, last: Option<&ConnectionProfile>) {
         self.open = true;
+        self.tns_aliases = orui_config::tns::aliases();
         self.error = None;
         self.focus_requested = false;
         self.confirm_delete = false;
@@ -256,12 +259,44 @@ impl ConnectDialog {
                 ui.end_row();
 
                 ui.label("Database");
-                let db = ui.add(
-                    egui::TextEdit::singleline(&mut self.form.connect_string)
-                        .hint_text("TNS alias or host:1521/service")
-                        .desired_width(280.0),
-                );
-                submit |= db.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                ui.horizontal(|ui| {
+                    let width = if self.tns_aliases.is_empty() {
+                        280.0
+                    } else {
+                        250.0
+                    };
+                    let db = ui.add(
+                        egui::TextEdit::singleline(&mut self.form.connect_string)
+                            .hint_text("TNS alias or host:1521/service")
+                            .desired_width(width),
+                    );
+                    submit |= db.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    if !self.tns_aliases.is_empty() {
+                        ui.menu_button("▾", |ui| {
+                            ui.set_max_height(320.0);
+                            let typed = self.form.connect_string.to_lowercase();
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                for alias in &self.tns_aliases {
+                                    if !typed.is_empty()
+                                        && !alias.to_lowercase().contains(&typed)
+                                        && self
+                                            .tns_aliases
+                                            .iter()
+                                            .any(|a| a.to_lowercase().contains(&typed))
+                                    {
+                                        continue;
+                                    }
+                                    if ui.button(alias).clicked() {
+                                        self.form.connect_string = alias.clone();
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        })
+                        .response
+                        .on_hover_text("Net service names from tnsnames.ora");
+                    }
+                });
                 ui.end_row();
 
                 ui.label("Connect as");
@@ -748,6 +783,11 @@ fn ago(at: u64) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmAction {
     Commit,
+    /// Run statements that change data on a production connection.
+    Execute {
+        doc: DocId,
+        current_only: bool,
+    },
     Disconnect(String),
     Quit,
 }

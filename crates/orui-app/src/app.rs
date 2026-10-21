@@ -90,6 +90,10 @@ pub struct OruiApp {
     log: Vec<String>,
     connect_dialog: ConnectDialog,
     palette: CommandPalette,
+    /// The user confirmed running changes on production (one execution).
+    production_confirmed: bool,
+    /// Recently closed documents, for reopening (newest last).
+    closed_docs: Vec<Document>,
     /// Native file dialog running on a helper thread.
     file_dialog: Option<(
         std::sync::mpsc::Receiver<Option<std::path::PathBuf>>,
@@ -146,6 +150,8 @@ impl OruiApp {
             log: Vec::new(),
             connect_dialog: ConnectDialog::default(),
             palette: CommandPalette::default(),
+            production_confirmed: false,
+            closed_docs: Vec::new(),
             file_dialog: None,
             settings_dialog: Default::default(),
             finder: ObjectFinder::default(),
@@ -338,6 +344,24 @@ impl OruiApp {
                 }
             }
             OpenRequest::ConnectDialog => self.connect_dialog.show(self.last_profile.as_ref()),
+            OpenRequest::InsertText { text } => {
+                match self
+                    .focused
+                    .and_then(|id| self.docs.get_mut(&id))
+                    .and_then(Document::sql_window)
+                {
+                    Some(w) => w.editor.insert(&text),
+                    None => {
+                        if let Some(connection) = self.current_connection() {
+                            self.open(OpenRequest::Sql {
+                                connection,
+                                text,
+                                run: false,
+                            });
+                        }
+                    }
+                }
+            }
             OpenRequest::ProgramAt {
                 connection,
                 object,
@@ -445,7 +469,12 @@ impl OruiApp {
 
     fn close_doc(&mut self, id: DocId) {
         self.conns.close_doc(id);
-        self.docs.remove(&id);
+        if let Some(doc) = self.docs.remove(&id) {
+            self.closed_docs.push(doc);
+            if self.closed_docs.len() > 20 {
+                self.closed_docs.remove(0);
+            }
+        }
         self.routes.retain(|_, d| *d != id);
         if self.focused == Some(id) {
             // Follow the tab the dock shows now, like the next frame would.
@@ -738,6 +767,12 @@ impl OruiApp {
             }
             Command::Connect => self.connect_dialog.show(self.last_profile.as_ref()),
             Command::Settings => self.settings_dialog.open = true,
+            Command::ReopenClosed => {
+                if let Some(doc) = self.closed_docs.pop() {
+                    let Document { connection, kind } = doc;
+                    self.add_doc(connection, kind);
+                }
+            }
             Command::DebugStart => {
                 if let Some(id) = self.focused {
                     let effects = match self.docs.get_mut(&id).map(|d| &mut d.kind) {
@@ -959,12 +994,39 @@ impl OruiApp {
             self.connect_dialog.show(self.last_profile.as_ref());
             return;
         }
-        let read_only = self
+        let profile = self
             .docs
             .get(&id)
             .and_then(|d| d.connection.as_deref())
             .and_then(|c| self.conns.get(c))
-            .is_some_and(|c| c.profile.read_only);
+            .map(|c| c.profile.clone());
+        let read_only = profile.as_ref().is_some_and(|p| p.read_only);
+        // Production: confirm statements that change something.
+        if profile.as_ref().is_some_and(|p| p.production)
+            && !std::mem::take(&mut self.production_confirmed)
+            && let Some(DocKind::Sql(w)) = self.docs.get(&id).map(|d| &d.kind)
+        {
+            let changing = w
+                .statements(current_only)
+                .iter()
+                .filter(|s| s.kind != orui_plsql::StatementKind::SqlPlus && !is_query(&s.sql))
+                .count();
+            if changing > 0 {
+                let name = profile.map(|p| p.display_name()).unwrap_or_default();
+                self.confirm = Some(Confirm {
+                    action: ConfirmAction::Execute {
+                        doc: id,
+                        current_only,
+                    },
+                    title: "Change production data?".into(),
+                    text: format!(
+                        "{changing} statement(s) can modify data or objects on the production connection {name}."
+                    ),
+                    yes: "Run on production",
+                });
+                return;
+            }
+        }
         let Some(doc) = self.docs.get_mut(&id) else {
             return;
         };
@@ -1197,6 +1259,7 @@ impl OruiApp {
                 ui.separator();
                 item(ui, Command::CloseTab);
                 item(ui, Command::CloseOtherTabs);
+                item(ui, Command::ReopenClosed);
                 ui.separator();
                 item(ui, Command::Settings);
                 ui.separator();
@@ -1633,6 +1696,10 @@ impl OruiApp {
             if yes {
                 match action {
                     ConfirmAction::Commit => self.end_transaction(true),
+                    ConfirmAction::Execute { doc, current_only } => {
+                        self.production_confirmed = true;
+                        self.execute(doc, current_only);
+                    }
                     ConfirmAction::Disconnect(name) => self.disconnect(&name),
                     ConfirmAction::Quit => {
                         self.quit_confirmed = true;

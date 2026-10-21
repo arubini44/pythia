@@ -12,6 +12,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 mod connections;
 mod settings;
+pub mod tns;
 
 pub use connections::{ConnectionProfile, Connections, Privilege};
 pub use settings::{EditorSettings, KeymapPreset, Settings, ThemeChoice};

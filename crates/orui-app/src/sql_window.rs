@@ -205,7 +205,7 @@ impl SqlWindow {
         self.state.running.is_some() || self.state.fetching.is_some() || self.state.prompt.is_some()
     }
 
-    fn statements(&self, current_only: bool) -> Vec<PendingStatement> {
+    pub fn statements(&self, current_only: bool) -> Vec<PendingStatement> {
         let text = self.editor.text();
         let selection = self.editor.selection();
         let (base, src) = match &selection {

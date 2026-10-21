@@ -33,6 +33,7 @@ commands! {
     SaveFileAs => "File: Save As…",
     CloseTab => "File: Close Window",
     CloseOtherTabs => "File: Close Other Windows",
+    ReopenClosed => "File: Reopen Closed Window",
     Settings => "File: Settings…",
     Connect => "Session: Connect…",
     Disconnect => "Session: Disconnect",
@@ -98,6 +99,10 @@ impl Keymap {
             KeymapPreset::PlsqlDeveloper => vec![
                 (Command::NewSqlWindow, KeyboardShortcut::new(ctrl, Key::N)),
                 (Command::OpenFile, KeyboardShortcut::new(ctrl, Key::O)),
+                (
+                    Command::ReopenClosed,
+                    KeyboardShortcut::new(ctrl | shift, Key::T),
+                ),
                 (Command::DebugStart, KeyboardShortcut::new(ctrl, Key::F9)),
                 (
                     Command::ToggleBreakpoint,
