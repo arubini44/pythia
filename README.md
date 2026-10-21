@@ -53,8 +53,9 @@ for Linux, Windows and macOS.
   (gutter markers and squiggles), unsaved-change tracking, save to file.
 - **Test…** generates a ready-to-run block for any procedure or function
   (IN parameters as binds, OUT parameters printed).
-- **Debugger** (DBMS_DEBUG_JDWP): breakpoints, step over/into/out, call
-  stack, variables including records and collections.
+- **Debugger** (DBMS_DEBUG_JDWP): breakpoints with conditions and hit
+  counts, break on exception, step over/into/out, call stack, variables
+  including records and collections, watches, values on hover.
 - Find in database source (Ctrl+Alt+F) with regular expressions.
 
 ![Debugger stopped at a breakpoint](docs/screenshots/debugger.png)

@@ -258,17 +258,17 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Research: implement `DBMS_DEBUG_JDWP` (JDWP protocol client in Rust, supported going forward) and/or `DBMS_DEBUG` (deprecated, but what PL/SQL Developer uses) – decide on a primary backend
 - [x] Privilege check and setup assistant (`DEBUG CONNECT SESSION`, `DEBUG ANY PROCEDURE`, ACL for JDWP)
 - [x] Debug session lifecycle: target session + debugger session
-- [ ] Breakpoints in gutter: line, conditional, hit count, enable/disable
+- [x] Breakpoints in gutter: line, conditional, hit count, enable/disable
 - [ ] Breakpoints persisted per object
 - [x] Step into / over / out, run to cursor, continue, abort (no run to cursor)
-- [ ] Break on exception (all / specific ORA codes)
+- [x] Break on exception (all / specific ORA codes) (all exceptions only)
 - [x] Call stack panel with navigation
-- [x] Variables panel: locals, parameters, package globals (locals and parameters; no package globals)
+- [x] Variables panel: locals, parameters, package globals (package globals through watches)
 - [x] Inspect records, collections, objects (tree view)
-- [ ] Watches with expressions
+- [x] Watches with expressions (variable paths: `rec.field`, `coll(n)`, `pkg.g_var`; no arithmetic)
 - [ ] Modify variable values while paused
-- [ ] Hover over variable shows value while paused
-- [ ] DBMS_OUTPUT during debugging
+- [x] Hover over variable shows value while paused
+- [x] DBMS_OUTPUT during debugging (shown when the run ends)
 - [x] Auto-compile with debug info before starting
 - [ ] Debug triggers and code called from other sessions (attach mode)
 
