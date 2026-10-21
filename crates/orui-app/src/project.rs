@@ -530,7 +530,7 @@ impl Project {
     pub fn diff_head(&mut self, path: &Path, actions: &mut Vec<ProjectAction>) {
         let Some(repo) = &self.state.repo else { return };
         let committed = crate::git::head_text(&repo.root, path).unwrap_or_default();
-        match std::fs::read_to_string(path) {
+        match crate::text_file::read(path).map(|f| f.text) {
             Ok(current) => actions.push(ProjectAction::Diff {
                 title: format!("{} (changes)", file_name(path)),
                 left: ("HEAD".into(), committed),
@@ -542,7 +542,7 @@ impl Project {
     }
 
     pub fn compare_db(&mut self, path: &Path, connection: &str, actions: &mut Vec<ProjectAction>) {
-        let text = match std::fs::read_to_string(path) {
+        let text = match crate::text_file::read(path).map(|f| f.text) {
             Ok(t) => t,
             Err(e) => {
                 self.state.message = Some((format!("{}: {e}", path.display()), true));
@@ -691,7 +691,7 @@ impl Project {
                     let file = compare.file.clone();
                     let connection = compare.connection.clone();
                     self.state.compare = None;
-                    match std::fs::read_to_string(&file) {
+                    match crate::text_file::read(&file).map(|f| f.text) {
                         Ok(current) => actions.push(ProjectAction::Diff {
                             title: format!("{} ↔ {connection}", file_name(&file)),
                             left: (format!("{label} ({connection})"), db),

@@ -104,7 +104,7 @@ fn parse_status(root: &Path, raw: &[u8]) -> HashMap<PathBuf, FileStatus> {
 pub fn head_text(root: &Path, file: &Path) -> Option<String> {
     let relative = file.strip_prefix(root).ok()?;
     let spec = format!("HEAD:{}", relative.to_string_lossy().replace('\\', "/"));
-    git(root, &["show", &spec]).map(|b| String::from_utf8_lossy(&b).into_owned())
+    git(root, &["show", &spec]).map(|b| crate::text_file::decode(&b).text)
 }
 
 #[cfg(test)]
