@@ -38,6 +38,8 @@ pub struct GridState {
     pub links: Vec<GridLink>,
     /// A link was chosen: (index into `links`, row index into `rows`).
     follow: Option<(usize, usize)>,
+    /// Columns hidden by the user; left out of copies and exports too.
+    pub hidden: BTreeSet<usize>,
 }
 
 /// Rows related to a row, e.g. its parent through a foreign key.
@@ -116,6 +118,11 @@ impl GridState {
     /// The link the user chose in the context menu, with the row index.
     pub fn take_follow(&mut self) -> Option<(usize, usize)> {
         self.follow.take()
+    }
+
+    /// Column indices shown, in order.
+    pub fn visible_columns(&self, count: usize) -> Vec<usize> {
+        (0..count).filter(|c| !self.hidden.contains(c)).collect()
     }
 
     /// Fetched rows passing the filter.
@@ -456,11 +463,17 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
     if state.edit.as_ref().is_some_and(|e| e.active.is_some()) {
         return;
     }
-    let (row_count, col_count) = (state.view_len(rows), columns.len());
-    if row_count == 0 || col_count == 0 {
+    let visible = state.visible_columns(columns.len());
+    let row_count = state.view_len(rows);
+    let (Some(&first_col), Some(&last_col)) = (visible.first(), visible.last()) else {
+        return;
+    };
+    if row_count == 0 {
         return;
     }
-    let (r, c) = state.cursor.unwrap_or((0, 0));
+    let (r, c) = state.cursor.unwrap_or((0, first_col));
+    let prev_col = visible.iter().rev().find(|&&v| v < c).copied().unwrap_or(first_col);
+    let next_col = visible.iter().find(|&&v| v > c).copied().unwrap_or(last_col);
     let page = 20;
     let (mut nr, mut nc) = (r, c);
     let mut extend = false;
@@ -480,14 +493,14 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
                 } => match key {
                     Key::ArrowUp => nr = nr.saturating_sub(1),
                     Key::ArrowDown => nr = (nr + 1).min(row_count - 1),
-                    Key::ArrowLeft => nc = nc.saturating_sub(1),
-                    Key::ArrowRight => nc = (nc + 1).min(col_count - 1),
+                    Key::ArrowLeft => nc = prev_col,
+                    Key::ArrowRight => nc = next_col,
                     Key::PageUp => nr = nr.saturating_sub(page),
                     Key::PageDown => nr = (nr + page).min(row_count - 1),
-                    Key::Home if ctrl => (nr, nc) = (0, 0),
-                    Key::End if ctrl => (nr, nc) = (row_count - 1, col_count - 1),
-                    Key::Home => nc = 0,
-                    Key::End => nc = col_count - 1,
+                    Key::Home if ctrl => (nr, nc) = (0, first_col),
+                    Key::End if ctrl => (nr, nc) = (row_count - 1, last_col),
+                    Key::Home => nc = first_col,
+                    Key::End => nc = last_col,
                     Key::A if ctrl => select_all = true,
                     Key::Enter | Key::F2 if editable => start_edit = Some(None),
                     Key::Delete if editable => set_null = true,
@@ -501,8 +514,8 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
         }
     });
     if select_all {
-        state.anchor = Some((0, 0));
-        state.cursor = Some((row_count - 1, col_count - 1));
+        state.anchor = Some((0, first_col));
+        state.cursor = Some((row_count - 1, last_col));
     } else if (nr, nc) != (r, c) {
         state.select((nr, nc), extend);
         state.scroll_to_cursor = true;
@@ -565,6 +578,10 @@ fn table(
     let mut row_clicked = None;
     let mut open_viewer = None;
     let mut menu_cell = None;
+    let mut hide_column = None;
+    let mut show_all = false;
+    let visible = state.visible_columns(columns.len());
+    let hidden_count = state.hidden.len();
 
     egui::ScrollArea::horizontal()
         .id_salt(id.with("h"))
@@ -581,7 +598,8 @@ fn table(
             if let Some(row) = scroll_to {
                 builder = builder.scroll_to_row(row, None);
             }
-            for (c, col) in columns.iter().enumerate() {
+            for &c in &visible {
+                let col = &columns[c];
                 // Fit the header and the first rows' values, within limits.
                 let content = rows
                     .iter()
@@ -599,7 +617,8 @@ fn table(
                     header.col(|ui| {
                         ui.painter().rect_filled(ui.max_rect(), 0.0, header_bg);
                     });
-                    for (c, col) in columns.iter().enumerate() {
+                    for &c in &visible {
+                        let col = &columns[c];
                         header.col(|ui| {
                             ui.painter().rect_filled(ui.max_rect(), 0.0, header_bg);
                             let arrow = match state.sort {
@@ -622,7 +641,24 @@ fn table(
                                 if r.clicked() {
                                     sort_clicked = Some(c);
                                 }
-                                r.on_hover_text(format!("{}\nClick to sort", col.type_name));
+                                r.context_menu(|ui| {
+                                    if ui.button(format!("Hide {}", col.name)).clicked() {
+                                        hide_column = Some(c);
+                                        ui.close();
+                                    }
+                                    if hidden_count > 0
+                                        && ui
+                                            .button(format!("Show all columns ({hidden_count} hidden)"))
+                                            .clicked()
+                                    {
+                                        show_all = true;
+                                        ui.close();
+                                    }
+                                });
+                                r.on_hover_text(format!(
+                                    "{}\nClick to sort, right-click to hide",
+                                    col.type_name
+                                ));
                             });
                         });
                     }
@@ -645,7 +681,8 @@ fn table(
                         if number.clicked() {
                             row_clicked = Some(view_row);
                         }
-                        for (c, col) in columns.iter().enumerate() {
+                        for &c in &visible {
+                            let col = &columns[c];
                             let selected = state.is_selected(view_row, c);
                             let is_cursor = state.cursor == Some((view_row, c));
                             let cell_state = state.cell_state(view_row, c);
@@ -774,6 +811,14 @@ fn table(
     }
     if let Some(cell) = edit_click {
         state.start_edit(rows, cell, None);
+    }
+    if let Some(c) = hide_column
+        && visible.len() > 1
+    {
+        state.hidden.insert(c);
+    }
+    if show_all {
+        state.hidden.clear();
     }
     if let Some(c) = sort_clicked {
         state.set_sort(c, rows, columns);
@@ -929,13 +974,24 @@ pub fn selection_data(
     rows: &[Vec<Cell>],
     state: &GridState,
 ) -> (Vec<Column>, Vec<Vec<Cell>>) {
+    let shown = |c: &usize| !state.hidden.contains(c);
     let Some((r, c)) = state.selection().filter(|(_, c)| *c.end() < columns.len()) else {
-        return (columns.to_vec(), rows.to_vec());
+        if state.hidden.is_empty() {
+            return (columns.to_vec(), rows.to_vec());
+        }
+        let keep: Vec<usize> = (0..columns.len()).filter(shown).collect();
+        let cols = keep.iter().map(|&i| columns[i].clone()).collect();
+        let data = rows
+            .iter()
+            .map(|row| keep.iter().map(|&i| row.get(i).cloned().flatten()).collect())
+            .collect();
+        return (cols, data);
     };
-    let cols = columns[c.clone()].to_vec();
+    let keep: Vec<usize> = c.filter(shown).collect();
+    let cols = keep.iter().map(|&i| columns[i].clone()).collect();
     let data = r
         .filter_map(|vr| rows.get(state.row_index(vr)))
-        .map(|row| c.clone().map(|i| row.get(i).cloned().flatten()).collect())
+        .map(|row| keep.iter().map(|&i| row.get(i).cloned().flatten()).collect())
         .collect();
     (cols, data)
 }
@@ -977,7 +1033,7 @@ fn summary(columns: &[Column], rows: &[Vec<Cell>], state: &GridState) -> Option<
         let Some(row) = rows.get(state.row_index(vr)) else {
             continue;
         };
-        for ci in c.clone() {
+        for ci in c.clone().filter(|ci| !state.hidden.contains(ci)) {
             if let Some(Some(v)) = row.get(ci) {
                 non_null += 1;
                 if columns.get(ci).is_some_and(|col| col.numeric)
@@ -1318,5 +1374,18 @@ mod tests {
             summary(&c, &r, &s).unwrap(),
             "Count 4 · Sum 19 · Avg 9.5 · Min 9 · Max 10"
         );
+    }
+
+    #[test]
+    fn hidden_columns_are_left_out() {
+        let columns = cols();
+        let rows = vec![vec![Some("1".into()), Some("x".into())]];
+        let mut state = GridState::default();
+        state.hidden.insert(0);
+        let (c, d) = selection_data(&columns, &rows, &state);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].name, "B");
+        assert_eq!(d, vec![vec![Some("x".to_owned())]]);
+        assert_eq!(state.visible_columns(2), vec![1]);
     }
 }

@@ -1261,7 +1261,10 @@ impl SqlWindow {
                         .on_hover_text("Copy fetched rows as tab separated text")
                         .clicked()
                     {
-                        ui.ctx().copy_text(to_tsv(&result.columns, &result.rows));
+                        let mut all = GridState::default();
+                        all.hidden = result.grid.hidden.clone();
+                        let (columns, rows) = selection_data(&result.columns, &result.rows, &all);
+                        ui.ctx().copy_text(to_tsv(&columns, &rows));
                     }
                     let idle = state.fetching.is_none() && state.running.is_none();
                     if result.more
