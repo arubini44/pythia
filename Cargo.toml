@@ -21,6 +21,8 @@ egui_extras = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 oracle = "0.6"
 logos = "0.16"
+regex = "1"
+ropey = "1.6"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 directories = "6"
