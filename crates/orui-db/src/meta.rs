@@ -337,12 +337,12 @@ pub(crate) fn run(conn: &Connection, query: &MetaQuery) -> Result<MetaResult, Db
             owner,
             name,
             object_type,
-        } => MetaResult::Text(source(conn, owner, name, *object_type)?),
+        } => MetaResult::Text(object_source(conn, owner, name, *object_type)?),
         MetaQuery::Ddl {
             owner,
             name,
             object_type,
-        } => MetaResult::Text(ddl(conn, owner, name, *object_type)?),
+        } => MetaResult::Text(object_ddl(conn, owner, name, *object_type, true)?),
         MetaQuery::Errors {
             owner,
             name,
@@ -625,7 +625,9 @@ fn table_result(
     Ok(MetaResult::Table { columns, rows: out })
 }
 
-fn source(
+/// Source of a stored unit as a runnable `CREATE OR REPLACE` statement
+/// (without the terminating `/`).
+pub fn object_source(
     conn: &Connection,
     owner: &str,
     name: &str,
@@ -649,20 +651,24 @@ fn source(
     Ok(format!("CREATE OR REPLACE {}", text.trim_end()))
 }
 
-fn ddl(
+/// DDL of an object from DBMS_METADATA (tables with comments and indexes),
+/// without storage clauses; `schema` keeps the owner in the names.
+pub fn object_ddl(
     conn: &Connection,
     owner: &str,
     name: &str,
     object_type: ObjectType,
+    schema: bool,
 ) -> Result<String, DbError> {
     conn.execute(
         "begin \
+           dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'EMIT_SCHEMA', :1 = 1); \
            dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SQLTERMINATOR', true); \
            dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'PRETTY', true); \
            dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'SEGMENT_ATTRIBUTES', false); \
            dbms_metadata.set_transform_param(dbms_metadata.session_transform, 'STORAGE', false); \
          end;",
-        &[],
+        &[&i32::from(schema)],
     )?;
     let ddl: String = conn.query_row_as(
         "select dbms_metadata.get_ddl(:1, :2, :3) from dual",

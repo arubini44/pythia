@@ -294,7 +294,7 @@ impl DiffColors {
 
 /// Side-by-side diff with one shared scroll area (scrolling is
 /// synchronized by construction) and word-level highlights.
-fn side_by_side_ui(ui: &mut Ui, id: impl egui::AsIdSalt, d: &LineDiff, jump_to: Option<usize>) {
+pub fn side_by_side_ui(ui: &mut Ui, id: impl egui::AsIdSalt, d: &LineDiff, jump_to: Option<usize>) {
     let colors = DiffColors::new(ui);
     let font = FontId::monospace(12.5);
     let row_h = ui.fonts_mut(|f| f.row_height(&font)) + 3.0;

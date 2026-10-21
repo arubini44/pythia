@@ -73,6 +73,7 @@ commands! {
     MonitorTrace => "Monitor: Trace Analyzer (tkprof)",
     ShowPalette => "View: Command Palette",
     ShowBrowser => "View: Object Browser",
+    ShowProject => "View: Project",
     ShowLog => "View: Log",
     ThemeDark => "View: Dark Theme",
     ThemeLight => "View: Light Theme",

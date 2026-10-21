@@ -13,14 +13,17 @@ mod data_search;
 mod dialogs;
 mod documents;
 mod editor;
+mod git;
 mod history;
 mod icons_ext;
 mod import_window;
 mod jobs_window;
 mod monitor_window;
+mod object_files;
 mod object_view;
 mod plan_view;
 mod program_window;
+mod project;
 mod relations;
 mod reports;
 #[cfg(test)]
@@ -34,6 +37,7 @@ mod stubs;
 mod table_editor;
 mod table_parts;
 mod test_script;
+mod text_diff;
 mod theme;
 mod to_file;
 

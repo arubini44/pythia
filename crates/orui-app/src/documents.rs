@@ -99,6 +99,11 @@ impl Effects {
 /// Request to open a new document (from the browser or another document).
 #[derive(Debug, Clone)]
 pub enum OpenRequest {
+    /// Open a file in a SQL window.
+    File {
+        path: std::path::PathBuf,
+        connection: Option<String>,
+    },
     Sql {
         connection: String,
         text: String,
@@ -152,6 +157,7 @@ pub enum DocKind {
     DataSearch(crate::data_search::DataSearch),
     TableEditor(crate::table_editor::TableEditor),
     Jobs(crate::jobs_window::JobsWindow),
+    Diff(crate::text_diff::TextDiff),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -192,6 +198,7 @@ impl Document {
             DocKind::DataSearch(d) => d.title(),
             DocKind::TableEditor(t) => t.title(),
             DocKind::Jobs(j) => j.title(),
+            DocKind::Diff(d) => d.title(),
         }
     }
 
@@ -217,6 +224,7 @@ impl Document {
             DocKind::DataSearch(d) => d.is_busy(),
             DocKind::TableEditor(t) => t.is_busy(),
             DocKind::Jobs(j) => j.is_busy(),
+            DocKind::Diff(_) => false,
         }
     }
 
@@ -249,6 +257,7 @@ impl Document {
             DocKind::DataSearch(d) => d.on_event(event),
             DocKind::TableEditor(t) => t.on_event(event),
             DocKind::Jobs(j) => j.on_event(event),
+            DocKind::Diff(_) => Effects::default(),
         }
     }
 
@@ -264,6 +273,7 @@ impl Document {
             DocKind::DataSearch(d) => d.ui(ui, cx),
             DocKind::TableEditor(t) => t.ui(ui, cx),
             DocKind::Jobs(j) => j.ui(ui, cx),
+            DocKind::Diff(d) => d.ui(ui, cx),
         }
     }
 

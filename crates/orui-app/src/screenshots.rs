@@ -807,7 +807,7 @@ fn scheduler_jobs() {
     dbms_scheduler.drop_job(j.job_name, force => true);
   end loop;
   dbms_scheduler.create_job('ORUI_NIGHTLY_STATS', 'PLSQL_BLOCK',
-    'begin dbms_stats.gather_schema_stats(user); end;',
+    'begin dbms_session.sleep(0.2); end;',
     repeat_interval => 'FREQ=DAILY;BYHOUR=2', enabled => true,
     comments => 'Refreshes optimizer statistics of the schema every night');
   dbms_scheduler.create_job('ORUI_PURGE_LOGS', 'PLSQL_BLOCK', 'begin null; end;',
@@ -982,4 +982,138 @@ for each row begin :new.price := round(:new.price, 2); end;
         run: true,
     });
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// A project folder under git: schema export, status, diff with HEAD and
+/// with the database, deployment script.
+#[test]
+fn project_folder() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "create or replace package orui_proj_pkg as
+  function answer return number;
+end orui_proj_pkg;
+/
+create or replace package body orui_proj_pkg as
+  function answer return number is
+  begin
+    return 42;
+  end answer;
+end orui_proj_pkg;
+/"
+        .into(),
+        run: true,
+    });
+    wait_until(&mut h, "package", |app| !app.test_focused_busy());
+
+    let dir = std::env::temp_dir().join(format!("orui-project-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // The panel picks up results while it's visible.
+    h.state_mut()
+        .test_command(crate::commands::Command::ShowProject);
+    let mut actions = Vec::new();
+    h.state_mut()
+        .test_project()
+        .export_schema(dir.clone(), "orui@FREEPDB1", &mut actions);
+    h.state_mut().test_project_actions(actions);
+    let start = Instant::now();
+    while h.state_mut().test_project().is_busy() {
+        assert!(
+            start.elapsed() < Duration::from_secs(120),
+            "export {:?}",
+            h.state_mut().test_project().export_progress()
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let message = h
+        .state_mut()
+        .test_project()
+        .message()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(message.starts_with("Exported "), "{message}");
+    let body = dir.join("packages/orui_proj_pkg.pkb");
+    assert!(body.exists());
+
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "T"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "export"]);
+    let text = std::fs::read_to_string(&body).unwrap();
+    std::fs::write(&body, text.replace("return 42;", "return 43;")).unwrap();
+
+    let project = h.state_mut().test_project();
+    project.open_root(dir.clone());
+    project.refresh_now();
+    project.expand(dir.join("packages"));
+    let repo = project.repo().unwrap();
+    let modified = repo.root.join("packages/orui_proj_pkg.pkb");
+    assert_eq!(repo.status[&modified], crate::git::FileStatus::Modified);
+    h.state_mut()
+        .test_command(crate::commands::Command::ShowProject);
+    h.run_steps(3);
+    save(&mut h, "project-panel");
+
+    // Working copy against the database: the changed line differs.
+    let mut actions = Vec::new();
+    h.state_mut()
+        .test_project()
+        .compare_db(&modified, "orui@FREEPDB1", &mut actions);
+    h.state_mut().test_project_actions(actions);
+    let start = Instant::now();
+    while h.state_mut().test_project().is_busy() {
+        assert!(start.elapsed() < Duration::from_secs(30), "compare");
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    h.run_steps(3);
+    let title = h.state().test_focused_title().unwrap_or_default();
+    assert!(title.starts_with("orui_proj_pkg.pkb ↔"), "{title}");
+    save(&mut h, "project-compare-db");
+
+    // And against the last commit.
+    let mut actions = Vec::new();
+    h.state_mut()
+        .test_project()
+        .diff_head(&modified, &mut actions);
+    assert_eq!(actions.len(), 1);
+    h.state_mut().test_project_actions(actions);
+    h.run_steps(3);
+    assert_eq!(
+        h.state().test_focused_title().as_deref(),
+        Some("orui_proj_pkg.pkb (changes)")
+    );
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "drop package orui_proj_pkg;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+    std::fs::remove_dir_all(&dir).unwrap();
 }

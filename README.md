@@ -80,6 +80,17 @@ for Linux, Windows and macOS.
 
 ![Scheduler jobs](docs/screenshots/scheduler-jobs.png)
 
+**Projects and version control**
+- Open a folder of SQL and PL/SQL files as a project: git status in the
+  tree, a list of changed files, diff with the last commit.
+- Compare a file with its object in the database, side by side.
+- Export a schema as one file per object (`tables/`, `packages/*.pks|pkb`,
+  …) to put it under version control.
+- Deploy changed files: a reviewed script of `@file` lines in dependency
+  order.
+
+![Comparing a file with the database](docs/screenshots/project-compare-db.png)
+
 **Safety**
 - Every window has its own session and transaction (multi-session); the
   status bar always shows pending transactions; production connections are

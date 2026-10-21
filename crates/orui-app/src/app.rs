@@ -43,6 +43,7 @@ enum FileAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tab {
     Browser,
+    Project,
     Log,
     Debugger,
     Doc(DocId),
@@ -55,6 +56,8 @@ struct Workspace {
     docs: BTreeMap<DocId, Document>,
     next_doc: u64,
     last_profile: Option<ConnectionProfile>,
+    #[serde(default)]
+    project: crate::project::Project,
 }
 
 pub struct OruiApp {
@@ -72,6 +75,7 @@ pub struct OruiApp {
 
     conns: Connections,
     browser: Browser,
+    project: crate::project::Project,
     /// Main-session requests issued by documents, routed back by id.
     routes: HashMap<u64, DocId>,
     last_profile: Option<ConnectionProfile>,
@@ -139,6 +143,7 @@ impl OruiApp {
             focused: None,
             conns: Connections::default(),
             browser: Browser::default(),
+            project: Default::default(),
             routes: HashMap::new(),
             last_profile: None,
             connecting: None,
@@ -168,6 +173,7 @@ impl OruiApp {
                 app.docs = ws.docs;
                 app.next_doc = ws.next_doc;
                 app.last_profile = ws.last_profile;
+                app.project = ws.project;
                 let docs = &app.docs;
                 app.dock
                     .retain_tabs(|tab| !matches!(tab, Tab::Doc(id) if !docs.contains_key(id)));
@@ -197,7 +203,7 @@ impl OruiApp {
         let tabs: Vec<Tab> = self.docs.keys().map(|id| Tab::Doc(*id)).collect();
         let mut dock = DockState::new(tabs);
         let surface = dock.main_surface_mut();
-        surface.split_left(NodeIndex::root(), 0.24, vec![Tab::Browser]);
+        surface.split_left(NodeIndex::root(), 0.24, vec![Tab::Browser, Tab::Project]);
         self.dock = dock;
     }
 
@@ -305,6 +311,7 @@ impl OruiApp {
 
     fn open(&mut self, request: OpenRequest) {
         match request {
+            OpenRequest::File { path, connection } => self.open_file(path, connection),
             OpenRequest::Sql {
                 connection,
                 text,
@@ -447,6 +454,14 @@ impl OruiApp {
             && let Some(path) = self.dock.find_tab_from(|t| matches!(t, Tab::Doc(_)))
         {
             self.dock[path.surface].split_below(path.node, 0.62, vec![tab]);
+            return;
+        }
+        // The project sits next to the object browser.
+        if tab == Tab::Project
+            && let Some(path) = self.dock.find_tab(&Tab::Browser)
+        {
+            self.dock.set_focused_node_and_surface(path.node_path());
+            self.dock.push_to_focused_leaf(tab);
             return;
         }
         if !matches!(tab, Tab::Doc(_)) {
@@ -688,6 +703,60 @@ impl OruiApp {
         }
         self.catalog_requested.retain(|(c, _)| c != connection);
         self.catalog_revision += 1;
+    }
+
+    fn project_actions(&mut self, actions: Vec<crate::project::ProjectAction>) {
+        use crate::project::ProjectAction;
+        for action in actions {
+            match action {
+                ProjectAction::Open(path) => {
+                    let connection = self.current_connection();
+                    self.open_file(path, connection);
+                }
+                ProjectAction::Diff {
+                    title,
+                    left,
+                    right,
+                    file,
+                } => {
+                    let connection = self.current_connection();
+                    let diff = crate::text_diff::TextDiff::new(title, left, right, Some(file));
+                    self.add_doc(connection, DocKind::Diff(diff));
+                }
+                ProjectAction::Deploy(script) => match self.current_connection() {
+                    Some(connection) => self.open(OpenRequest::Sql {
+                        connection,
+                        text: script,
+                        run: false,
+                    }),
+                    None => {
+                        self.add_doc(None, DocKind::Sql(SqlWindow::new("Deploy".into(), script)));
+                    }
+                },
+                ProjectAction::Request(connection, request) => {
+                    self.conns.send_main(&connection, request);
+                }
+            }
+        }
+    }
+
+    /// Opens a file in a SQL window, or shows the window that has it open.
+    fn open_file(&mut self, path: std::path::PathBuf, connection: Option<String>) {
+        let existing = self.docs.iter().find_map(|(id, d)| match &d.kind {
+            DocKind::Sql(w) if w.path.as_deref() == Some(path.as_path()) => Some(*id),
+            _ => None,
+        });
+        if let Some(id) = existing {
+            self.open_tab(Tab::Doc(id));
+            return;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let connection = connection.or_else(|| self.current_connection());
+                self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, text)));
+            }
+            Err(e) => self.log(format!("Could not open {}: {e}", path.display())),
+        }
     }
 
     fn apply_browser(&mut self, effects: Effects) {
@@ -1026,6 +1095,7 @@ impl OruiApp {
             }
             Command::ShowPalette => self.palette.toggle(),
             Command::ShowBrowser => self.open_tab(Tab::Browser),
+            Command::ShowProject => self.open_tab(Tab::Project),
             Command::ShowLog => self.open_tab(Tab::Log),
             Command::ThemeDark | Command::ThemeLight | Command::ThemeSystem => {
                 self.settings.theme = match command {
@@ -1920,6 +1990,8 @@ impl eframe::App for OruiApp {
         let mut viewer = Viewer {
             docs: &mut self.docs,
             browser: &mut self.browser,
+            project: &mut self.project,
+            project_actions: Vec::new(),
             log: &self.log,
             settings: &self.settings,
             connections: &connections,
@@ -1945,6 +2017,7 @@ impl eframe::App for OruiApp {
         let Viewer {
             effects,
             browser_effects,
+            project_actions,
             closed,
             rebind,
             ..
@@ -1964,6 +2037,7 @@ impl eframe::App for OruiApp {
             self.apply(Some(id), effects);
         }
         self.apply_browser(browser_effects);
+        self.project_actions(project_actions);
 
         self.popups(&ctx, &mut commands);
         for command in commands {
@@ -1977,9 +2051,11 @@ impl eframe::App for OruiApp {
             docs: std::mem::take(&mut self.docs),
             next_doc: self.next_doc,
             last_profile: self.last_profile.clone(),
+            project: std::mem::take(&mut self.project),
         };
         eframe::set_value(storage, WORKSPACE_KEY, &workspace);
         self.docs = workspace.docs;
+        self.project = workspace.project;
         self.save_history();
     }
 
@@ -2207,6 +2283,20 @@ impl OruiApp {
         self.apply_browser(effects);
     }
 
+    pub fn test_project(&mut self) -> &mut crate::project::Project {
+        &mut self.project
+    }
+
+    pub fn test_project_actions(&mut self, actions: Vec<crate::project::ProjectAction>) {
+        self.project_actions(actions);
+    }
+
+    pub fn test_focused_title(&self) -> Option<String> {
+        self.focused
+            .and_then(|id| self.docs.get(&id))
+            .map(|d| d.title())
+    }
+
     pub fn test_browser_loading(&self) -> bool {
         self.browser.is_loading()
     }
@@ -2215,6 +2305,8 @@ impl OruiApp {
 struct Viewer<'a> {
     docs: &'a mut BTreeMap<DocId, Document>,
     browser: &'a mut Browser,
+    project: &'a mut crate::project::Project,
+    project_actions: Vec<crate::project::ProjectAction>,
     log: &'a [String],
     settings: &'a Settings,
     connections: &'a [String],
@@ -2241,6 +2333,7 @@ impl TabViewer for Viewer<'_> {
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
         match tab {
             Tab::Browser => "Objects".into(),
+            Tab::Project => "Project".into(),
             Tab::Log => "Log".into(),
             Tab::Debugger => "Debugger".into(),
             Tab::Doc(id) => match self.docs.get(id) {
@@ -2262,6 +2355,15 @@ impl TabViewer for Viewer<'_> {
             Tab::Browser => {
                 let effects = self.browser.ui(ui, self.connections);
                 self.browser_effects.extend(effects);
+            }
+            Tab::Project => {
+                let connection = self
+                    .browser
+                    .connection
+                    .clone()
+                    .filter(|c| self.connected.get(c).copied().unwrap_or(false));
+                let actions = self.project.ui(ui, connection.as_deref());
+                self.project_actions.extend(actions);
             }
             Tab::Debugger => {
                 let actions = self.debug.ui(ui);

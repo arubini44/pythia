@@ -308,17 +308,17 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Normalize DDL before compare (whitespace, storage clauses, schema prefix)
 - [x] Side-by-side diff view with inline highlighting
 - [x] Generate migration script in dependency order
-- [ ] Compare DB object vs local file (version control workflow)
+- [x] Compare DB object vs local file (version control workflow)
 
 ### 5.17 Data Export (M5)
 
 - [x] Export query result or tables to CSV, TSV, XLSX, JSON, XML, HTML, Markdown, SQL INSERT statements
 - [ ] Export tables tool: multiple tables, WHERE per table, include DDL
 - [ ] Options: delimiter, quoting, header, date/number formats, NULL representation, encoding
-- [ ] Streaming export (no full result in memory)
+- [x] Streaming export (no full result in memory) (Execute to file)
 - [ ] LOB handling: inline, separate files, skip
-- [ ] Export user objects (DDL for a schema) to files, one file per object
-- [ ] Progress and cancel
+- [x] Export user objects (DDL for a schema) to files, one file per object
+- [x] Progress and cancel (Execute to file, schema export)
 
 ### 5.18 Data Import (M5)
 
@@ -362,10 +362,10 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.22 Version Control Integration (M8/M9)
 
-- [ ] Projects map to folders, objects saved as files (`.pks`, `.pkb`, `.sql`, ...)
-- [ ] Git status in file tree (via `gix`)
-- [ ] Diff working copy vs HEAD, vs DB version
-- [ ] Deploy changed files to a connection
+- [x] Projects map to folders, objects saved as files (`.pks`, `.pkb`, `.sql`, ...)
+- [x] Git status in file tree (via the git command line, not `gix`)
+- [x] Diff working copy vs HEAD, vs DB version
+- [x] Deploy changed files to a connection (generated `@file` script)
 
 ### 5.23 Reports (M9)
 
