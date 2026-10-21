@@ -1,0 +1,22 @@
+[package]
+name = "orui-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "orui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_dock.workspace = true
+orui-config.workspace = true
+orui-db.workspace = true
+orui-plsql.workspace = true
+orui-ui.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

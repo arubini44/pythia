@@ -1,0 +1,11 @@
+[package]
+name = "orui-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+egui_extras.workspace = true
+orui-db.workspace = true
+orui-plsql.workspace = true

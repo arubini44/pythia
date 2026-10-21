@@ -1,0 +1,12 @@
+[package]
+name = "orui-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+directories.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true

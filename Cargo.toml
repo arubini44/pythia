@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+
+[workspace.dependencies]
+orui-config = { path = "crates/orui-config" }
+orui-db = { path = "crates/orui-db" }
+orui-plsql = { path = "crates/orui-plsql" }
+orui-ui = { path = "crates/orui-ui" }
+
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "glow", "default_fonts", "accesskit", "wayland", "x11", "persistence"] }
+egui = "0.36"
+egui_extras = "0.36"
+egui_dock = { version = "0.21", features = ["serde"] }
+oracle = "0.6"
+logos = "0.16"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+directories = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+insta = "1"
+
+# Keep dev builds small and fast: full debug info only for our own crates.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

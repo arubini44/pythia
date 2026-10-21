@@ -1,0 +1,86 @@
+---
+source: crates/orui-plsql/src/lexer.rs
+expression: "kinds(\"SELECT 'it''s', q'{a}'' b}', nq'!x!', N'n', 1.5e3, .5, 1..10 FROM dual /* c */ /*+ hint */\")"
+---
+[
+    (
+        Keyword,
+        "SELECT",
+    ),
+    (
+        String,
+        "'it''s'",
+    ),
+    (
+        Comma,
+        ",",
+    ),
+    (
+        QString,
+        "q'{a}'",
+    ),
+    (
+        String,
+        "' b}'",
+    ),
+    (
+        Comma,
+        ",",
+    ),
+    (
+        QString,
+        "nq'!x!'",
+    ),
+    (
+        Comma,
+        ",",
+    ),
+    (
+        String,
+        "N'n'",
+    ),
+    (
+        Comma,
+        ",",
+    ),
+    (
+        Number,
+        "1.5e3",
+    ),
+    (
+        Comma,
+        ",",
+    ),
+    (
+        Number,
+        ".5",
+    ),
+    (
+        Comma,
+        ",",
+    ),
+    (
+        Number,
+        "1",
+    ),
+    (
+        Operator,
+        "..",
+    ),
+    (
+        Number,
+        "10",
+    ),
+    (
+        Keyword,
+        "FROM",
+    ),
+    (
+        Ident,
+        "dual",
+    ),
+    (
+        Hint,
+        "/*+ hint */",
+    ),
+]

@@ -1,0 +1,11 @@
+[package]
+name = "orui-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oracle.workspace = true
+orui-config.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

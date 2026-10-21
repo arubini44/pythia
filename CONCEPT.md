@@ -64,11 +64,11 @@ orui/
 
 ### Core principles
 
-- [ ] UI thread never blocks: every DB call runs in a worker task, the UI gets messages over channels (`DbRequest` / `DbEvent`)
+- [x] UI thread never blocks: every DB call runs in a worker task, the UI gets messages over channels (`DbRequest` / `DbEvent`)
 - [ ] Each editor tab can own a **dedicated session** or share one (like PL/SQL Developer's session modes: multi-session, dual-session, single-session)
 - [ ] Every long-running operation can be cancelled (`OCIBreak` / `Connection::break_execution`)
 - [ ] Metadata cache per connection with incremental refresh (based on `LAST_DDL_TIME`)
-- [ ] Command pattern for all user actions, so we get keybindings, the command palette and macros from one place
+- [x] Command pattern for all user actions, so we get keybindings, the command palette and macros from one place
 
 ---
 
@@ -94,16 +94,16 @@ orui/
 ### 5.1 Application Shell (M0)
 
 - [ ] Cargo workspace with crates listed above
-- [ ] `eframe` app with the `wgpu` backend, GL fallback
+- [x] `eframe` app with the `wgpu` backend, GL fallback
 - [ ] Dockable layout (`egui_dock`): object browser, editors, output, results, debugger panels
-- [ ] Save/restore layout and open tabs per workspace
-- [ ] Main menu, toolbar, status bar (connection, session, transaction state, cursor pos, encoding)
-- [ ] Command palette (Ctrl+Shift+P) with fuzzy search over all commands
+- [x] Save/restore layout and open tabs per workspace
+- [x] Main menu, toolbar, status bar (connection, session, transaction state, cursor pos, encoding)
+- [x] Command palette (Ctrl+Shift+P) with fuzzy search over all commands
 - [ ] Configurable keybindings; ship a PL/SQL Developer compatible preset
 - [ ] Light/dark themes, custom theme files (TOML)
 - [ ] Font selection with ligatures off by default, HiDPI scaling
 - [ ] Settings dialog (global, per connection, per project)
-- [ ] Crash handler and panic logging
+- [x] Crash handler and panic logging
 - [ ] Single-instance mode with file open forwarding (optional)
 
 ### 5.2 Connection Management (M1)
@@ -111,7 +111,7 @@ orui/
 - [ ] Connection dialog: user/password, TNS alias, EZConnect, full descriptor
 - [ ] Read `tnsnames.ora` / `sqlnet.ora` (`TNS_ADMIN`, `ORACLE_HOME`)
 - [ ] Wallet / external authentication (`/@alias`)
-- [ ] Connect as SYSDBA / SYSOPER / SYSBACKUP
+- [x] Connect as SYSDBA / SYSOPER / SYSBACKUP
 - [ ] Proxy user connect (`user[proxy]`)
 - [ ] Saved connections organized in folders, with colors and tags (e.g. red = production)
 - [ ] Passwords in the OS keychain (`keyring`), never in plain text
@@ -121,7 +121,7 @@ orui/
 - [ ] Connection health check, auto-reconnect prompt
 - [ ] Set NLS settings, `CURRENT_SCHEMA`, module/action/client info on connect
 - [ ] Login script per connection (like `login.sql`)
-- [ ] Detect Instant Client and give a helpful message if it's missing
+- [x] Detect Instant Client and give a helpful message if it's missing
 
 ### 5.3 Code Editor Widget (M2)
 
@@ -152,7 +152,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [ ] Highlighting for SQL*Plus commands (`SET`, `PROMPT`, `@`, `DEFINE`, `/`)
 - [ ] Incremental re-lexing on edit (only dirty lines)
 - [ ] Recursive-descent PL/SQL parser producing an AST with error recovery
-- [ ] Statement splitting (handles `/`, `;`, PL/SQL blocks, `CREATE ... AS` units)
+- [x] Statement splitting (handles `/`, `;`, PL/SQL blocks, `CREATE ... AS` units)
 - [ ] Code outline / structure view (package specs, bodies, procedures, functions, types, cursors, variables)
 - [ ] Code completion:
   - [ ] Keywords
@@ -172,13 +172,13 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.5 SQL Window (M1)
 
-- [ ] Execute statement under cursor / selection / whole script (F8 / Ctrl+Enter)
-- [ ] Multiple result sets in tabs
+- [x] Execute statement under cursor / selection / whole script (F8 / Ctrl+Enter)
+- [x] Multiple result sets in tabs
 - [ ] Bind variable prompt dialog (remember last values)
 - [ ] Substitution variable prompt (`&var`, `&&var`)
-- [ ] Execution timing, rows affected, DBMS_OUTPUT capture
-- [ ] Cancel running statement
-- [ ] Auto-commit toggle, commit/rollback buttons, pending transaction indicator
+- [x] Execution timing, rows affected, DBMS_OUTPUT capture
+- [x] Cancel running statement
+- [x] Auto-commit toggle, commit/rollback buttons, pending transaction indicator
 - [ ] Warn on closing with an open transaction
 - [ ] Query history per connection (searchable, persisted)
 - [ ] Fetch modes: first N rows, fetch next page, fetch all
@@ -430,9 +430,9 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ## 8. First Steps
 
-- [ ] Set up the Cargo workspace and CI
-- [ ] eframe + wgpu window with egui_dock layout
+- [x] Set up the Cargo workspace and CI
+- [x] eframe + wgpu window with egui_dock layout
 - [ ] Spike: connect with the `oracle` crate, run a query on a worker thread, show the result in a virtualized grid
 - [ ] Spike: minimal custom code editor with ropey and a PL/SQL lexer for highlighting
 - [ ] Spike: `DBMS_DEBUG` and `DBMS_DEBUG_JDWP` proof of concept (set breakpoint, step, read a variable)
-- [ ] Docker compose file with Oracle Free for local dev and tests
+- [x] Docker compose file with Oracle Free for local dev and tests
