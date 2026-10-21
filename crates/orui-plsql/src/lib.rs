@@ -2,12 +2,14 @@
 //! error-tolerant parser for navigation, outline and completion.
 
 pub mod ast;
+mod format;
 mod header;
 mod keywords;
 mod lexer;
 mod parser;
 mod splitter;
 
+pub use format::{Case, CommaStyle, FormatOptions, Formatted, format, format_range};
 pub use header::{UnitHeader, unit_header};
 pub use keywords::is_keyword;
 pub use lexer::{Token, TokenKind, tokenize};
