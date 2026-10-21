@@ -50,7 +50,7 @@ pub fn lex_line(line: &str, state: LineState) -> (Vec<LineToken>, LineState) {
     let end_state = raw.last().map_or(LineState::Normal, |t| {
         end_state(&src[t.span.clone()], t.kind)
     });
-    let tokens = raw
+    let mut tokens: Vec<LineToken> = raw
         .into_iter()
         .filter(|t| t.span.end > p)
         .map(|t| LineToken {
@@ -58,7 +58,183 @@ pub fn lex_line(line: &str, state: LineState) -> (Vec<LineToken>, LineState) {
             kind: t.kind,
         })
         .collect();
+    if state == LineState::Normal {
+        mark_sqlplus(line, &mut tokens);
+    }
     (tokens, end_state)
+}
+
+/// SQL*Plus commands that start a line (in column 0).
+const SQLPLUS: &[&str] = &[
+    "ACCEPT",
+    "APPEND",
+    "ARCHIVE",
+    "ATTRIBUTE",
+    "BREAK",
+    "BTITLE",
+    "CLEAR",
+    "COL",
+    "COLUMN",
+    "COMPUTE",
+    "CONN",
+    "CONNECT",
+    "COPY",
+    "DEF",
+    "DEFINE",
+    "DESC",
+    "DESCRIBE",
+    "DISC",
+    "DISCONNECT",
+    "EXEC",
+    "EXECUTE",
+    "EXIT",
+    "HOST",
+    "PAUSE",
+    "PRINT",
+    "PRO",
+    "PROMPT",
+    "QUIT",
+    "REM",
+    "REMARK",
+    "SHO",
+    "SHOW",
+    "SPO",
+    "SPOOL",
+    "STA",
+    "START",
+    "TIMING",
+    "TTITLE",
+    "UNDEF",
+    "UNDEFINE",
+    "VAR",
+    "VARIABLE",
+    "WHENEVER",
+];
+
+/// `SET` options of SQL*Plus (`SET x = 1` in an UPDATE is SQL).
+const SQLPLUS_SET: &[&str] = &[
+    "APPI",
+    "APPINFO",
+    "ARRAY",
+    "ARRAYSIZE",
+    "AUTO",
+    "AUTOCOMMIT",
+    "AUTOP",
+    "AUTOPRINT",
+    "AUTOT",
+    "AUTOTRACE",
+    "CMDS",
+    "COLSEP",
+    "CON",
+    "CONCAT",
+    "DEF",
+    "DEFINE",
+    "ECHO",
+    "ESC",
+    "ESCAPE",
+    "FEED",
+    "FEEDBACK",
+    "HEA",
+    "HEADING",
+    "HEADSEP",
+    "LIN",
+    "LINESIZE",
+    "LONG",
+    "LONGCHUNKSIZE",
+    "MARK",
+    "MARKUP",
+    "NEWP",
+    "NEWPAGE",
+    "NULL",
+    "NUMF",
+    "NUMFORMAT",
+    "NUM",
+    "NUMWIDTH",
+    "PAGES",
+    "PAGESIZE",
+    "PAU",
+    "PAUSE",
+    "SERVEROUT",
+    "SERVEROUTPUT",
+    "SQLBL",
+    "SQLBLANKLINES",
+    "SQLP",
+    "SQLPROMPT",
+    "SQLT",
+    "SQLTERMINATOR",
+    "TAB",
+    "TERM",
+    "TERMOUT",
+    "TI",
+    "TIME",
+    "TIMI",
+    "TIMING",
+    "TRIM",
+    "TRIMOUT",
+    "TRIMS",
+    "TRIMSPOOL",
+    "VER",
+    "VERIFY",
+    "WRA",
+    "WRAP",
+];
+
+/// Recolors a line holding a SQL*Plus command: the command word (or `@`,
+/// `/`) and, for `@file`, the path. Commands must start in column 0, which
+/// keeps indented SQL (`  desc`, `  start with`) out.
+fn mark_sqlplus(line: &str, tokens: &mut [LineToken]) {
+    let significant: Vec<usize> = (0..tokens.len())
+        .filter(|&i| !tokens[i].kind.is_trivia())
+        .collect();
+    let Some(&first) = significant.first() else {
+        return;
+    };
+    let text = |i: usize| &line[tokens[i].range.clone()];
+    let next = significant.get(1).map(|&i| text(i).to_ascii_uppercase());
+    // A lone `/` runs the buffer; leading whitespace is fine for it.
+    if significant.len() == 1 && text(first) == "/" {
+        tokens[first].kind = TokenKind::SqlPlus;
+        return;
+    }
+    if tokens[first].range.start != 0 {
+        return;
+    }
+    let word = text(first).to_ascii_uppercase();
+    if word == "@" || word == "@@" {
+        for t in &mut tokens[first..] {
+            if !matches!(t.kind, TokenKind::LineComment | TokenKind::SubstVar) {
+                t.kind = TokenKind::SqlPlus;
+            }
+        }
+        return;
+    }
+    if !tokens[first].kind.is_word() {
+        return;
+    }
+    let is_command = match word.as_str() {
+        "SET" => next.as_deref().is_some_and(|n| SQLPLUS_SET.contains(&n)),
+        // `START WITH` and `CONNECT BY` belong to hierarchical queries.
+        "START" | "STA" => next.as_deref() != Some("WITH"),
+        "CONNECT" | "CONN" => next.as_deref() != Some("BY"),
+        // `DESC` alone ends an ORDER BY; `desc t` describes.
+        "DESC" | "DESCRIBE" => {
+            significant.len() >= 2
+                && tokens[significant[1]].kind.is_word()
+                && next.as_deref() != Some("NULLS")
+        }
+        // PL/SQL's `exit when` is indented anyway; plain `exit` ends the script.
+        "EXIT" | "QUIT" => next.as_deref() != Some("WHEN"),
+        w => SQLPLUS.contains(&w),
+    };
+    if !is_command {
+        return;
+    }
+    tokens[first].kind = TokenKind::SqlPlus;
+    if word == "SET"
+        && let Some(&option) = significant.get(1)
+    {
+        tokens[option].kind = TokenKind::SqlPlus;
+    }
 }
 
 /// State after the last token of a line: unterminated constructs continue.
@@ -257,5 +433,43 @@ mod tests {
         let full = Highlighter::new(&rope);
         assert_eq!(h.len(), rope.len_lines());
         assert_eq!(h.states, full.states);
+    }
+
+    fn sqlplus_words(line: &str) -> Vec<String> {
+        let (tokens, _) = lex_line(line, LineState::Normal);
+        tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::SqlPlus)
+            .map(|t| line[t.range.clone()].to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn marks_sqlplus_commands() {
+        assert_eq!(sqlplus_words("prompt Installing"), ["prompt"]);
+        assert_eq!(
+            sqlplus_words("set serveroutput on"),
+            ["set", "serveroutput"]
+        );
+        assert_eq!(
+            sqlplus_words("@@sub/tables.sql").concat(),
+            "@@sub/tables.sql"
+        );
+        assert_eq!(sqlplus_words("   /"), ["/"]);
+        assert_eq!(sqlplus_words("desc employees"), ["desc"]);
+        assert_eq!(
+            sqlplus_words("whenever sqlerror exit failure"),
+            ["whenever"]
+        );
+        assert_eq!(sqlplus_words("exit"), ["exit"]);
+        // SQL that looks similar stays SQL.
+        assert!(sqlplus_words("set x = 1").is_empty());
+        assert!(sqlplus_words("   set salary = 1").is_empty());
+        assert!(sqlplus_words("start with manager_id is null").is_empty());
+        assert!(sqlplus_words("connect by prior id = parent_id").is_empty());
+        assert!(sqlplus_words("desc").is_empty());
+        assert!(sqlplus_words("desc nulls last").is_empty());
+        assert!(sqlplus_words("  prompt indented").is_empty());
+        assert!(sqlplus_words("select 1 / 2 from dual").is_empty());
     }
 }

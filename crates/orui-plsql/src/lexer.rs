@@ -59,6 +59,9 @@ pub enum TokenKind {
 
     /// Reserved word (produced by [`tokenize`], never by the raw lexer).
     Keyword,
+    /// SQL*Plus command (`PROMPT`, `SET SERVEROUTPUT`, `@file`, `/`); only
+    /// produced by the editor's line highlighter.
+    SqlPlus,
     /// Input the lexer could not make sense of.
     Error,
 }

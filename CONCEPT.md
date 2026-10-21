@@ -149,7 +149,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.4 Syntax Highlighting & Language Intelligence (M2/M4)
 
 - [x] PL/SQL + SQL lexer (`logos`): keywords, identifiers, quoted identifiers, strings incl. `q'[...]'`, numbers, comments, hints `/*+ */`, bind variables, substitution variables `&var`
-- [ ] Highlighting for SQL*Plus commands (`SET`, `PROMPT`, `@`, `DEFINE`, `/`)
+- [x] Highlighting for SQL*Plus commands (`SET`, `PROMPT`, `@`, `DEFINE`, `/`)
 - [x] Incremental re-lexing on edit (only dirty lines)
 - [x] Recursive-descent PL/SQL parser producing an AST with error recovery
 - [x] Statement splitting (handles `/`, `;`, PL/SQL blocks, `CREATE ... AS` units)
@@ -393,7 +393,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [ ] Benchmarks in CI (`criterion`) for lexer, parser, grid rendering
 
 ### Reliability & Safety
-- [ ] Never lose unsaved editor content: autosave to a recovery folder
+- [x] Never lose unsaved editor content: autosave to a recovery folder (the workspace, including unsaved editor text, is saved every 30 s; no separate recovery folder)
 - [x] Transaction state always visible; warn before disconnect/exit with uncommitted work
 - [x] All destructive actions confirm, with extra confirm on production-flagged connections
 - [x] No passwords in logs, history, or crash reports

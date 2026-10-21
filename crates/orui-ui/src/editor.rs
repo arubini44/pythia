@@ -23,6 +23,7 @@ pub struct SyntaxTheme {
     pub variable: Color32,
     pub operator: Color32,
     pub error: Color32,
+    pub sqlplus: Color32,
 }
 
 impl SyntaxTheme {
@@ -37,6 +38,7 @@ impl SyntaxTheme {
             variable: Color32::from_rgb(0x9c, 0xdc, 0xfe),
             operator: Color32::from_rgb(0xd4, 0xd4, 0xd4),
             error: Color32::from_rgb(0xf4, 0x47, 0x47),
+            sqlplus: Color32::from_rgb(0x4e, 0xc9, 0xb0),
         }
     }
 
@@ -52,6 +54,7 @@ impl SyntaxTheme {
             variable: Color32::from_rgb(0x00, 0x70, 0xc1),
             operator: Color32::from_rgb(0x80, 0x00, 0x00),
             error: Color32::from_rgb(0xe0, 0x00, 0x00),
+            sqlplus: Color32::from_rgb(0x26, 0x7f, 0x99),
         }
     }
 
@@ -73,6 +76,7 @@ impl SyntaxTheme {
             TokenKind::BindVar | TokenKind::SubstVar => self.variable,
             TokenKind::Operator | TokenKind::Semicolon => self.operator,
             TokenKind::Error => self.error,
+            TokenKind::SqlPlus => self.sqlplus,
             _ => self.text,
         }
     }

@@ -616,6 +616,7 @@ end;
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
     h.state_mut().test_open_file(dir.join("install.sql"));
     h.run_steps(2);
+    save(&mut h, "deployment-script");
     h.state_mut()
         .test_command(crate::commands::Command::ExecuteAll);
     wait_until(&mut h, "script", |app| !app.test_focused_busy());
