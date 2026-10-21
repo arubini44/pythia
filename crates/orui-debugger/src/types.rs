@@ -1,0 +1,202 @@
+//! Debugger model: units, breakpoints, locations, frames and variables.
+
+use std::fmt;
+
+/// Kind of PL/SQL unit, as Oracle's JDWP agent names its classes:
+/// `$Oracle.<Kind>.<OWNER>.<NAME>` (anonymous blocks: `$Oracle.Block.<OWNER>.<hash>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum UnitType {
+    Procedure,
+    Function,
+    Package,
+    PackageBody,
+    Trigger,
+    Type,
+    TypeBody,
+    /// Anonymous block.
+    Block,
+}
+
+impl UnitType {
+    pub const ALL: [UnitType; 8] = [
+        UnitType::Procedure,
+        UnitType::Function,
+        UnitType::Package,
+        UnitType::PackageBody,
+        UnitType::Trigger,
+        UnitType::Type,
+        UnitType::TypeBody,
+        UnitType::Block,
+    ];
+
+    /// The class name segment used by Oracle's JDWP agent.
+    pub fn class_kind(self) -> &'static str {
+        match self {
+            UnitType::Procedure => "Procedure",
+            UnitType::Function => "Function",
+            UnitType::Package => "Package",
+            UnitType::PackageBody => "PackageBody",
+            UnitType::Trigger => "Trigger",
+            UnitType::Type => "Type",
+            UnitType::TypeBody => "TypeBody",
+            UnitType::Block => "Block",
+        }
+    }
+
+    /// Dictionary type name (`ALL_OBJECTS.OBJECT_TYPE`).
+    pub fn dictionary_name(self) -> &'static str {
+        match self {
+            UnitType::Procedure => "PROCEDURE",
+            UnitType::Function => "FUNCTION",
+            UnitType::Package => "PACKAGE",
+            UnitType::PackageBody => "PACKAGE BODY",
+            UnitType::Trigger => "TRIGGER",
+            UnitType::Type => "TYPE",
+            UnitType::TypeBody => "TYPE BODY",
+            UnitType::Block => "ANONYMOUS BLOCK",
+        }
+    }
+
+    pub fn from_dictionary(name: &str) -> Option<Self> {
+        UnitType::ALL
+            .into_iter()
+            .find(|t| t.dictionary_name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// A PL/SQL unit (stored object or anonymous block).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Unit {
+    pub owner: String,
+    pub name: String,
+    pub unit_type: UnitType,
+}
+
+impl Unit {
+    pub fn new(owner: impl Into<String>, name: impl Into<String>, unit_type: UnitType) -> Self {
+        Self {
+            owner: owner.into(),
+            name: name.into(),
+            unit_type,
+        }
+    }
+
+    /// JDWP class signature, e.g. `L$Oracle/Procedure/HR/RAISE_SALARY;`.
+    pub fn class_signature(&self) -> String {
+        format!(
+            "L$Oracle/{}/{}/{};",
+            self.unit_type.class_kind(),
+            self.owner,
+            self.name
+        )
+    }
+
+    /// Parses a JDWP class signature back into a unit.
+    pub fn from_class_signature(signature: &str) -> Option<Self> {
+        let inner = signature.strip_prefix("L$Oracle/")?.strip_suffix(';')?;
+        let mut parts = inner.splitn(3, '/');
+        let kind = parts.next()?;
+        let owner = parts.next()?;
+        let name = parts.next()?;
+        let unit_type = UnitType::ALL.into_iter().find(|t| t.class_kind() == kind)?;
+        Some(Unit::new(owner, name, unit_type))
+    }
+}
+
+impl fmt::Display for Unit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.unit_type {
+            UnitType::Block => write!(f, "anonymous block"),
+            t => write!(
+                f,
+                "{} {}.{}",
+                t.dictionary_name().to_lowercase(),
+                self.owner,
+                self.name
+            ),
+        }
+    }
+}
+
+/// A line breakpoint in a unit (1-based source line).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Breakpoint {
+    pub unit: Unit,
+    pub line: u32,
+}
+
+/// Where execution stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Location {
+    pub unit: Unit,
+    /// Source line, if the unit has line information.
+    pub line: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub location: Location,
+    /// Subprogram name (`<procedure$1>` for blocks).
+    pub method: String,
+}
+
+/// A variable with its value as text (`None` = NULL) and, for records and
+/// collections, its fields/elements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variable {
+    pub name: String,
+    pub type_name: String,
+    pub value: Option<String>,
+    pub children: Vec<Variable>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    Breakpoint,
+    Step,
+    Pause,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebugCommand {
+    SetBreakpoint(Breakpoint),
+    ClearBreakpoint(Breakpoint),
+    Resume,
+    StepOver,
+    StepInto,
+    StepOut,
+    Pause,
+    /// Detach: the target session runs on without the debugger.
+    Detach,
+    /// Abort the target session's call (ORA-30687 in the target).
+    Terminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DebugEvent {
+    /// Listening for the target session to connect.
+    Listening {
+        port: u16,
+    },
+    /// The target session connected.
+    Connected {
+        version: String,
+    },
+    /// A breakpoint was set (`line` may move to the next line with code)
+    /// or could not be set.
+    BreakpointBound {
+        breakpoint: Breakpoint,
+        line: Option<u32>,
+        error: Option<String>,
+    },
+    Suspended {
+        reason: StopReason,
+        location: Location,
+        stack: Vec<Frame>,
+        variables: Vec<Variable>,
+    },
+    Resumed,
+    /// The target finished, detached or was terminated.
+    Terminated,
+    Error(String),
+}
