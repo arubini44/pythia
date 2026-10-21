@@ -140,7 +140,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Comment/uncomment selection
 - [ ] Minimap (optional)
 - [x] Whitespace / EOL visualization
-- [ ] Encoding support (UTF-8, Windows-1252, ...) and line ending detection
+- [x] Encoding support (UTF-8, Windows-1252, ...) and line ending detection
 - [ ] Large file mode (>50MB): reduced features, still responsive
 - [ ] Split view of the same buffer
 - [ ] Clipboard with rich and plain text

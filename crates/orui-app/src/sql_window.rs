@@ -32,6 +32,11 @@ pub struct SqlWindow {
     /// Text as last saved to `path`, to detect unsaved changes.
     #[serde(default)]
     pub saved_text: String,
+    /// How `path` is written back.
+    #[serde(default)]
+    pub encoding: crate::text_file::Encoding,
+    #[serde(default)]
+    pub line_ending: crate::text_file::LineEnding,
     #[serde(skip)]
     pub state: RunState,
     #[serde(skip)]
@@ -186,6 +191,8 @@ impl SqlWindow {
             substitution: true,
             path: None,
             saved_text: String::new(),
+            encoding: Default::default(),
+            line_ending: Default::default(),
             state: RunState::default(),
             assist: Default::default(),
         }
@@ -201,14 +208,16 @@ impl SqlWindow {
     }
 
     /// A window loaded from a file.
-    pub fn from_file(path: std::path::PathBuf, text: String) -> Self {
+    pub fn from_file(path: std::path::PathBuf, file: crate::text_file::TextFile) -> Self {
         let title = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut w = Self::new(title, text.clone());
+        let mut w = Self::new(title, file.text.clone());
         w.path = Some(path);
-        w.saved_text = text;
+        w.saved_text = file.text;
+        w.encoding = file.encoding;
+        w.line_ending = file.line_ending;
         w
     }
 
@@ -219,7 +228,7 @@ impl SqlWindow {
 
     /// Writes the text to `path` and makes it the window's file.
     pub fn save_to(&mut self, path: std::path::PathBuf) -> std::io::Result<()> {
-        std::fs::write(&path, self.editor.text())?;
+        crate::text_file::write(&path, self.editor.text(), self.encoding, self.line_ending)?;
         self.saved_text = self.editor.text().to_owned();
         self.title = path
             .file_name()
@@ -876,7 +885,7 @@ impl SqlWindow {
                 path = dir.join(path);
             }
         }
-        match std::fs::read_to_string(&path) {
+        match crate::text_file::read(&path).map(|f| f.text) {
             Ok(text) => {
                 let statements = split_statements(&text);
                 self.state.total += statements.len();
@@ -2069,11 +2078,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_files_keep_encoding_and_line_endings() {
+        let dir = std::env::temp_dir().join(format!("orui-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("alt.sql");
+        let mut w = SqlWindow::from_file(
+            path.clone(),
+            crate::text_file::decode(b"-- K\xe4se\r\nselect 1 from dual;\r\n"),
+        );
+        assert_eq!(w.editor.text(), "-- Käse\nselect 1 from dual;\n");
+        w.editor.select(16..17);
+        w.editor.insert("2");
+        w.save_to(path.clone()).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"-- K\xe4se\r\nselect 2 from dual;\r\n"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn file_roundtrip_and_dirty() {
         let dir = std::env::temp_dir().join(format!("orui-sqlfile-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("q.sql");
-        let mut w = SqlWindow::from_file(path.clone(), "select 1 from dual".into());
+        let mut w = SqlWindow::from_file(
+            path.clone(),
+            crate::text_file::decode(b"select 1 from dual"),
+        );
         assert_eq!(w.title, "q.sql");
         assert!(!w.is_dirty());
         w.editor.select(7..8);

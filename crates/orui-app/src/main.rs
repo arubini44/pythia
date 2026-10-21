@@ -41,6 +41,7 @@ mod table_editor;
 mod table_parts;
 mod test_script;
 mod text_diff;
+mod text_file;
 mod theme;
 mod to_file;
 

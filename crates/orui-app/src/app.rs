@@ -898,10 +898,10 @@ impl OruiApp {
             self.open_tab(Tab::Doc(id));
             return;
         }
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
+        match crate::text_file::read(&path) {
+            Ok(file) => {
                 let connection = connection.or_else(|| self.current_connection());
-                self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, text)));
+                self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, file)));
             }
             Err(e) => self.log(format!("Could not open {}: {e}", path.display())),
         }
@@ -1887,7 +1887,13 @@ impl OruiApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak("UTF-8");
+                if let Some((_, doc)) = focused
+                    && let DocKind::Sql(w) = &doc.kind
+                    && w.path.is_some()
+                {
+                    ui.weak(format!("{} · {}", w.encoding.label(), w.line_ending.label()))
+                        .on_hover_text("Saved the way the file was read");
+                }
                 if let Some((_, doc)) = focused {
                     let (line_col, status) = doc.status();
                     if let Some((line, col)) = line_col {
@@ -1939,13 +1945,7 @@ impl OruiApp {
         self.file_dialog = None;
         let Some(path) = path else { return };
         match action {
-            FileAction::Open => match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    let connection = self.current_connection();
-                    self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, text)));
-                }
-                Err(e) => self.log(format!("Could not open {}: {e}", path.display())),
-            },
+            FileAction::Open => self.open_file(path, None),
             FileAction::SaveAs(id) => {
                 let result = match self.docs.get_mut(&id).map(|d| &mut d.kind) {
                     Some(DocKind::Sql(w)) => w.save_to(path.clone()),
@@ -1992,13 +1992,7 @@ impl OruiApp {
                         w.load(path);
                     }
                 }
-                _ => match std::fs::read_to_string(&path) {
-                    Ok(text) => {
-                        let connection = self.current_connection();
-                        self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, text)));
-                    }
-                    Err(e) => self.log(format!("Could not open {}: {e}", path.display())),
-                },
+                _ => self.open_file(path, None),
             }
         }
     }
@@ -2513,9 +2507,7 @@ impl OruiApp {
     }
 
     pub fn test_open_file(&mut self, path: std::path::PathBuf) {
-        let text = std::fs::read_to_string(&path).unwrap();
-        let connection = self.current_connection();
-        self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, text)));
+        self.open_file(path, None);
     }
 
     pub fn test_program(&mut self) -> &mut ProgramWindow {
