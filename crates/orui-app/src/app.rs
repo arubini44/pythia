@@ -2102,6 +2102,12 @@ impl OruiApp {
         self.settings_dialog.open = false;
     }
 
+    pub fn test_open_file(&mut self, path: std::path::PathBuf) {
+        let text = std::fs::read_to_string(&path).unwrap();
+        let connection = self.current_connection();
+        self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, text)));
+    }
+
     pub fn test_command(&mut self, command: Command) {
         let ctx = self.notify.0.clone();
         self.run_command(&ctx, command);

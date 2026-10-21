@@ -577,3 +577,57 @@ fn debugger_session() {
         .command(orui_debugger::DebugCommand::Resume);
     wait_until(&mut h, "finish", |app| !app.test_debug_running());
 }
+
+/// Runs a deployment script that includes another (`@@`), continues after
+/// an error (`WHENEVER SQLERROR CONTINUE`) and creates and fills a table.
+#[test]
+fn deployment_script() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("orui-deploy-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(
+        dir.join("install.sql"),
+        "prompt Installing\nwhenever sqlerror continue\ndrop table orui_deploy_t purge;\n@@sub/tables\ninsert into orui_deploy_t values (2);\ncommit;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sub/tables.sql"),
+        "create table orui_deploy_t (id number);\ninsert into orui_deploy_t values (1);\n",
+    )
+    .unwrap();
+
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open_file(dir.join("install.sql"));
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::ExecuteAll);
+    wait_until(&mut h, "script", |app| !app.test_focused_busy());
+    let w = h.state_mut().test_sql_window();
+    let messages: Vec<String> = w.state.messages.iter().map(|m| m.text.clone()).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("continuing"))
+            || messages.iter().any(|m| m.contains("ORA-00942")),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.starts_with("Running ") && m.contains("tables.sql")),
+        "{messages:?}"
+    );
+    assert_eq!(w.state.output, ["Installing"]);
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: "select count(*) from orui_deploy_t;\ndrop table orui_deploy_t purge;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "check", |app| !app.test_focused_busy());
+    let w = h.state_mut().test_sql_window();
+    assert_eq!(w.state.results[0].rows[0][0].as_deref(), Some("2"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
