@@ -417,24 +417,53 @@ fn statement_start() {
 
 #[test]
 fn clauses_without_alias() {
-    has(&labels("select * from employees where ¦"), &["salary", "employees"]);
-    has(&labels("select first_name from employees order by ¦"), &["last_name"]);
-    has(&labels("select department_id, count(*) from employees group by ¦"), &["department_id"]);
-    has(&labels("select * from employees where employees.¦"), &["salary"]);
-    has(&labels("select * from hr.employees where employees.¦"), &["salary"]);
+    has(
+        &labels("select * from employees where ¦"),
+        &["salary", "employees"],
+    );
+    has(
+        &labels("select first_name from employees order by ¦"),
+        &["last_name"],
+    );
+    has(
+        &labels("select department_id, count(*) from employees group by ¦"),
+        &["department_id"],
+    );
+    has(
+        &labels("select * from employees where employees.¦"),
+        &["salary"],
+    );
+    has(
+        &labels("select * from hr.employees where employees.¦"),
+        &["salary"],
+    );
 }
 
 // ----- completion: PL/SQL -----------------------------------------------------
 
 #[test]
 fn typing_inside_real_package() {
-    let at =
-        |code: &str| labels(&HR_PKG.replacen("check_limit(l_new);", &format!("check_limit(l_new);\n    {code}"), 1));
+    let at = |code: &str| {
+        labels(&HR_PKG.replacen(
+            "check_limit(l_new);",
+            &format!("check_limit(l_new);\n    {code}"),
+            1,
+        ))
+    };
     has(&at("l_emp.¦"), &["salary", "first_name"]);
-    has(&at("update employees set salary = l_¦"), &["l_new", "l_emp"]);
-    has(&at("select * into l_emp from employees x where x.¦"), &["manager_id"]);
+    has(
+        &at("update employees set salary = l_¦"),
+        &["l_new", "l_emp"],
+    );
+    has(
+        &at("select * into l_emp from employees x where x.¦"),
+        &["manager_id"],
+    );
     let l = at("¦");
-    has(&l, &["l_emp", "check_limit", "p_pct", "g_count", "if", "fmt"]);
+    has(
+        &l,
+        &["l_emp", "check_limit", "p_pct", "g_count", "if", "fmt"],
+    );
     let l = labels(&HR_PKG.replacen("g_cache(r.employee_id)", "g_cache(r.¦employee_id)", 1));
     assert_eq!(l, ["department_name", "employee_id", "sal"]);
 }

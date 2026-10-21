@@ -103,6 +103,10 @@ pub enum OpenRequest {
     },
     /// Show this connection in the object browser.
     Browse { connection: String },
+    Monitor {
+        connection: String,
+        start: crate::monitor_window::MonitorStart,
+    },
 }
 
 /// A query result as shown in a grid.
@@ -117,6 +121,7 @@ pub enum DocKind {
     Sql(SqlWindow),
     Program(ProgramWindow),
     Object(ObjectView),
+    Monitor(crate::monitor_window::MonitorWindow),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -142,6 +147,7 @@ impl Document {
             DocKind::Sql(w) => w.title.clone(),
             DocKind::Program(w) => w.title(),
             DocKind::Object(v) => v.title(),
+            DocKind::Monitor(m) => m.title(),
         }
     }
 
@@ -160,6 +166,7 @@ impl Document {
             DocKind::Sql(w) => w.is_running(),
             DocKind::Program(w) => w.is_busy(),
             DocKind::Object(v) => v.is_loading(),
+            DocKind::Monitor(m) => m.is_busy(),
         }
     }
 
@@ -183,6 +190,7 @@ impl Document {
             DocKind::Sql(w) => w.on_event(event, cx),
             DocKind::Program(w) => w.on_event(event),
             DocKind::Object(v) => v.on_event(event),
+            DocKind::Monitor(m) => m.on_event(event),
         }
     }
 
@@ -191,6 +199,7 @@ impl Document {
             DocKind::Sql(w) => w.ui(ui, cx),
             DocKind::Program(w) => w.ui(ui, cx),
             DocKind::Object(v) => v.ui(ui, cx, self.connection.as_deref()),
+            DocKind::Monitor(m) => m.ui(ui, cx),
         }
     }
 
@@ -200,6 +209,7 @@ impl Document {
             DocKind::Sql(_) => Effects::default(),
             DocKind::Program(w) => w.load(),
             DocKind::Object(v) => v.load(),
+            DocKind::Monitor(_) => Effects::default(),
         }
     }
 
@@ -208,7 +218,7 @@ impl Document {
         match &self.kind {
             DocKind::Sql(w) => (Some(w.state.line_col), w.result_status()),
             DocKind::Program(w) => (Some(w.line_col()), None),
-            DocKind::Object(_) => (None, None),
+            DocKind::Object(_) | DocKind::Monitor(_) => (None, None),
         }
     }
 }

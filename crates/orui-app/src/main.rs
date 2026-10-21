@@ -9,6 +9,7 @@ mod dialogs;
 mod documents;
 mod editor;
 mod history;
+mod monitor_window;
 mod object_view;
 mod program_window;
 #[cfg(test)]

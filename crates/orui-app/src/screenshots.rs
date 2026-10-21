@@ -216,6 +216,15 @@ fn screenshots() {
         });
         wait_until(&mut h, "columns", |app| !app.test_focused_busy());
         save(&mut h, &format!("05-object-view-{suffix}"));
+
+        h.state_mut().test_open(OpenRequest::Monitor {
+            connection: "orui@FREEPDB1".into(),
+            start: crate::monitor_window::MonitorStart::Dashboard,
+        });
+        for _ in 0..3 {
+            wait_until(&mut h, "monitor", |app| !app.test_focused_busy());
+        }
+        save(&mut h, &format!("07-monitor-{suffix}"));
     }
 }
 

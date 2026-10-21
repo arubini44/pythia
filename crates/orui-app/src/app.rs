@@ -278,6 +278,22 @@ impl OruiApp {
                     self.add_doc(Some(connection), DocKind::Object(ObjectView::new(object)));
                 }
             }
+            OpenRequest::Monitor { connection, start } => {
+                let existing = self.docs.iter().find_map(|(id, d)| {
+                    matches!(&d.kind, DocKind::Monitor(m) if m.start == start)
+                        .then_some(*id)
+                        .filter(|_| d.connection.as_deref() == Some(connection.as_str()))
+                });
+                match existing {
+                    Some(id) => self.open_tab(Tab::Doc(id)),
+                    None => {
+                        self.add_doc(
+                            Some(connection),
+                            DocKind::Monitor(crate::monitor_window::MonitorWindow::new(start)),
+                        );
+                    }
+                }
+            }
             OpenRequest::Browse { connection } => {
                 let schema = self
                     .conns
@@ -565,6 +581,24 @@ impl OruiApp {
                 }
             }
             Command::History => self.history_dialog.toggle(),
+            Command::MonitorDashboard
+            | Command::MonitorSessions
+            | Command::MonitorBlocking
+            | Command::MonitorAwr
+            | Command::MonitorTrace => {
+                use crate::monitor_window::MonitorStart;
+                let start = match command {
+                    Command::MonitorSessions => MonitorStart::Sessions,
+                    Command::MonitorBlocking => MonitorStart::Blocking,
+                    Command::MonitorAwr => MonitorStart::Awr,
+                    Command::MonitorTrace => MonitorStart::Trace,
+                    _ => MonitorStart::Dashboard,
+                };
+                match self.current_connection() {
+                    Some(connection) => self.open(OpenRequest::Monitor { connection, start }),
+                    None => self.connect_dialog.show(self.last_profile.as_ref()),
+                }
+            }
             Command::FindObject => {
                 if self.current_connection().is_some() {
                     self.finder.toggle();
@@ -844,6 +878,14 @@ impl OruiApp {
             });
             ui.menu_button("Tools", |ui| {
                 item(ui, Command::FindObject);
+            });
+            ui.menu_button("Monitor", |ui| {
+                item(ui, Command::MonitorDashboard);
+                item(ui, Command::MonitorSessions);
+                item(ui, Command::MonitorBlocking);
+                ui.separator();
+                item(ui, Command::MonitorAwr);
+                item(ui, Command::MonitorTrace);
             });
             ui.menu_button("View", |ui| {
                 item(ui, Command::ShowPalette);
