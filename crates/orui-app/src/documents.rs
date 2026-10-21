@@ -146,6 +146,7 @@ pub enum DocKind {
     Compare(crate::compare_window::CompareWindow),
     Search(crate::source_search::SourceSearch),
     Import(crate::import_window::ImportWindow),
+    DataSearch(crate::data_search::DataSearch),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -183,6 +184,7 @@ impl Document {
             DocKind::Compare(c) => c.title(),
             DocKind::Search(s) => s.title(),
             DocKind::Import(i) => i.title(),
+            DocKind::DataSearch(d) => d.title(),
         }
     }
 
@@ -205,6 +207,7 @@ impl Document {
             DocKind::Compare(c) => c.is_busy(),
             DocKind::Search(s) => s.is_busy(),
             DocKind::Import(i) => i.is_busy(),
+            DocKind::DataSearch(d) => d.is_busy(),
         }
     }
 
@@ -233,6 +236,7 @@ impl Document {
             DocKind::Compare(c) => c.on_event(event),
             DocKind::Search(s) => s.on_event(event),
             DocKind::Import(i) => i.on_event(event),
+            DocKind::DataSearch(d) => d.on_event(event),
         }
     }
 
@@ -245,6 +249,7 @@ impl Document {
             DocKind::Compare(c) => c.ui(ui, cx),
             DocKind::Search(s) => s.ui(ui, cx),
             DocKind::Import(i) => i.ui(ui, cx),
+            DocKind::DataSearch(d) => d.ui(ui, cx),
         }
     }
 
@@ -254,9 +259,7 @@ impl Document {
             DocKind::Sql(_) => Effects::default(),
             DocKind::Program(w) => w.load(),
             DocKind::Object(v) => v.load(),
-            DocKind::Monitor(_) | DocKind::Compare(_) | DocKind::Search(_) | DocKind::Import(_) => {
-                Effects::default()
-            }
+            _ => Effects::default(),
         }
     }
 
@@ -265,11 +268,7 @@ impl Document {
         match &self.kind {
             DocKind::Sql(w) => (Some(w.state.line_col), w.result_status()),
             DocKind::Program(w) => (Some(w.line_col()), None),
-            DocKind::Object(_)
-            | DocKind::Monitor(_)
-            | DocKind::Compare(_)
-            | DocKind::Search(_)
-            | DocKind::Import(_) => (None, None),
+            _ => (None, None),
         }
     }
 }

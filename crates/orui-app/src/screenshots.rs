@@ -277,6 +277,20 @@ fn screenshots() {
         h.state_mut().test_search_source("salary");
         wait_until(&mut h, "source search", |app| !app.test_focused_busy());
         save(&mut h, &format!("10-source-search-{suffix}"));
+
+        if dark {
+            h.state_mut()
+                .test_command(crate::commands::Command::SearchData);
+            h.run_steps(3);
+            h.state_mut().test_search_data("Basel");
+            wait_until(&mut h, "data search", |app| !app.test_focused_busy());
+            let hits = h.state().test_data_hits();
+            assert!(
+                hits.contains(&"DEMO_DEPARTMENTS.LOCATION=1".to_owned()),
+                "{hits:?}"
+            );
+            save(&mut h, "15-data-search-dark");
+        }
     }
 }
 

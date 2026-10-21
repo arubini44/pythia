@@ -49,6 +49,7 @@ commands! {
     Format => "Edit: Format Code",
     FindObject => "Tools: Find Database Object…",
     FindInSource => "Tools: Find in Database Source…",
+    SearchData => "Tools: Search Data in Tables…",
     ImportData => "Tools: Import Data (CSV, Excel)…",
     CompareSchemas => "Tools: Compare Schemas…",
     CompareData => "Tools: Compare Table Data…",

@@ -922,6 +922,10 @@ impl OruiApp {
                 let connection = self.current_connection();
                 self.add_doc(connection, DocKind::Import(Default::default()));
             }
+            Command::SearchData => {
+                let connection = self.current_connection();
+                self.add_doc(connection, DocKind::DataSearch(Default::default()));
+            }
             Command::FindInSource => {
                 let connection = self.current_connection();
                 self.add_doc(
@@ -1338,6 +1342,7 @@ impl OruiApp {
             ui.menu_button("Tools", |ui| {
                 item(ui, Command::FindObject);
                 item(ui, Command::FindInSource);
+                item(ui, Command::SearchData);
                 ui.separator();
                 item(ui, Command::ImportData);
                 ui.separator();
@@ -1956,6 +1961,45 @@ impl OruiApp {
     pub fn test_close_connect(&mut self) {
         self.connect_dialog.open = false;
         self.saved.profiles.clear();
+    }
+
+    pub fn test_search_data(&mut self, value: &str) {
+        let id = self.focused.expect("focused");
+        let cx = self.doc_context(id);
+        let (settings, connection) = (cx.settings.clone(), cx.connection.clone());
+        let catalog = connection.as_ref().and_then(|c| self.catalogs.get(c));
+        let cx = DocContext {
+            id,
+            settings: &settings,
+            connected: true,
+            fetch_size: 100,
+            connection,
+            catalog,
+            catalog_revision: 0,
+            connections: &[],
+            debug: None,
+        };
+        let Some(DocKind::DataSearch(s)) = self.docs.get_mut(&id).map(|d| &mut d.kind) else {
+            panic!("not a data search");
+        };
+        s.value = value.to_owned();
+        let effects = s.start(&cx);
+        self.apply(Some(id), effects);
+    }
+
+    pub fn test_data_hits(&self) -> Vec<String> {
+        match self
+            .focused
+            .and_then(|id| self.docs.get(&id))
+            .map(|d| &d.kind)
+        {
+            Some(DocKind::DataSearch(s)) => s
+                .hits()
+                .iter()
+                .map(|h| format!("{}.{}={}", h.table, h.column, h.count))
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     pub fn test_search_source(&mut self, query: &str) {

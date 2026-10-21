@@ -8,6 +8,7 @@ mod commands;
 mod compare_window;
 mod connections;
 mod data_edit;
+mod data_search;
 mod dialogs;
 mod documents;
 mod editor;
