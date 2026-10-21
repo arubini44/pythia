@@ -13,6 +13,7 @@ orui-config = { path = "crates/orui-config" }
 orui-compare = { path = "crates/orui-compare" }
 orui-data = { path = "crates/orui-data" }
 orui-db = { path = "crates/orui-db" }
+orui-debugger = { path = "crates/orui-debugger" }
 orui-lsp-core = { path = "crates/orui-lsp-core" }
 orui-monitor = { path = "crates/orui-monitor" }
 orui-plsql = { path = "crates/orui-plsql" }
