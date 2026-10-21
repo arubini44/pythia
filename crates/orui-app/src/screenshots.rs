@@ -218,3 +218,125 @@ fn screenshots() {
         save(&mut h, &format!("05-object-view-{suffix}"));
     }
 }
+
+/// Edits a result in the grid, applies it, and checks that a row changed by
+/// another session in the meantime is reported as a conflict.
+#[test]
+fn data_editing() {
+    let Some((profile, password)) = profile() else {
+        eprintln!("ORUI_TEST_DB not set, skipping");
+        return;
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let conn = "orui@FREEPDB1".to_string();
+    let setup = "begin execute immediate 'drop table orui_edit_t purge'; exception when others then null; end;\n/\n\
+                 create table orui_edit_t (id number primary key, name varchar2(20), hired date);\n\
+                 insert into orui_edit_t values (1, 'one', date '2020-01-01');\n\
+                 insert into orui_edit_t values (2, 'two', null);\n\
+                 commit;\n";
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: conn.clone(),
+        text: setup.into(),
+        run: true,
+    });
+    wait_until(&mut h, "setup", |app| !app.test_focused_busy());
+    h.state_mut().test_close_focused();
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: conn.clone(),
+        text: "select * from orui_edit_t order by id".into(),
+        run: true,
+    });
+    wait_until(&mut h, "query", |app| !app.test_focused_busy());
+    let grid_window = h.state().test_focused();
+
+    let cx = |app: &mut OruiApp| {
+        let (id, settings, connection) = app.test_cx();
+        (id, settings, connection)
+    };
+    let start_edit = |h: &mut Harness<'_, OruiApp>| {
+        let (id, settings, connection) = cx(h.state_mut());
+        let app = h.state_mut();
+        let cx = crate::documents::DocContext {
+            id,
+            settings: &settings,
+            connected: true,
+            fetch_size: 100,
+            connection,
+        };
+        let effects = app.test_sql_window().start_editing(0, &cx);
+        app.test_apply(effects);
+    };
+    start_edit(&mut h);
+    wait_until(&mut h, "editable query", |app| !app.test_focused_busy());
+    {
+        let w = h.state_mut().test_sql_window();
+        let r = &mut w.state.results[0];
+        assert!(r.grid.is_editable(), "result should be editable");
+        assert_eq!(r.columns.last().unwrap().type_name, "ROWID");
+        let rows = r.rows.clone();
+        r.grid.edit_cell(&rows, 0, 1, Some("uno".into()));
+        r.grid
+            .edit_cell(&rows, 1, 2, Some("2021-02-03 04:05:06".into()));
+    }
+    save(&mut h, "06-editing-dark");
+    let apply = |h: &mut Harness<'_, OruiApp>| {
+        let (id, settings, connection) = cx(h.state_mut());
+        let app = h.state_mut();
+        let cx = crate::documents::DocContext {
+            id,
+            settings: &settings,
+            connected: true,
+            fetch_size: 100,
+            connection,
+        };
+        let effects = app.test_sql_window().apply_changes(0, &cx);
+        app.test_apply(effects);
+    };
+    apply(&mut h);
+    wait_until(&mut h, "apply", |app| !app.test_focused_busy());
+    {
+        let w = h.state_mut().test_sql_window();
+        let messages: Vec<String> = w.state.messages.iter().map(|m| m.text.clone()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("Changes applied")),
+            "{messages:?}"
+        );
+        let r = &w.state.results[0];
+        assert_eq!(r.rows[0][1].as_deref(), Some("uno"));
+        assert_eq!(r.rows[1][2].as_deref(), Some("2021-02-03 04:05:06"));
+        assert!(r.grid.changes().is_some_and(|c| c.is_empty()));
+    }
+    assert!(
+        h.state().test_pending_tx(),
+        "applied changes stay in the open transaction"
+    );
+    h.state_mut().test_commit();
+    wait_until(&mut h, "commit", |app| !app.test_pending_tx());
+
+    // Another session changes row 2 behind our back; editing it must conflict.
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: conn.clone(),
+        text: "update orui_edit_t set name = 'changed' where id = 2;\ncommit;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "concurrent update", |app| !app.test_focused_busy());
+    h.state_mut().test_close_focused();
+    h.state_mut().test_focus(grid_window);
+    {
+        let w = h.state_mut().test_sql_window();
+        let r = &mut w.state.results[0];
+        let rows = r.rows.clone();
+        r.grid.edit_cell(&rows, 1, 1, Some("mine".into()));
+    }
+    apply(&mut h);
+    wait_until(&mut h, "conflicting apply", |app| !app.test_focused_busy());
+    let w = h.state_mut().test_sql_window();
+    let messages: Vec<String> = w.state.messages.iter().map(|m| m.text.clone()).collect();
+    assert!(
+        messages.iter().any(|m| m.starts_with("Conflict on row 2")),
+        "{messages:?}"
+    );
+}

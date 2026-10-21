@@ -41,7 +41,11 @@ impl Editor {
         let text = text.into();
         let inner = CodeEditor::new(&text);
         let revision = inner.revision();
-        Self { inner, text, revision }
+        Self {
+            inner,
+            text,
+            revision,
+        }
     }
 
     fn refresh(&mut self) {
@@ -69,7 +73,9 @@ impl Editor {
 
     /// Non-empty selection as a byte range.
     pub fn selection(&self) -> Option<Range<usize>> {
-        self.inner.selection().filter(|r| r.end <= self.text.len() && !r.is_empty())
+        self.inner
+            .selection()
+            .filter(|r| r.end <= self.text.len() && !r.is_empty())
     }
 
     pub fn line_col(&self) -> (usize, usize) {
@@ -98,7 +104,12 @@ impl Editor {
         self.refresh();
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, id: impl egui::AsId, settings: &orui_config::EditorSettings) -> EditorOutput {
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        id: impl egui::AsId,
+        settings: &orui_config::EditorSettings,
+    ) -> EditorOutput {
         self.show(ui, id, settings, false)
     }
 
@@ -137,7 +148,9 @@ pub fn line_start(text: &str, line: usize) -> usize {
     if line <= 1 {
         return 0;
     }
-    text.match_indices('\n').nth(line - 2).map_or(text.len(), |(i, _)| i + 1)
+    text.match_indices('\n')
+        .nth(line - 2)
+        .map_or(text.len(), |(i, _)| i + 1)
 }
 
 #[cfg(test)]

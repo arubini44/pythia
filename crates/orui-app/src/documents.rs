@@ -132,6 +132,8 @@ pub struct DocContext<'a> {
     pub settings: &'a orui_config::Settings,
     pub connected: bool,
     pub fetch_size: usize,
+    /// Display name of the document's connection.
+    pub connection: Option<String>,
 }
 
 impl Document {

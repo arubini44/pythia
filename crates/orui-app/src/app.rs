@@ -225,6 +225,7 @@ impl OruiApp {
             settings: &self.settings,
             connected,
             fetch_size: self.settings.fetch_size,
+            connection: self.docs.get(&id).and_then(|d| d.connection.clone()),
         }
     }
 
@@ -317,11 +318,22 @@ impl OruiApp {
         found.is_some()
     }
 
+    /// Shows the tab (adding it if needed) and gives it the dock's focus, so
+    /// the next frame's "focused document" is this one.
     fn open_tab(&mut self, tab: Tab) {
-        if let Some(path) = self.dock.find_tab(&tab) {
-            let _ = self.dock.set_active_tab(path);
-            return;
+        if self.dock.find_tab(&tab).is_none() {
+            self.place_tab(tab);
         }
+        if let Some(path) = self.dock.find_tab(&tab) {
+            self.dock.set_focused_node_and_surface(path.node_path());
+            let _ = self.dock.set_active_tab(path);
+        }
+        if let Tab::Doc(id) = tab {
+            self.focused = Some(id);
+        }
+    }
+
+    fn place_tab(&mut self, tab: Tab) {
         if !matches!(tab, Tab::Doc(_)) {
             self.dock.push_to_focused_leaf(tab);
             return;
@@ -353,7 +365,11 @@ impl OruiApp {
         self.docs.remove(&id);
         self.routes.retain(|_, d| *d != id);
         if self.focused == Some(id) {
-            self.focused = self.docs.keys().next().copied();
+            // Follow the tab the dock shows now, like the next frame would.
+            self.focused = match self.dock.find_active_focused() {
+                Some((_, Tab::Doc(doc))) if self.docs.contains_key(doc) => Some(*doc),
+                _ => self.docs.keys().next().copied(),
+            };
         }
     }
 
@@ -430,7 +446,12 @@ impl OruiApp {
 
     fn deliver(&mut self, id: DocId, event: DbEvent) {
         let cx = self.doc_context(id);
-        let (settings, connected, fetch_size) = (cx.settings.clone(), cx.connected, cx.fetch_size);
+        let (settings, connected, fetch_size, connection) = (
+            cx.settings.clone(),
+            cx.connected,
+            cx.fetch_size,
+            cx.connection.clone(),
+        );
         let Some(doc) = self.docs.get_mut(&id) else {
             return;
         };
@@ -439,6 +460,7 @@ impl OruiApp {
             settings: &settings,
             connected,
             fetch_size,
+            connection,
         };
         let effects = doc.on_event(event, &cx);
         self.apply(Some(id), effects);
@@ -586,7 +608,12 @@ impl OruiApp {
 
     fn execute(&mut self, id: DocId, current_only: bool) {
         let cx = self.doc_context(id);
-        let (settings, connected, fetch_size) = (cx.settings.clone(), cx.connected, cx.fetch_size);
+        let (settings, connected, fetch_size, connection) = (
+            cx.settings.clone(),
+            cx.connected,
+            cx.fetch_size,
+            cx.connection.clone(),
+        );
         if !connected {
             if self.docs.get(&id).is_some_and(|d| d.connection.is_none())
                 && let Some(name) = self.current_connection()
@@ -612,6 +639,7 @@ impl OruiApp {
             settings: &settings,
             connected,
             fetch_size,
+            connection,
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
@@ -1229,6 +1257,39 @@ impl OruiApp {
         self.apply_browser(effects);
     }
 
+    pub fn test_sql_window(&mut self) -> &mut SqlWindow {
+        let id = self.focused.expect("focused document");
+        self.docs
+            .get_mut(&id)
+            .and_then(Document::sql_window)
+            .expect("SQL window")
+    }
+
+    pub fn test_cx(&self) -> (DocId, Settings, Option<String>) {
+        let id = self.focused.expect("focused document");
+        (id, self.settings.clone(), self.docs[&id].connection.clone())
+    }
+
+    pub fn test_apply(&mut self, effects: Effects) {
+        self.apply(self.focused, effects);
+    }
+
+    pub fn test_focused(&self) -> DocId {
+        self.focused.expect("focused document")
+    }
+
+    pub fn test_focus(&mut self, id: DocId) {
+        self.open_tab(Tab::Doc(id));
+    }
+
+    pub fn test_commit(&mut self) {
+        self.end_transaction(true);
+    }
+
+    pub fn test_pending_tx(&self) -> bool {
+        self.conns.any_pending_tx()
+    }
+
     pub fn test_browser_loading(&self) -> bool {
         self.browser.is_loading()
     }
@@ -1323,6 +1384,7 @@ impl TabViewer for Viewer<'_> {
                     settings: self.settings,
                     connected,
                     fetch_size: self.settings.fetch_size,
+                    connection: doc.connection.clone(),
                 };
                 let effects = doc.ui(ui, &cx);
                 self.effects.push((*id, effects));

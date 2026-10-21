@@ -4,6 +4,7 @@ mod app;
 mod browser;
 mod commands;
 mod connections;
+mod data_edit;
 mod dialogs;
 mod documents;
 mod editor;

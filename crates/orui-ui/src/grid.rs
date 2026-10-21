@@ -7,6 +7,7 @@
 //! view and a viewer for long values.
 
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 
 use egui::{Align, Key, Layout, RichText, Sense, Ui};
@@ -29,6 +30,45 @@ pub struct GridState {
     pub record_view: bool,
     viewer: Option<(usize, usize)>,
     scroll_to_cursor: bool,
+    edit: Option<Editing>,
+}
+
+/// Pending edits of an editable result, keyed by row index into `rows`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Changes {
+    /// Changed cells of existing rows: row → column → new value.
+    pub updates: BTreeMap<usize, BTreeMap<usize, Cell>>,
+    /// New rows (one value per column).
+    pub inserts: Vec<Vec<Cell>>,
+    /// Existing rows to delete.
+    pub deletes: BTreeSet<usize>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.updates.is_empty() && self.inserts.is_empty() && self.deletes.is_empty()
+    }
+
+    pub fn count(&self) -> usize {
+        self.updates.len() + self.inserts.len() + self.deletes.len()
+    }
+}
+
+#[derive(Default)]
+struct Editing {
+    /// Column that can't be edited (the ROWID).
+    locked: Option<usize>,
+    changes: Changes,
+    /// Cell being edited: (view row, column, text).
+    active: Option<(usize, usize, String)>,
+    focus_editor: bool,
+}
+
+/// A view row resolved to either a fetched row or a new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowRef {
+    Existing(usize),
+    New(usize),
 }
 
 pub struct ResultGrid<'a> {
@@ -95,6 +135,205 @@ impl GridState {
     fn row_index(&self, view_row: usize) -> usize {
         self.order.get(view_row).copied().unwrap_or(view_row)
     }
+
+    fn row_ref(&self, view_row: usize) -> RowRef {
+        if view_row < self.order.len() {
+            RowRef::Existing(self.row_index(view_row))
+        } else {
+            RowRef::New(view_row - self.order.len())
+        }
+    }
+
+    /// Makes the grid editable; `locked` is a column that stays read-only.
+    pub fn set_editable(&mut self, locked: Option<usize>) {
+        self.edit = Some(Editing {
+            locked,
+            ..Editing::default()
+        });
+    }
+
+    /// Changes a cell programmatically (as if edited by the user).
+    pub fn edit_cell(&mut self, rows: &[Vec<Cell>], view_row: usize, col: usize, value: Cell) {
+        self.sync(rows, &[]);
+        self.set_value(rows, view_row, col, value);
+    }
+
+    pub fn set_read_only(&mut self) {
+        self.edit = None;
+    }
+
+    pub fn is_editable(&self) -> bool {
+        self.edit.is_some()
+    }
+
+    pub fn changes(&self) -> Option<&Changes> {
+        self.edit.as_ref().map(|e| &e.changes)
+    }
+
+    pub fn clear_changes(&mut self) {
+        if let Some(e) = &mut self.edit {
+            e.changes = Changes::default();
+            e.active = None;
+        }
+    }
+
+    /// Rows shown: fetched rows plus inserted ones.
+    fn view_len(&self, rows: &[Vec<Cell>]) -> usize {
+        rows.len() + self.edit.as_ref().map_or(0, |e| e.changes.inserts.len())
+    }
+
+    /// The value shown for a cell, taking pending edits into account.
+    fn value<'r>(&'r self, rows: &'r [Vec<Cell>], view_row: usize, col: usize) -> Option<&'r str> {
+        match self.row_ref(view_row) {
+            RowRef::Existing(r) => {
+                if let Some(v) = self
+                    .edit
+                    .as_ref()
+                    .and_then(|e| e.changes.updates.get(&r)?.get(&col))
+                {
+                    return v.as_deref();
+                }
+                rows.get(r)?.get(col)?.as_deref()
+            }
+            RowRef::New(i) => self
+                .edit
+                .as_ref()?
+                .changes
+                .inserts
+                .get(i)?
+                .get(col)?
+                .as_deref(),
+        }
+    }
+
+    fn set_value(&mut self, rows: &[Vec<Cell>], view_row: usize, col: usize, value: Cell) {
+        let row_ref = self.row_ref(view_row);
+        let Some(edit) = self.edit.as_mut() else {
+            return;
+        };
+        if edit.locked == Some(col) {
+            return;
+        }
+        match row_ref {
+            RowRef::Existing(r) => {
+                let original = rows.get(r).and_then(|row| row.get(col)).cloned().flatten();
+                let cells = edit.changes.updates.entry(r).or_default();
+                if original == value {
+                    cells.remove(&col);
+                } else {
+                    cells.insert(col, value);
+                }
+                if cells.is_empty() {
+                    edit.changes.updates.remove(&r);
+                }
+            }
+            RowRef::New(i) => {
+                if let Some(cell) = edit
+                    .changes
+                    .inserts
+                    .get_mut(i)
+                    .and_then(|row| row.get_mut(col))
+                {
+                    *cell = value;
+                }
+            }
+        }
+    }
+
+    fn cell_state(&self, view_row: usize, col: usize) -> CellState {
+        let Some(edit) = &self.edit else {
+            return CellState::Clean;
+        };
+        match self.row_ref(view_row) {
+            RowRef::New(_) => CellState::Inserted,
+            RowRef::Existing(r) if edit.changes.deletes.contains(&r) => CellState::Deleted,
+            RowRef::Existing(r)
+                if edit
+                    .changes
+                    .updates
+                    .get(&r)
+                    .is_some_and(|c| c.contains_key(&col)) =>
+            {
+                CellState::Changed
+            }
+            RowRef::Existing(_) => CellState::Clean,
+        }
+    }
+
+    fn insert_row(&mut self, columns: usize) {
+        let len = self.order.len();
+        if let Some(edit) = &mut self.edit {
+            edit.changes.inserts.push(vec![None; columns]);
+            let row = len + edit.changes.inserts.len() - 1;
+            let col = usize::from(edit.locked == Some(0));
+            self.anchor = Some((row, col));
+            self.cursor = Some((row, col));
+            self.scroll_to_cursor = true;
+        }
+    }
+
+    /// Toggles deletion of the selected rows (new rows are removed).
+    fn delete_rows(&mut self) {
+        let Some((rows, _)) = self.selection() else {
+            return;
+        };
+        let refs: Vec<RowRef> = rows.map(|r| self.row_ref(r)).collect();
+        let Some(edit) = &mut self.edit else { return };
+        let mut new_rows: Vec<usize> = Vec::new();
+        for r in refs {
+            match r {
+                RowRef::Existing(r) => {
+                    if !edit.changes.deletes.remove(&r) {
+                        edit.changes.deletes.insert(r);
+                    }
+                }
+                RowRef::New(i) => new_rows.push(i),
+            }
+        }
+        for i in new_rows.into_iter().rev() {
+            if i < edit.changes.inserts.len() {
+                edit.changes.inserts.remove(i);
+            }
+        }
+    }
+
+    fn set_null(&mut self, rows: &[Vec<Cell>]) {
+        let Some((r, c)) = self.selection() else {
+            return;
+        };
+        for row in r {
+            for col in c.clone() {
+                self.set_value(rows, row, col, None);
+            }
+        }
+    }
+
+    fn start_edit(&mut self, rows: &[Vec<Cell>], cell: (usize, usize), initial: Option<String>) {
+        let value = self.value(rows, cell.0, cell.1).map(str::to_owned);
+        if let Some(edit) = &mut self.edit
+            && edit.locked != Some(cell.1)
+        {
+            edit.active = Some((cell.0, cell.1, initial.or(value).unwrap_or_default()));
+            edit.focus_editor = true;
+        }
+    }
+
+    fn finish_edit(&mut self, rows: &[Vec<Cell>], commit: bool) {
+        let Some((r, c, text)) = self.edit.as_mut().and_then(|e| e.active.take()) else {
+            return;
+        };
+        if commit {
+            self.set_value(rows, r, c, Some(text));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CellState {
+    Clean,
+    Changed,
+    Inserted,
+    Deleted,
 }
 
 fn sort_order(order: &mut [usize], rows: &[Vec<Cell>], col: usize, numeric: bool, asc: bool) {
@@ -159,7 +398,10 @@ impl<'a> ResultGrid<'a> {
 }
 
 fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[Vec<Cell>]) {
-    let (row_count, col_count) = (rows.len(), columns.len());
+    if state.edit.as_ref().is_some_and(|e| e.active.is_some()) {
+        return;
+    }
+    let (row_count, col_count) = (state.view_len(rows), columns.len());
     if row_count == 0 || col_count == 0 {
         return;
     }
@@ -170,6 +412,9 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
     let mut copy = None;
     let mut open_viewer = false;
     let mut select_all = false;
+    let mut start_edit = None;
+    let mut set_null = false;
+    let editable = state.is_editable();
     ui.input(|i| {
         extend = i.modifiers.shift;
         let ctrl = i.modifiers.command;
@@ -189,9 +434,12 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
                     Key::Home => nc = 0,
                     Key::End => nc = col_count - 1,
                     Key::A if ctrl => select_all = true,
+                    Key::Enter | Key::F2 if editable => start_edit = Some(None),
+                    Key::Delete if editable => set_null = true,
                     Key::Enter => open_viewer = true,
                     _ => {}
                 },
+                egui::Event::Text(t) if editable && !ctrl => start_edit = Some(Some(t.clone())),
                 egui::Event::Copy => copy = Some(i.modifiers.shift),
                 _ => {}
             }
@@ -206,6 +454,12 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
     }
     if open_viewer {
         state.viewer = state.cursor;
+    }
+    if let (Some(initial), Some(cell)) = (start_edit, state.cursor) {
+        state.start_edit(rows, cell, initial);
+    }
+    if set_null {
+        state.set_null(rows);
     }
     if let Some(with_header) = copy {
         ui.ctx()
@@ -228,7 +482,14 @@ fn table(
     let cursor_stroke = egui::Stroke::new(1.5, visuals.hyperlink_color);
     let header_bg = visuals.faint_bg_color;
     let row_height = ui.text_style_height(&egui::TextStyle::Monospace) + 6.0;
-    let row_digits = rows.len().max(1).to_string().len();
+    let view_len = state.view_len(rows);
+    let row_digits = view_len.max(1).to_string().len();
+    let tint = |c: egui::Color32| c.gamma_multiply(if visuals.dark_mode { 0.22 } else { 0.18 });
+    let changed_bg = tint(visuals.hyperlink_color);
+    let inserted_bg = tint(egui::Color32::from_rgb(0x3f, 0xb9, 0x50));
+    let deleted_bg = tint(visuals.error_fg_color);
+    let mut edit_done: Option<bool> = None;
+    let mut edit_click = None;
     let mono = egui::TextStyle::Monospace.resolve(ui.style());
     let char_width = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
     let shift = ui.input(|i| i.modifiers.shift);
@@ -311,10 +572,9 @@ fn table(
                     }
                 })
                 .body(|body| {
-                    body.rows(row_height, rows.len(), |mut row| {
+                    body.rows(row_height, view_len, |mut row| {
                         let view_row = row.index();
-                        let data = &rows[state.row_index(view_row)];
-                        if view_row + 1 == rows.len() {
+                        if view_row + 1 >= rows.len() {
                             reached_end = true;
                         }
                         let (_, number) = row.col(|ui| {
@@ -332,8 +592,50 @@ fn table(
                         for (c, col) in columns.iter().enumerate() {
                             let selected = state.is_selected(view_row, c);
                             let is_cursor = state.cursor == Some((view_row, c));
+                            let cell_state = state.cell_state(view_row, c);
+                            let editing_here = state
+                                .edit
+                                .as_ref()
+                                .and_then(|e| e.active.as_ref())
+                                .is_some_and(|(r, ec, _)| *r == view_row && *ec == c);
+                            let value = state.value(rows, view_row, c).map(str::to_owned);
                             let (_, response) = row.col(|ui| {
                                 let rect = ui.max_rect();
+                                let tint = match cell_state {
+                                    CellState::Changed => Some(changed_bg),
+                                    CellState::Inserted => Some(inserted_bg),
+                                    CellState::Deleted => Some(deleted_bg),
+                                    CellState::Clean => None,
+                                };
+                                if let Some(tint) = tint {
+                                    ui.painter().rect_filled(rect, 0.0, tint);
+                                }
+                                if editing_here
+                                    && let Some(edit) = state.edit.as_mut()
+                                    && let Some((_, _, text)) = edit.active.as_mut()
+                                {
+                                    let r = ui.add(
+                                        egui::TextEdit::singleline(text)
+                                            .font(egui::TextStyle::Monospace)
+                                            .desired_width(f32::INFINITY)
+                                            .margin(egui::Margin::symmetric(2, 0)),
+                                    );
+                                    if std::mem::take(&mut edit.focus_editor) {
+                                        r.request_focus();
+                                    }
+                                    let (enter, escape) = ui.input(|i| {
+                                        (
+                                            i.key_pressed(Key::Enter) || i.key_pressed(Key::Tab),
+                                            i.key_pressed(Key::Escape),
+                                        )
+                                    });
+                                    if escape {
+                                        edit_done = Some(false);
+                                    } else if enter || r.lost_focus() {
+                                        edit_done = Some(true);
+                                    }
+                                    return;
+                                }
                                 if selected {
                                     ui.painter().rect_filled(rect, 0.0, selected_bg);
                                 }
@@ -350,16 +652,19 @@ fn table(
                                 } else {
                                     Layout::left_to_right(Align::Center)
                                 };
-                                ui.with_layout(layout, |ui| match data.get(c) {
-                                    Some(Some(text)) => {
+                                let strike = cell_state == CellState::Deleted;
+                                ui.with_layout(layout, |ui| match value.as_deref() {
+                                    Some(text) => {
                                         let first = text.lines().next().unwrap_or_default();
                                         let more =
                                             if first.len() < text.len() { " …" } else { "" };
-                                        let label = egui::Label::new(
-                                            RichText::new(format!("{first}{more}")).monospace(),
-                                        )
-                                        .truncate()
-                                        .selectable(false);
+                                        let mut rich =
+                                            RichText::new(format!("{first}{more}")).monospace();
+                                        if strike {
+                                            rich = rich.strikethrough();
+                                        }
+                                        let label =
+                                            egui::Label::new(rich).truncate().selectable(false);
                                         ui.add(label);
                                     }
                                     _ => {
@@ -380,7 +685,11 @@ fn table(
                                 state.cursor = Some((view_row, c));
                             }
                             if response.double_clicked() {
-                                open_viewer = Some((view_row, c));
+                                if state.is_editable() {
+                                    edit_click = Some((view_row, c));
+                                } else {
+                                    open_viewer = Some((view_row, c));
+                                }
                             }
                             if response.secondary_clicked() {
                                 menu_cell = Some((view_row, c));
@@ -391,6 +700,13 @@ fn table(
                 });
         });
 
+    if let Some(commit) = edit_done {
+        state.finish_edit(rows, commit);
+        ui.memory_mut(|m| m.request_focus(focus_id));
+    }
+    if let Some(cell) = edit_click {
+        state.start_edit(rows, cell, None);
+    }
     if let Some(c) = sort_clicked {
         state.set_sort(c, rows, columns);
     }
@@ -435,6 +751,27 @@ fn table(
 }
 
 fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut GridState) {
+    if state.is_editable() {
+        if ui.button("Edit cell").clicked() {
+            if let Some(cell) = state.cursor {
+                state.start_edit(rows, cell, None);
+            }
+            ui.close();
+        }
+        if ui.button("Set NULL").clicked() {
+            state.set_null(rows);
+            ui.close();
+        }
+        if ui.button("Insert row").clicked() {
+            state.insert_row(columns.len());
+            ui.close();
+        }
+        if ui.button("Delete / undelete rows").clicked() {
+            state.delete_rows();
+            ui.close();
+        }
+        ui.separator();
+    }
     if ui.button("Copy").clicked() {
         ui.ctx()
             .copy_text(selection_text(columns, rows, state, false));

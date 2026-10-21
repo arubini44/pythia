@@ -353,3 +353,37 @@ fn compile_errors_and_metadata() {
 
     exec(&mut h, 20, "drop table orui_meta_t purge");
 }
+
+#[test]
+fn rowid_of_wrapped_query() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    let exec = |h: &mut Harness, id, sql: &str| {
+        h.session.send(DbRequest::Execute {
+            id,
+            sql: sql.into(),
+            max_rows: 1,
+            binds: vec![],
+        });
+        h.next_result()
+    };
+    exec(
+        &mut h,
+        1,
+        "create table orui_rowid_t (id number primary key, v varchar2(10))",
+    );
+    // Editable results wrap the user's query to fetch the base table's ROWID.
+    let ok = "select q.*, q.rowid as orui$rowid from (select id, v from orui_rowid_t where id > 0 order by id) q";
+    let DbEvent::QueryStarted { columns, .. } = exec(&mut h, 2, ok) else {
+        panic!("expected rows")
+    };
+    assert_eq!(columns.last().unwrap().type_name, "ROWID");
+    h.next_result();
+    let grouped = "select q.*, q.rowid as orui$rowid from (select v, count(*) n from orui_rowid_t group by v) q";
+    let DbEvent::Failed { error, .. } = exec(&mut h, 3, grouped) else {
+        panic!("expected failure")
+    };
+    assert_eq!(error.code, Some(1446));
+    exec(&mut h, 4, "drop table orui_rowid_t purge");
+}
