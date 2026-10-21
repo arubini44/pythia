@@ -1,51 +1,53 @@
 //! Editor state owned by a document.
 //!
-//! Documents talk to this wrapper only, so swapping the widget underneath
-//! (TextEdit spike → rope-backed code editor) doesn't touch them.
+//! Wraps the rope-backed [`CodeEditor`] and keeps a `String` copy of its text
+//! (refreshed when the editor's revision changes), so documents can borrow
+//! the text cheaply for statement splitting and dirty checks.
 
 use std::ops::Range;
 
 use egui::Ui;
-use orui_ui::SqlEditor;
-use serde::{Deserialize, Serialize};
+use orui_ui::code_editor::{CodeEditor, EditorConfig, EditorOutput};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MarkerKind {
-    Error,
-    Warning,
-}
+pub use orui_ui::code_editor::{Marker, MarkerKind};
 
-#[derive(Debug, Clone)]
-#[expect(dead_code, reason = "drawn by the rope-backed editor (in progress)")]
-pub struct Marker {
-    /// 1-based line.
-    pub line: usize,
-    pub kind: MarkerKind,
-    pub message: String,
-}
-
-#[derive(Default, Serialize, Deserialize)]
-#[serde(transparent)]
 pub struct Editor {
+    inner: CodeEditor,
     text: String,
-    #[serde(skip)]
-    view: View,
+    revision: u64,
 }
 
-#[derive(Default)]
-struct View {
-    cursor: usize,
-    selection: Option<Range<usize>>,
-    line_col: (usize, usize),
-    pending_select: Option<Range<usize>>,
-    markers: Vec<Marker>,
+impl Default for Editor {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+impl Serialize for Editor {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Editor {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Editor::new)
+    }
 }
 
 impl Editor {
     pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            view: View::default(),
+        let text = text.into();
+        let inner = CodeEditor::new(&text);
+        let revision = inner.revision();
+        Self { inner, text, revision }
+    }
+
+    fn refresh(&mut self) {
+        if self.inner.revision() != self.revision {
+            self.text = self.inner.text();
+            self.revision = self.inner.revision();
         }
     }
 
@@ -54,64 +56,50 @@ impl Editor {
     }
 
     pub fn set_text(&mut self, text: impl Into<String>) {
-        self.text = text.into();
-        self.view.pending_select = Some(0..0);
+        let text = text.into();
+        self.inner.set_text(&text);
+        self.text = text;
+        self.revision = self.inner.revision();
+        self.inner.select(0..0);
     }
 
     pub fn cursor(&self) -> usize {
-        self.view.cursor.min(self.text.len())
+        self.inner.cursor().min(self.text.len())
     }
 
     /// Non-empty selection as a byte range.
     pub fn selection(&self) -> Option<Range<usize>> {
-        self.view
-            .selection
-            .clone()
-            .filter(|r| r.end <= self.text.len())
+        self.inner.selection().filter(|r| r.end <= self.text.len() && !r.is_empty())
     }
 
     pub fn line_col(&self) -> (usize, usize) {
-        self.view.line_col
+        self.inner.line_col()
     }
 
     pub fn select(&mut self, range: Range<usize>) {
         let end = range.end.min(self.text.len());
-        self.view.pending_select = Some(range.start.min(end)..end);
+        self.inner.select(range.start.min(end)..end);
+        self.inner.request_focus();
     }
 
-    /// Moves the cursor to the start of a 1-based line (and column).
+    /// Moves the cursor to a 1-based line and column.
     pub fn goto(&mut self, line: usize, column: usize) {
-        let start = line_start(&self.text, line);
-        let line_end = self.text[start..]
-            .find('\n')
-            .map_or(self.text.len(), |i| start + i);
-        let col = self.text[start..line_end]
-            .char_indices()
-            .nth(column.saturating_sub(1))
-            .map_or(line_end, |(i, _)| start + i);
-        self.view.pending_select = Some(col..col);
-    }
-
-    /// Replaces the selection (or inserts at the cursor) and selects the result.
-    pub fn insert(&mut self, text: &str) {
-        let range = self
-            .selection()
-            .unwrap_or_else(|| self.cursor()..self.cursor());
-        self.text.replace_range(range.clone(), text);
-        self.view.pending_select = Some(range.start..range.start + text.len());
+        self.inner.goto(line, column);
+        self.inner.request_focus();
     }
 
     pub fn set_markers(&mut self, markers: Vec<Marker>) {
-        self.view.markers = markers;
+        self.inner.set_markers(markers);
     }
 
-    #[expect(dead_code, reason = "drawn by the rope-backed editor (in progress)")]
-    pub fn markers(&self) -> &[Marker] {
-        &self.view.markers
+    /// Replaces the selection (or inserts at the cursor), as one undo step.
+    pub fn insert(&mut self, text: &str) {
+        self.inner.replace_selection(text);
+        self.refresh();
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, id: impl egui::AsId, settings: &orui_config::EditorSettings) {
-        self.show(ui, id, settings, false);
+    pub fn ui(&mut self, ui: &mut Ui, id: impl egui::AsId, settings: &orui_config::EditorSettings) -> EditorOutput {
+        self.show(ui, id, settings, false)
     }
 
     pub fn ui_read_only(
@@ -119,8 +107,8 @@ impl Editor {
         ui: &mut Ui,
         id: impl egui::AsId,
         settings: &orui_config::EditorSettings,
-    ) {
-        self.show(ui, id, settings, true);
+    ) -> EditorOutput {
+        self.show(ui, id, settings, true)
     }
 
     fn show(
@@ -129,16 +117,18 @@ impl Editor {
         id: impl egui::AsId,
         settings: &orui_config::EditorSettings,
         read_only: bool,
-    ) {
-        let out = SqlEditor::new(&mut self.text, id)
-            .font_size(settings.font_size)
-            .line_numbers(settings.show_line_numbers)
-            .select(self.view.pending_select.take())
-            .read_only(read_only)
-            .show(ui);
-        self.view.cursor = out.cursor;
-        self.view.selection = out.selection;
-        self.view.line_col = out.line_col;
+    ) -> EditorOutput {
+        let config = EditorConfig {
+            font_size: settings.font_size,
+            tab_width: settings.tab_width,
+            show_line_numbers: settings.show_line_numbers,
+            read_only,
+            ..EditorConfig::default()
+        };
+        self.inner.set_id_salt(id);
+        let out = self.inner.ui(ui, &config);
+        self.refresh();
+        out
     }
 }
 
@@ -147,9 +137,7 @@ pub fn line_start(text: &str, line: usize) -> usize {
     if line <= 1 {
         return 0;
     }
-    text.match_indices('\n')
-        .nth(line - 2)
-        .map_or(text.len(), |(i, _)| i + 1)
+    text.match_indices('\n').nth(line - 2).map_or(text.len(), |(i, _)| i + 1)
 }
 
 #[cfg(test)]
@@ -166,9 +154,11 @@ mod tests {
     }
 
     #[test]
-    fn goto_column() {
-        let mut e = Editor::new("ab\ncdef");
-        e.goto(2, 3);
-        assert_eq!(e.view.pending_select, Some(5..5));
+    fn text_follows_edits() {
+        let mut e = Editor::new("select 1");
+        e.select(0..6);
+        e.insert("SELECT");
+        assert_eq!(e.text(), "SELECT 1");
+        assert_eq!(serde_json::to_string(&e).unwrap(), "\"SELECT 1\"");
     }
 }

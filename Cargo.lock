@@ -2841,6 +2841,7 @@ dependencies = [
  "orui-ui",
  "rfd",
  "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]

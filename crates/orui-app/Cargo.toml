@@ -26,4 +26,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+serde_json = "1"
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu", "snapshot"] }
