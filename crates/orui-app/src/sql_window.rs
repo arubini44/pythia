@@ -8,7 +8,7 @@ use egui::{RichText, Ui};
 use orui_db::{Cell, Column, DbError, DbEvent, DbRequest, MetaQuery, MetaResult};
 use orui_plsql::{StatementKind, TokenKind, split_statements, statement_at, tokenize};
 use orui_ui::icons::{Icon, icon_text_button};
-use orui_ui::{ResultGrid, to_tsv};
+use orui_ui::{GridState, ResultGrid, selection_data, to_tsv};
 use serde::{Deserialize, Serialize};
 
 use crate::documents::{DocContext, Effects, TableData, Target, request_id};
@@ -50,6 +50,9 @@ pub struct RunState {
     pub bottom: BottomTab,
     pub line_col: (usize, usize),
     pub prompt: Option<VariablePrompt>,
+    /// Result of a running export (file dialog + write on a helper thread).
+    pub export: Option<std::sync::mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>>,
+    pub selection_summary: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,10 +77,12 @@ pub struct QueryResult {
     /// More rows can be fetched.
     pub more: bool,
     pub elapsed: Duration,
+    pub grid: GridState,
 }
 
 pub struct Plan {
     pub id: u64,
+    pub grid: GridState,
     pub result: Option<Result<TableData, String>>,
 }
 
@@ -186,7 +191,11 @@ impl SqlWindow {
             return effects;
         }
         let id = request_id();
-        self.state.plan = Some(Plan { id, result: None });
+        self.state.plan = Some(Plan {
+            id,
+            result: None,
+            grid: GridState::default(),
+        });
         self.state.bottom = BottomTab::Plan;
         let sql = substitute(&stmt.sql, &self.defines);
         effects.request(
@@ -410,6 +419,7 @@ impl SqlWindow {
                     rows: Vec::new(),
                     more: true,
                     elapsed: Duration::ZERO,
+                    grid: GridState::default(),
                 });
                 self.state.bottom = BottomTab::Result(n - 1);
             }
@@ -595,19 +605,60 @@ impl SqlWindow {
                 }
             }
         });
+        if let Some(rx) = &state.export
+            && let Ok(result) = rx.try_recv()
+        {
+            state.export = None;
+            let message = match result {
+                Ok(Some(path)) => Message {
+                    level: Level::Info,
+                    text: format!("Exported to {}", path.display()),
+                    jump: None,
+                },
+                Ok(None) => Message {
+                    level: Level::Info,
+                    text: "Export cancelled".into(),
+                    jump: None,
+                },
+                Err(e) => Message {
+                    level: Level::Error,
+                    text: format!("Export failed: {e}"),
+                    jump: None,
+                },
+            };
+            state.messages.push(message);
+        }
         if let BottomTab::Result(i) = state.bottom
             && let Some(result) = state.results.get(i)
         {
             ui.horizontal(|ui| {
                 let more = if result.more { "+" } else { "" };
-                ui.weak(format!(
-                    "{}{more} rows · {} columns · {}",
-                    result.rows.len(),
-                    result.columns.len(),
-                    fmt_duration(result.elapsed)
-                ))
-                .on_hover_text(&result.sql);
+                let info = match &state.selection_summary {
+                    Some(summary) => summary.clone(),
+                    None => format!(
+                        "{}{more} rows · {} columns · {}",
+                        result.rows.len(),
+                        result.columns.len(),
+                        fmt_duration(result.elapsed)
+                    ),
+                };
+                ui.weak(info).on_hover_text(&result.sql);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let exporting = state.export.is_some();
+                    ui.add_enabled_ui(!exporting, |ui| {
+                        ui.menu_button("Export", |ui| {
+                            for format in orui_data::Format::ALL {
+                                if ui.button(format.label()).clicked() {
+                                    // The selection if there is one, else all fetched rows.
+                                    let (columns, rows) =
+                                        selection_data(&result.columns, &result.rows, &result.grid);
+                                    state.export =
+                                        Some(export_in_background(*format, columns, rows));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
                     if icon_text_button(ui, Icon::Copy, "Copy all")
                         .on_hover_text("Copy fetched rows as tab separated text")
                         .clicked()
@@ -635,10 +686,16 @@ impl SqlWindow {
 
         match state.bottom {
             BottomTab::Result(i) if i < state.results.len() => {
+                let result = &mut state.results[i];
+                let out = ResultGrid::new(
+                    &result.columns,
+                    &result.rows,
+                    &mut result.grid,
+                    ("grid", cx.id, result.id),
+                )
+                .show(ui);
+                state.selection_summary = out.selection_summary;
                 let result = &state.results[i];
-                let out =
-                    ResultGrid::new(&result.columns, &result.rows, ("grid", cx.id, result.id))
-                        .show(ui);
                 let is_open = state.results.len() == i + 1 && result.more;
                 if out.reached_end && is_open && state.running.is_none() && state.fetching.is_none()
                 {
@@ -652,15 +709,22 @@ impl SqlWindow {
                     );
                 }
             }
-            BottomTab::Plan => match state.plan.as_ref().and_then(|p| p.result.as_ref()) {
-                None => {
+            BottomTab::Plan => match state.plan.as_mut() {
+                Some(Plan {
+                    result: Some(Ok((columns, rows))),
+                    grid,
+                    ..
+                }) => {
+                    ResultGrid::new(columns, rows, grid, ("plan", cx.id)).show(ui);
+                }
+                Some(Plan {
+                    result: Some(Err(e)),
+                    ..
+                }) => {
+                    ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                }
+                _ => {
                     ui.spinner();
-                }
-                Some(Ok((columns, rows))) => {
-                    ResultGrid::new(columns, rows, ("plan", cx.id)).show(ui);
-                }
-                Some(Err(e)) => {
-                    ui.colored_label(ui.visuals().error_fg_color, e);
                 }
             },
             BottomTab::Result(_) | BottomTab::Messages => {
@@ -940,6 +1004,42 @@ fn first_line(sql: &str) -> String {
     } else {
         line.to_owned()
     }
+}
+
+/// Asks for a file name and writes the export on a helper thread, so the
+/// native dialog doesn't block rendering.
+fn export_in_background(
+    format: orui_data::Format,
+    columns: Vec<Column>,
+    rows: Vec<Vec<Cell>>,
+) -> std::sync::mpsc::Receiver<Result<Option<std::path::PathBuf>, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let path = rfd::FileDialog::new()
+            .set_file_name(format!("result.{}", format.extension()))
+            .add_filter(format.label(), &[format.extension()])
+            .save_file();
+        let result = match path {
+            None => Ok(None),
+            Some(path) => std::fs::File::create(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|file| {
+                    let mut out = std::io::BufWriter::new(file);
+                    orui_data::export(
+                        format,
+                        &columns,
+                        &rows,
+                        &orui_data::Options::default(),
+                        &mut out,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    std::io::Write::flush(&mut out).map_err(|e| e.to_string())
+                })
+                .map(|()| Some(path)),
+        };
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 pub fn fmt_duration(d: Duration) -> String {

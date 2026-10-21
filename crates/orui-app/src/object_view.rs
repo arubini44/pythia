@@ -39,6 +39,7 @@ struct State {
     tab: Option<Tab>,
     columns: Option<Loaded<Vec<Col>>>,
     details: HashMap<Detail, Loaded<TableData>>,
+    grids: HashMap<Detail, orui_ui::GridState>,
     ddl: Option<Loaded<Editor>>,
     pending: HashMap<u64, Tab>,
 }
@@ -214,7 +215,9 @@ impl ObjectView {
                     ui.weak(format!("No {}", d.label().to_lowercase()));
                 }
                 Some(Loaded::Ready((columns, rows))) => {
-                    ResultGrid::new(columns, rows, ("object-detail", cx.id, d.label())).show(ui);
+                    let grid = self.state.grids.entry(d).or_default();
+                    ResultGrid::new(columns, rows, grid, ("object-detail", cx.id, d.label()))
+                        .show(ui);
                 }
                 other => loading_ui(ui, other),
             },
