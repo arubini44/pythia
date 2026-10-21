@@ -109,6 +109,8 @@ pub struct QueryResult {
     pub grid: GridState,
     /// Base table and original query, once the result was made editable.
     pub edit: Option<(String, String)>,
+    /// Quick filter text.
+    pub filter: String,
 }
 
 pub struct Plan {
@@ -731,6 +733,7 @@ impl SqlWindow {
                     elapsed: Duration::ZERO,
                     grid: GridState::default(),
                     edit: None,
+                    filter: String::new(),
                 };
                 let mut replace = None;
                 if let Some(Internal::EditQuery {
@@ -1019,18 +1022,20 @@ impl SqlWindow {
             state.messages.push(message);
         }
         if let BottomTab::Result(i) = state.bottom
-            && let Some(result) = state.results.get(i)
+            && let Some(result) = state.results.get_mut(i)
         {
             ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut result.filter).hint_text("Filter rows…").desired_width(160.0));
+                result.grid.set_filter(&result.filter);
                 let more = if result.more { "+" } else { "" };
+                let rows = if result.filter.trim().is_empty() {
+                    format!("{}{more} rows", result.rows.len())
+                } else {
+                    format!("{} of {}{more} rows", result.grid.visible_rows(), result.rows.len())
+                };
                 let info = match &state.selection_summary {
                     Some(summary) => summary.clone(),
-                    None => format!(
-                        "{}{more} rows · {} columns · {}",
-                        result.rows.len(),
-                        result.columns.len(),
-                        fmt_duration(result.elapsed)
-                    ),
+                    None => format!("{rows} · {} columns · {}", result.columns.len(), fmt_duration(result.elapsed)),
                 };
                 ui.weak(info).on_hover_text(&result.sql);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

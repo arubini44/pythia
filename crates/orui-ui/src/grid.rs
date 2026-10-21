@@ -28,6 +28,8 @@ pub struct GridState {
     cursor: Option<(usize, usize)>,
     dragging: bool,
     pub record_view: bool,
+    /// Rows must contain this text (case-insensitive) in some cell.
+    filter: String,
     viewer: Option<(usize, usize)>,
     scroll_to_cursor: bool,
     edit: Option<Editing>,
@@ -86,11 +88,38 @@ pub struct GridOutput {
 }
 
 impl GridState {
+    /// Shows only rows containing `text` (case-insensitive) in any cell.
+    pub fn set_filter(&mut self, text: &str) {
+        if self.filter != text {
+            self.filter = text.to_owned();
+            self.ordered_rows = usize::MAX;
+            self.anchor = None;
+            self.cursor = None;
+        }
+    }
+
+    /// Fetched rows passing the filter.
+    pub fn visible_rows(&self) -> usize {
+        self.order.len()
+    }
+
     fn sync(&mut self, rows: &[Vec<Cell>], columns: &[Column]) {
-        if self.ordered_rows == rows.len() && self.order.len() == rows.len() {
+        if self.ordered_rows == rows.len() {
             return;
         }
-        self.order = (0..rows.len()).collect();
+        let needle = self.filter.trim().to_lowercase();
+        self.order = if needle.is_empty() {
+            (0..rows.len()).collect()
+        } else {
+            (0..rows.len())
+                .filter(|&i| {
+                    rows[i]
+                        .iter()
+                        .flatten()
+                        .any(|v| v.to_lowercase().contains(&needle))
+                })
+                .collect()
+        };
         self.ordered_rows = rows.len();
         if let Some((col, asc)) = self.sort {
             sort_order(
@@ -178,8 +207,8 @@ impl GridState {
     }
 
     /// Rows shown: fetched rows plus inserted ones.
-    fn view_len(&self, rows: &[Vec<Cell>]) -> usize {
-        rows.len() + self.edit.as_ref().map_or(0, |e| e.changes.inserts.len())
+    fn view_len(&self, _rows: &[Vec<Cell>]) -> usize {
+        self.order.len() + self.edit.as_ref().map_or(0, |e| e.changes.inserts.len())
     }
 
     /// The value shown for a cell, taking pending edits into account.
@@ -483,6 +512,7 @@ fn table(
     let header_bg = visuals.faint_bg_color;
     let row_height = ui.text_style_height(&egui::TextStyle::Monospace) + 6.0;
     let view_len = state.view_len(rows);
+    let data_rows = state.order.len();
     let row_digits = view_len.max(1).to_string().len();
     let tint = |c: egui::Color32| c.gamma_multiply(if visuals.dark_mode { 0.22 } else { 0.18 });
     let changed_bg = tint(visuals.hyperlink_color);
@@ -574,7 +604,7 @@ fn table(
                 .body(|body| {
                     body.rows(row_height, view_len, |mut row| {
                         let view_row = row.index();
-                        if view_row + 1 >= rows.len() {
+                        if view_row + 1 >= data_rows {
                             reached_end = true;
                         }
                         let (_, number) = row.col(|ui| {
@@ -1071,6 +1101,18 @@ mod tests {
         assert_eq!(s.order, [0, 2, 1]);
         s.set_sort(0, &r, &c);
         assert_eq!(s.order, [0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_rows() {
+        let (c, r) = (cols(), rows());
+        let mut s = GridState::default();
+        s.set_filter("A");
+        s.sync(&r, &c);
+        assert_eq!(s.order, [1]);
+        s.set_filter("");
+        s.sync(&r, &c);
+        assert_eq!(s.visible_rows(), 3);
     }
 
     #[test]
