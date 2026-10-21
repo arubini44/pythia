@@ -201,6 +201,7 @@ impl Document {
     pub fn is_dirty(&self) -> bool {
         match &self.kind {
             DocKind::Program(w) => w.is_dirty(),
+            DocKind::Sql(w) => w.is_dirty(),
             _ => false,
         }
     }

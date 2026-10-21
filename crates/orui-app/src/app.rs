@@ -32,6 +32,12 @@ const MISSING_CLIENT_HINT: &str = "Oracle Instant Client could not be loaded. In
      oracle.com and put its directory on LD_LIBRARY_PATH (Linux), PATH (Windows) or \
      DYLD_LIBRARY_PATH (macOS).";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileAction {
+    Open,
+    SaveAs(DocId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tab {
     Browser,
@@ -80,6 +86,11 @@ pub struct OruiApp {
     log: Vec<String>,
     connect_dialog: ConnectDialog,
     palette: CommandPalette,
+    /// Native file dialog running on a helper thread.
+    file_dialog: Option<(
+        std::sync::mpsc::Receiver<Option<std::path::PathBuf>>,
+        FileAction,
+    )>,
     settings_dialog: crate::settings_dialog::SettingsDialog,
     finder: ObjectFinder,
     history_dialog: HistoryDialog,
@@ -129,6 +140,7 @@ impl OruiApp {
             log: Vec::new(),
             connect_dialog: ConnectDialog::default(),
             palette: CommandPalette::default(),
+            file_dialog: None,
             settings_dialog: Default::default(),
             finder: ObjectFinder::default(),
             history_dialog: HistoryDialog::default(),
@@ -610,6 +622,35 @@ impl OruiApp {
             }
             Command::Connect => self.connect_dialog.show(self.last_profile.as_ref()),
             Command::Settings => self.settings_dialog.open = true,
+            Command::OpenFile => self.file_dialog(FileAction::Open, None),
+            Command::SaveFile | Command::SaveFileAs => {
+                let Some(id) = self.focused else { return };
+                match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+                    Some(DocKind::Sql(w)) => match (&w.path, command) {
+                        (Some(path), Command::SaveFile) => {
+                            let path = path.clone();
+                            match w.save_to(path.clone()) {
+                                Ok(()) => self.log(format!("Saved {}", path.display())),
+                                Err(e) => {
+                                    self.log(format!("Could not save {}: {e}", path.display()))
+                                }
+                            }
+                        }
+                        _ => {
+                            let name = w.path.as_ref().and_then(|p| p.file_name()).map_or_else(
+                                || format!("{}.sql", w.title.to_lowercase().replace(' ', "_")),
+                                |n| n.to_string_lossy().into_owned(),
+                            );
+                            self.file_dialog(FileAction::SaveAs(id), Some(name));
+                        }
+                    },
+                    Some(DocKind::Program(w)) => {
+                        let name = w.file_name();
+                        self.file_dialog(FileAction::SaveAs(id), Some(name));
+                    }
+                    _ => {}
+                }
+            }
             Command::Disconnect => {
                 let Some(name) = self.current_connection() else {
                     return;
@@ -991,6 +1032,9 @@ impl OruiApp {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 item(ui, Command::NewSqlWindow);
+                item(ui, Command::OpenFile);
+                item(ui, Command::SaveFile);
+                item(ui, Command::SaveFileAs);
                 ui.separator();
                 item(ui, Command::CloseTab);
                 item(ui, Command::CloseOtherTabs);
@@ -1184,6 +1228,63 @@ impl OruiApp {
         });
     }
 
+    fn file_dialog(&mut self, action: FileAction, file_name: Option<String>) {
+        if self.file_dialog.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let open = matches!(action, FileAction::Open);
+        std::thread::spawn(move || {
+            let dialog = rfd::FileDialog::new()
+                .add_filter(
+                    "SQL and PL/SQL",
+                    &[
+                        "sql", "pks", "pkb", "prc", "fnc", "tps", "tpb", "trg", "vw", "pls", "plb",
+                    ],
+                )
+                .add_filter("All files", &["*"]);
+            let path = if open {
+                dialog.pick_file()
+            } else {
+                dialog
+                    .set_file_name(file_name.unwrap_or_default())
+                    .save_file()
+            };
+            let _ = tx.send(path);
+        });
+        self.file_dialog = Some((rx, action));
+    }
+
+    fn poll_file_dialog(&mut self) {
+        let Some((rx, action)) = &self.file_dialog else {
+            return;
+        };
+        let Ok(path) = rx.try_recv() else { return };
+        let action = *action;
+        self.file_dialog = None;
+        let Some(path) = path else { return };
+        match action {
+            FileAction::Open => match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let connection = self.current_connection();
+                    self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, text)));
+                }
+                Err(e) => self.log(format!("Could not open {}: {e}", path.display())),
+            },
+            FileAction::SaveAs(id) => {
+                let result = match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+                    Some(DocKind::Sql(w)) => w.save_to(path.clone()),
+                    Some(DocKind::Program(w)) => std::fs::write(&path, w.active_source()),
+                    _ => Ok(()),
+                };
+                match result {
+                    Ok(()) => self.log(format!("Saved {}", path.display())),
+                    Err(e) => self.log(format!("Could not save {}: {e}", path.display())),
+                }
+            }
+        }
+    }
+
     /// Data files go to an import window, SQL and PL/SQL files open in a
     /// SQL window.
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -1218,12 +1319,8 @@ impl OruiApp {
                 }
                 _ => match std::fs::read_to_string(&path) {
                     Ok(text) => {
-                        let title = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
                         let connection = self.current_connection();
-                        self.add_doc(connection, DocKind::Sql(SqlWindow::new(title, text)));
+                        self.add_doc(connection, DocKind::Sql(SqlWindow::from_file(path, text)));
                     }
                     Err(e) => self.log(format!("Could not open {}: {e}", path.display())),
                 },
@@ -1382,6 +1479,7 @@ impl eframe::App for OruiApp {
         let ctx = ui.ctx().clone();
         self.pump_events();
         self.handle_dropped_files(&ctx);
+        self.poll_file_dialog();
         self.handle_close_request(&ctx);
 
         let modal_open = self.connect_dialog.open

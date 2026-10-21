@@ -89,6 +89,31 @@ impl ProgramWindow {
         }
     }
 
+    /// File name for saving the active part, e.g. `emp_pkg.pkb`.
+    pub fn file_name(&self) -> String {
+        let ext = match self.parts.get(self.active).map(|p| p.object_type) {
+            Some(ObjectType::Package) => "pks",
+            Some(ObjectType::PackageBody) => "pkb",
+            Some(ObjectType::Procedure) => "prc",
+            Some(ObjectType::Function) => "fnc",
+            Some(ObjectType::Type) => "tps",
+            Some(ObjectType::TypeBody) => "tpb",
+            Some(ObjectType::Trigger) => "trg",
+            _ => "sql",
+        };
+        format!("{}.{ext}", self.object.name.to_lowercase())
+    }
+
+    /// Source of the active part, terminated for SQL*Plus.
+    pub fn active_source(&self) -> String {
+        let text = self
+            .parts
+            .get(self.active)
+            .map_or("", |p| p.editor.text())
+            .trim_end();
+        format!("{text}\n/\n")
+    }
+
     pub fn title(&self) -> String {
         self.object.name.to_lowercase()
     }

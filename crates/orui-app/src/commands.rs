@@ -28,6 +28,9 @@ macro_rules! commands {
 
 commands! {
     NewSqlWindow => "File: New SQL Window",
+    OpenFile => "File: Open…",
+    SaveFile => "File: Save",
+    SaveFileAs => "File: Save As…",
     CloseTab => "File: Close Window",
     CloseOtherTabs => "File: Close Other Windows",
     Settings => "File: Settings…",
@@ -86,6 +89,12 @@ impl Keymap {
         let bindings = match preset {
             KeymapPreset::PlsqlDeveloper => vec![
                 (Command::NewSqlWindow, KeyboardShortcut::new(ctrl, Key::N)),
+                (Command::OpenFile, KeyboardShortcut::new(ctrl, Key::O)),
+                (
+                    Command::SaveFileAs,
+                    KeyboardShortcut::new(ctrl | shift, Key::S),
+                ),
+                (Command::SaveFile, KeyboardShortcut::new(ctrl, Key::S)),
                 (Command::CloseTab, KeyboardShortcut::new(ctrl, Key::W)),
                 (Command::Settings, KeyboardShortcut::new(ctrl, Key::Comma)),
                 (Command::ExecuteAll, KeyboardShortcut::new(none, Key::F8)),

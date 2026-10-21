@@ -26,6 +26,12 @@ pub struct SqlWindow {
     pub defines: BTreeMap<String, String>,
     #[serde(default = "yes")]
     pub substitution: bool,
+    /// File the window was opened from or saved to.
+    #[serde(default)]
+    pub path: Option<std::path::PathBuf>,
+    /// Text as last saved to `path`, to detect unsaved changes.
+    #[serde(default)]
+    pub saved_text: String,
     #[serde(skip)]
     pub state: RunState,
     #[serde(skip)]
@@ -148,6 +154,8 @@ impl SqlWindow {
             bind_values: BTreeMap::new(),
             defines: BTreeMap::new(),
             substitution: true,
+            path: None,
+            saved_text: String::new(),
             state: RunState::default(),
             assist: Default::default(),
         }
@@ -160,6 +168,35 @@ impl SqlWindow {
             .completion_labels()
             .iter()
             .any(|l| l.eq_ignore_ascii_case(label))
+    }
+
+    /// A window loaded from a file.
+    pub fn from_file(path: std::path::PathBuf, text: String) -> Self {
+        let title = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut w = Self::new(title, text.clone());
+        w.path = Some(path);
+        w.saved_text = text;
+        w
+    }
+
+    /// Unsaved changes to a file-backed window.
+    pub fn is_dirty(&self) -> bool {
+        self.path.is_some() && self.editor.text() != self.saved_text
+    }
+
+    /// Writes the text to `path` and makes it the window's file.
+    pub fn save_to(&mut self, path: std::path::PathBuf) -> std::io::Result<()> {
+        std::fs::write(&path, self.editor.text())?;
+        self.saved_text = self.editor.text().to_owned();
+        self.title = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.path = Some(path);
+        Ok(())
     }
 
     pub fn is_running(&self) -> bool {
@@ -1374,5 +1411,25 @@ mod tests {
             dedup(["a".to_owned(), "A".to_owned(), "b".to_owned()].into_iter()),
             ["a", "b"]
         );
+    }
+
+    #[test]
+    fn file_roundtrip_and_dirty() {
+        let dir = std::env::temp_dir().join(format!("orui-sqlfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("q.sql");
+        let mut w = SqlWindow::from_file(path.clone(), "select 1 from dual".into());
+        assert_eq!(w.title, "q.sql");
+        assert!(!w.is_dirty());
+        w.editor.select(7..8);
+        w.editor.insert("2");
+        assert!(w.is_dirty());
+        w.save_to(path.clone()).unwrap();
+        assert!(!w.is_dirty());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "select 2 from dual"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

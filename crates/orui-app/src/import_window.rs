@@ -357,8 +357,7 @@ impl ImportWindow {
             {
                 let (owner, table) = split_name(
                     &s.table,
-                    cx.catalog
-                        .map(orui_lsp_core::Catalog::current_schema),
+                    cx.catalog.map(orui_lsp_core::Catalog::current_schema),
                 );
                 let id = request_id();
                 s.columns_request = Some(id);
