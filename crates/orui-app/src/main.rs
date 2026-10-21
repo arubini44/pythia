@@ -27,6 +27,7 @@ mod settings_dialog;
 mod source_search;
 mod sql_window;
 mod statistics;
+mod stubs;
 mod table_editor;
 mod test_script;
 mod theme;

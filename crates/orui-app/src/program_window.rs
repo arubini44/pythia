@@ -314,6 +314,26 @@ impl ProgramWindow {
                 }
                 effects.extend(self.load());
             }
+            if self.parts.len() == 2
+                && self.parts[0].object_type == ObjectType::Package
+                && ui
+                    .button("Generate body")
+                    .on_hover_text("Create the body from the specification, or add stubs for missing subprograms")
+                    .clicked()
+            {
+                let spec = self.parts[0].editor.text().to_owned();
+                let body = self.parts[1].editor.text().to_owned();
+                self.state.message = Some(match crate::stubs::package_body(&spec, Some(&body)) {
+                    Some(stubs) if stubs.added > 0 => {
+                        let len = body.len();
+                        self.parts[1].editor.replace(0..len, &stubs.body, 1);
+                        self.active = 1;
+                        (false, format!("Added {} stub(s) to the body — compile to save", stubs.added))
+                    }
+                    Some(_) => (false, "The body already implements everything in the spec".into()),
+                    None => (true, "Couldn't read the package specification".into()),
+                });
+            }
             ui.toggle_value(&mut self.show_outline, "Outline");
             if busy {
                 ui.spinner();
