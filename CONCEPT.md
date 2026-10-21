@@ -275,8 +275,8 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.13 Code Search (M8)
 
 - [x] Search source across schemas (`ALL_SOURCE`) with regex, case, whole word
-- [ ] Filter by object type, schema, name pattern
-- [ ] Also search views (`ALL_VIEWS.TEXT`), triggers, job definitions
+- [x] Filter by object type, schema, name pattern
+- [x] Also search views (`ALL_VIEWS.TEXT`), triggers, job definitions
 - [x] Results grouped by object with line context; click → open at line
 - [ ] Optional local index (`tantivy`) for instant search across large schemas
 - [ ] Search in local files / project folders

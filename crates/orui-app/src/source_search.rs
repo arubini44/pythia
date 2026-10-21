@@ -1,7 +1,7 @@
 //! Find in database source: searches ALL_SOURCE (text or regular
 //! expression) and opens hits in program windows at the matching line.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use egui::text::{LayoutJob, TextFormat};
@@ -26,8 +26,63 @@ pub struct SourceSearch {
     /// Restrict to one schema (empty: all visible schemas).
     pub owner: String,
     pub include_oracle: bool,
+    /// Object name filter, `*` and `?` as wildcards (empty: all).
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: SourceKind,
     #[serde(skip)]
     state: State,
+}
+
+/// What to search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SourceKind {
+    /// Stored PL/SQL, views and job actions.
+    #[default]
+    All,
+    Packages,
+    Subprograms,
+    Types,
+    Triggers,
+    Views,
+    Jobs,
+}
+
+impl SourceKind {
+    const ALL: [SourceKind; 7] = [
+        SourceKind::All,
+        SourceKind::Packages,
+        SourceKind::Subprograms,
+        SourceKind::Types,
+        SourceKind::Triggers,
+        SourceKind::Views,
+        SourceKind::Jobs,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SourceKind::All => "Everything",
+            SourceKind::Packages => "Packages",
+            SourceKind::Subprograms => "Procedures and functions",
+            SourceKind::Types => "Types",
+            SourceKind::Triggers => "Triggers",
+            SourceKind::Views => "Views",
+            SourceKind::Jobs => "Scheduler job actions",
+        }
+    }
+
+    /// ALL_SOURCE types searched, or `None` for none.
+    fn source_types(self) -> Option<&'static str> {
+        match self {
+            SourceKind::All => Some(""),
+            SourceKind::Packages => Some(" and s.type in ('PACKAGE', 'PACKAGE BODY')"),
+            SourceKind::Subprograms => Some(" and s.type in ('PROCEDURE', 'FUNCTION')"),
+            SourceKind::Types => Some(" and s.type in ('TYPE', 'TYPE BODY')"),
+            SourceKind::Triggers => Some(" and s.type = 'TRIGGER'"),
+            SourceKind::Views | SourceKind::Jobs => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -45,6 +100,8 @@ struct SearchResult {
     elapsed: Duration,
     /// The pattern that produced these hits, for highlighting.
     pattern: String,
+    /// Full actions of the jobs with hits, to open them.
+    job_actions: HashMap<(String, String), String>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,20 +139,24 @@ impl SourceSearch {
         if pattern.is_empty() || self.is_busy() {
             return effects;
         }
-        let (regex, match_case, include_oracle) =
-            (self.regex, self.match_case, self.include_oracle);
+        let (regex, match_case, include_oracle, kind) =
+            (self.regex, self.match_case, self.include_oracle, self.kind);
         let owner = Some(self.owner.trim().to_uppercase()).filter(|o| !o.is_empty());
+        let name = Some(self.name.trim())
+            .filter(|n| !n.is_empty())
+            .map(|n| n.to_uppercase().replace('*', "%").replace('?', "_"));
         let id = request_id();
         self.state.pending = Some((id, Instant::now()));
         let task = Box::new(move |conn: &Connection| {
-            let hits = query(
-                conn,
-                &pattern,
+            let filter = Filter {
                 regex,
                 match_case,
-                owner.as_deref(),
+                owner: owner.as_deref(),
+                name: name.as_deref(),
                 include_oracle,
-            )?;
+                kind,
+            };
+            let hits = query(conn, &pattern, &filter)?;
             Ok(Box::new((pattern, hits)) as Box<dyn std::any::Any + Send>)
         });
         effects.request(Target::Own, DbRequest::Task { id, task });
@@ -110,10 +171,10 @@ impl SourceSearch {
             return Effects::default();
         };
         self.state.pending = None;
-        type Found = (String, Vec<SourceRow>);
-        self.state.result = Some(match result.map(|any| any.downcast::<Found>()) {
+        type Answer = (String, Found);
+        self.state.result = Some(match result.map(|any| any.downcast::<Answer>()) {
             Ok(Ok(found)) => {
-                let (pattern, rows) = *found;
+                let (pattern, Found { rows, job_actions }) = *found;
                 let truncated = rows.len() > MAX_HITS;
                 let mut objects: BTreeMap<_, Vec<Hit>> = BTreeMap::new();
                 for (owner, name, ty, line, text) in rows.into_iter().take(MAX_HITS) {
@@ -129,6 +190,7 @@ impl SourceSearch {
                     truncated,
                     elapsed: started.elapsed(),
                     pattern,
+                    job_actions,
                 })
             }
             Ok(Err(_)) => Err("unexpected result".into()),
@@ -178,6 +240,19 @@ impl SourceSearch {
                     .hint_text("all")
                     .desired_width(120.0),
             );
+            ui.label("Name");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.name)
+                    .hint_text("all, or e.g. ORDER_*")
+                    .desired_width(140.0),
+            );
+            egui::ComboBox::from_id_salt("source-kind")
+                .selected_text(self.kind.label())
+                .show_ui(ui, |ui| {
+                    for k in SourceKind::ALL {
+                        ui.selectable_value(&mut self.kind, k, k.label());
+                    }
+                });
         });
         if run && cx.connected {
             effects.extend(self.search());
@@ -186,7 +261,7 @@ impl SourceSearch {
 
         match &self.state.result {
             None => {
-                ui.weak("Searches the source of packages, procedures, functions, types and triggers you can see.");
+                ui.weak("Searches the source of packages, procedures, functions, types and triggers, view queries and scheduler job actions you can see.");
             }
             Some(Err(e)) => {
                 ui.colored_label(ui.visuals().error_fg_color, e);
@@ -243,17 +318,42 @@ impl SourceSearch {
                     });
                 if let (Some((owner, name, ty, line)), Some(connection)) =
                     (open, cx.connection.clone())
-                    && let Some(object_type) = ObjectType::from_dictionary(&ty)
                 {
-                    effects.open.push(OpenRequest::ProgramAt {
-                        connection,
-                        object: ObjectRef {
-                            owner,
-                            name,
-                            object_type,
-                        },
-                        line: line as usize,
-                    });
+                    match ty.as_str() {
+                        "JOB" => effects.open.push(OpenRequest::Sql {
+                            connection,
+                            text: format!(
+                                "-- Action of scheduler job {owner}.{name}\n{}\n",
+                                result
+                                    .job_actions
+                                    .get(&(owner.clone(), name.clone()))
+                                    .map(String::as_str)
+                                    .unwrap_or_default()
+                            ),
+                            run: false,
+                        }),
+                        "VIEW" => effects.open.push(OpenRequest::Object {
+                            connection,
+                            object: ObjectRef {
+                                owner,
+                                name,
+                                object_type: ObjectType::View,
+                            },
+                        }),
+                        _ => {
+                            if let Some(object_type) = ObjectType::from_dictionary(&ty) {
+                                effects.open.push(OpenRequest::ProgramAt {
+                                    connection,
+                                    object: ObjectRef {
+                                        owner,
+                                        name,
+                                        object_type,
+                                    },
+                                    line: line as usize,
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -309,39 +409,217 @@ fn line_job(ui: &Ui, hit: &Hit, highlight: Option<&(String, bool)>) -> LayoutJob
     job
 }
 
-fn query(
-    conn: &Connection,
-    pattern: &str,
+struct Filter<'a> {
     regex: bool,
     match_case: bool,
-    owner: Option<&str>,
+    owner: Option<&'a str>,
+    /// LIKE pattern on the object name.
+    name: Option<&'a str>,
     include_oracle: bool,
-) -> Result<Vec<SourceRow>, DbError> {
-    let condition = match (regex, match_case) {
-        (true, true) => "regexp_like(s.text, :pattern, 'c')",
-        (true, false) => "regexp_like(s.text, :pattern, 'i')",
-        (false, true) => "instr(s.text, :pattern) > 0",
-        (false, false) => "instr(upper(s.text), upper(:pattern)) > 0",
+    kind: SourceKind,
+}
+
+/// Hits, plus the full text of matching job actions.
+#[derive(Default)]
+struct Found {
+    rows: Vec<SourceRow>,
+    job_actions: HashMap<(String, String), String>,
+}
+
+fn query(conn: &Connection, pattern: &str, f: &Filter) -> Result<Found, DbError> {
+    let condition = |col: &str| match (f.regex, f.match_case) {
+        (true, true) => format!("regexp_like({col}, :pattern, 'c')"),
+        (true, false) => format!("regexp_like({col}, :pattern, 'i')"),
+        (false, true) => format!("instr({col}, :pattern) > 0"),
+        (false, false) => format!("instr(upper({col}), upper(:pattern)) > 0"),
     };
-    let oracle_filter = if include_oracle {
-        ""
-    } else {
-        " and s.owner not in (select username from all_users where oracle_maintained = 'Y')"
+    let oracle_filter = |col: &str| {
+        if f.include_oracle {
+            String::new()
+        } else {
+            format!(
+                " and {col} not in (select username from all_users where oracle_maintained = 'Y')"
+            )
+        }
     };
-    let sql = format!(
-        "select s.owner, s.name, s.type, s.line, s.text from all_source s \
-          where {condition} and (:owner is null or s.owner = :owner){oracle_filter} \
-          order by s.owner, s.name, s.type, s.line \
-          fetch first {} rows only",
-        MAX_HITS + 1
-    );
-    let rows = conn.query_named(&sql, &[("pattern", &pattern), ("owner", &owner)])?;
-    let mut out = Vec::new();
-    for row in rows {
-        let row = row?;
-        let (owner, name, ty, line, text): (String, String, String, u32, Option<String>) =
-            row.get_as()?;
-        out.push((owner, name, ty, line, text.unwrap_or_default()));
+    let binds: [(&str, &dyn orui_db::oracle::sql_type::ToSql); 3] = [
+        ("pattern", &pattern),
+        ("owner", &f.owner),
+        ("name", &f.name),
+    ];
+    let mut found = Found::default();
+    if let Some(types) = f.kind.source_types() {
+        let sql = format!(
+            "select s.owner, s.name, s.type, s.line, s.text from all_source s \
+              where {} and (:owner is null or s.owner = :owner) \
+                and (:name is null or s.name like :name){types}{} \
+              order by s.owner, s.name, s.type, s.line \
+              fetch first {} rows only",
+            condition("s.text"),
+            oracle_filter("s.owner"),
+            MAX_HITS + 1
+        );
+        for row in conn.query_named(&sql, &binds)? {
+            let row = row?;
+            let (owner, name, ty, line, text): (String, String, String, u32, Option<String>) =
+                row.get_as()?;
+            found
+                .rows
+                .push((owner, name, ty, line, text.unwrap_or_default()));
+        }
     }
-    Ok(out)
+    // Views and job actions are whole texts: find the matching lines here.
+    let line_matches = line_matcher(pattern, f.regex, f.match_case);
+    let mut whole = |owner: String, name: String, ty: &str, text: String| {
+        let mut any = false;
+        for (i, line) in text.lines().enumerate() {
+            if line_matches(line) {
+                found.rows.push((
+                    owner.clone(),
+                    name.clone(),
+                    ty.to_owned(),
+                    i as u32 + 1,
+                    line.to_owned(),
+                ));
+                any = true;
+            }
+        }
+        // Oracle matched but not on one line (e.g. a regex across lines).
+        if !any {
+            let first = text.lines().next().unwrap_or_default().to_owned();
+            found
+                .rows
+                .push((owner.clone(), name.clone(), ty.to_owned(), 1, first));
+        }
+        if ty == "JOB" {
+            found.job_actions.insert((owner, name), text);
+        }
+    };
+    if matches!(f.kind, SourceKind::All | SourceKind::Views) {
+        let sql = format!(
+            "select v.owner, v.view_name, v.text_vc from all_views v \
+              where {} and (:owner is null or v.owner = :owner) \
+                and (:name is null or v.view_name like :name){} \
+              order by v.owner, v.view_name fetch first 500 rows only",
+            condition("v.text_vc"),
+            oracle_filter("v.owner")
+        );
+        for row in conn.query_named(&sql, &binds)? {
+            let (owner, name, text): (String, String, Option<String>) = row?.get_as()?;
+            whole(owner, name, "VIEW", text.unwrap_or_default());
+        }
+    }
+    if matches!(f.kind, SourceKind::All | SourceKind::Jobs) {
+        let sql = format!(
+            "select j.owner, j.job_name, j.job_action from all_scheduler_jobs j \
+              where {} and (:owner is null or j.owner = :owner) \
+                and (:name is null or j.job_name like :name){} \
+              order by j.owner, j.job_name fetch first 500 rows only",
+            condition("j.job_action"),
+            oracle_filter("j.owner")
+        );
+        for row in conn.query_named(&sql, &binds)? {
+            let (owner, name, text): (String, String, Option<String>) = row?.get_as()?;
+            whole(owner, name, "JOB", text.unwrap_or_default());
+        }
+    }
+    Ok(found)
+}
+
+/// Matches single lines client-side like the database did for the whole text.
+fn line_matcher(pattern: &str, regex: bool, match_case: bool) -> Box<dyn Fn(&str) -> bool> {
+    if regex {
+        match regex::RegexBuilder::new(pattern)
+            .case_insensitive(!match_case)
+            .build()
+        {
+            Ok(re) => Box::new(move |line| re.is_match(line)),
+            Err(_) => Box::new(|_| false),
+        }
+    } else if match_case {
+        let needle = pattern.to_owned();
+        Box::new(move |line| line.contains(&needle))
+    } else {
+        let needle = pattern.to_lowercase();
+        Box::new(move |line| line.to_lowercase().contains(&needle))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_matching() {
+        assert!(line_matcher("Foo", false, false)("a foo b"));
+        assert!(!line_matcher("Foo", false, true)("a foo b"));
+        assert!(line_matcher(
+            r"raise_application_error\(-20\d{3}",
+            true,
+            false
+        )("  RAISE_APPLICATION_ERROR(-20001, 'x');"));
+    }
+
+    #[test]
+    fn searches_views_and_job_actions() {
+        let Ok(spec) = std::env::var("ORUI_TEST_DB") else {
+            return;
+        };
+        let (cred, db) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        let conn = Connection::connect(user, pw, db).unwrap();
+        conn.execute(
+            "create or replace view orui_ss_v as\nselect 'needle_xq7' as marker\n  from dual",
+            &[],
+        )
+        .unwrap();
+        conn.execute(
+            "begin
+               for j in (select job_name from user_scheduler_jobs where job_name = 'ORUI_SS_JOB') loop
+                 dbms_scheduler.drop_job(j.job_name, force => true);
+               end loop;
+               dbms_scheduler.create_job(job_name => 'ORUI_SS_JOB', job_type => 'PLSQL_BLOCK',
+                 job_action => 'begin' || chr(10) || '  null; -- needle_xq7' || chr(10) || 'end;',
+                 enabled => false);
+             end;",
+            &[],
+        )
+        .unwrap();
+        let filter = Filter {
+            regex: false,
+            match_case: false,
+            owner: None,
+            name: None,
+            include_oracle: false,
+            kind: SourceKind::All,
+        };
+        let found = query(&conn, "NEEDLE_XQ7", &filter).unwrap();
+        let hit = |ty: &str| {
+            found
+                .rows
+                .iter()
+                .find(|r| r.2 == ty)
+                .map(|r| (r.1.clone(), r.3))
+        };
+        // The stored text starts at the query, not at CREATE VIEW.
+        assert_eq!(hit("VIEW"), Some(("ORUI_SS_V".into(), 1)));
+        assert_eq!(hit("JOB"), Some(("ORUI_SS_JOB".into(), 2)));
+        assert!(found.job_actions.values().any(|a| a.starts_with("begin")));
+
+        let only_views = Filter {
+            kind: SourceKind::Views,
+            name: Some("ORUI_SS%"),
+            ..filter
+        };
+        let found = query(&conn, "needle_xq7", &only_views).unwrap();
+        assert!(found.rows.iter().all(|r| r.2 == "VIEW"));
+        assert_eq!(found.rows.len(), 1);
+
+        conn.execute("drop view orui_ss_v", &[]).unwrap();
+        conn.execute(
+            "begin dbms_scheduler.drop_job('ORUI_SS_JOB', force => true); end;",
+            &[],
+        )
+        .unwrap();
+    }
 }

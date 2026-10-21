@@ -2938,6 +2938,7 @@ dependencies = [
  "orui-monitor",
  "orui-plsql",
  "orui-ui",
+ "regex",
  "rfd",
  "serde",
  "serde_json",
