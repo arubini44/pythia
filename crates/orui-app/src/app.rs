@@ -1302,7 +1302,12 @@ impl OruiApp {
 
     // ----- ui -------------------------------------------------------------
 
-    fn menu_bar(&mut self, ui: &mut Ui, commands: &mut Vec<Command>) {
+    fn menu_bar(
+        &mut self,
+        ui: &mut Ui,
+        commands: &mut Vec<Command>,
+        open_report: &mut Option<&'static crate::reports::Report>,
+    ) {
         let keymap = &self.keymap;
         let ctx = ui.ctx().clone();
         let mut item = |ui: &mut Ui, command: Command| {
@@ -1366,6 +1371,21 @@ impl OruiApp {
                 item(ui, Command::DebugStop);
                 ui.separator();
                 item(ui, Command::ShowDebugger);
+            });
+            ui.menu_button("Reports", |ui| {
+                for category in crate::reports::categories() {
+                    ui.menu_button(category, |ui| {
+                        for report in crate::reports::REPORTS
+                            .iter()
+                            .filter(|r| r.category == category)
+                        {
+                            if ui.button(report.name).clicked() {
+                                *open_report = Some(report);
+                                ui.close();
+                            }
+                        }
+                    });
+                }
             });
             ui.menu_button("Monitor", |ui| {
                 item(ui, Command::MonitorDashboard);
@@ -1802,7 +1822,23 @@ impl eframe::App for OruiApp {
             self.keymap.triggered(&ctx)
         };
 
-        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui, &mut commands));
+        let mut report = None;
+        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui, &mut commands, &mut report));
+        if let Some(report) = report {
+            match self.current_connection() {
+                Some(connection) => {
+                    let id = self.add_doc(
+                        Some(connection),
+                        DocKind::Sql(SqlWindow::new(
+                            report.name.to_owned(),
+                            report.sql.to_owned(),
+                        )),
+                    );
+                    self.execute(id, false);
+                }
+                None => self.connect_dialog.show(self.last_profile.as_ref()),
+            }
+        }
         egui::Panel::top("toolbar")
             .frame(theme::toolbar_frame(ui.style()))
             .show(ui, |ui| self.toolbar(ui, &mut commands));
