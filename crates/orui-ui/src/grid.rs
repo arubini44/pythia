@@ -683,7 +683,19 @@ fn table(
                                     Layout::left_to_right(Align::Center)
                                 };
                                 let strike = cell_state == CellState::Deleted;
+                                let binary = is_binary(col);
                                 ui.with_layout(layout, |ui| match value.as_deref() {
+                                    Some(text) if binary => {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(binary_summary(text))
+                                                    .monospace()
+                                                    .color(null_color),
+                                            )
+                                            .truncate()
+                                            .selectable(false),
+                                        );
+                                    }
                                     Some(text) => {
                                         let first = text.lines().next().unwrap_or_default();
                                         let more =
@@ -1000,6 +1012,11 @@ fn viewer(
         .cloned()
         .flatten();
     let name = columns.get(c).map_or("", |col| col.name.as_str());
+    let bytes = columns
+        .get(c)
+        .filter(|col| is_binary(col))
+        .and_then(|_| value.as_deref())
+        .and_then(decode_hex);
     let pretty = value
         .as_deref()
         .and_then(|v| serde_json::from_str::<serde_json::Value>(v.trim()).ok())
@@ -1015,9 +1032,14 @@ fn viewer(
         .collapsible(false)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                match &value {
-                    None => ui.weak("NULL"),
-                    Some(v) => ui.weak(format!("{} characters", v.chars().count())),
+                match (&value, &bytes) {
+                    (None, _) => ui.weak("NULL"),
+                    (_, Some(b)) => ui.weak(format!(
+                        "{} · {}",
+                        human_bytes(b.len()),
+                        image_kind(b).unwrap_or("binary")
+                    )),
+                    (Some(v), None) => ui.weak(format!("{} characters", v.chars().count())),
                 };
                 if pretty.is_some() {
                     ui.weak("· JSON, formatted");
@@ -1029,6 +1051,21 @@ fn viewer(
                 });
             });
             ui.separator();
+            if let Some(b) = &bytes {
+                egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                    if let Some(kind) = image_kind(b) {
+                        let uri = format!("bytes://orui-grid/{r}-{c}.{kind}");
+                        ui.add(
+                            egui::Image::from_bytes(uri, b.clone())
+                                .max_width(ui.available_width())
+                                .max_height(480.0),
+                        );
+                        ui.separator();
+                    }
+                    ui.label(RichText::new(hex_dump(b, 4096)).monospace());
+                });
+                return;
+            }
             egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut text)
@@ -1041,6 +1078,86 @@ fn viewer(
     if !open {
         state.viewer = None;
     }
+}
+
+/// BLOB, RAW and LONG RAW values arrive as hex text.
+fn is_binary(col: &Column) -> bool {
+    let t = col.type_name.to_ascii_uppercase();
+    t.starts_with("BLOB") || t.starts_with("RAW") || t.starts_with("LONG RAW") || t == "BFILE"
+}
+
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim();
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+fn human_bytes(n: usize) -> String {
+    match n {
+        n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1u64 << 20) as f64),
+        n if n >= 1 << 10 => format!("{:.1} KB", n as f64 / 1024.0),
+        n => format!("{n} bytes"),
+    }
+}
+
+/// `0x89504E47… · 12.3 KB` for a hex-encoded value.
+fn binary_summary(hex: &str) -> String {
+    let head: String = hex.chars().take(16).collect();
+    let more = if hex.len() > 16 { "…" } else { "" };
+    format!("0x{head}{more} · {}", human_bytes(hex.len() / 2))
+}
+
+fn image_kind(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("jpg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => Some("webp"),
+        [b'B', b'M', ..] => Some("bmp"),
+        _ => None,
+    }
+}
+
+/// Classic hex dump (offset, 16 bytes, ASCII), limited to `max` bytes.
+fn hex_dump(bytes: &[u8], max: usize) -> String {
+    let mut out = String::new();
+    for (i, chunk) in bytes[..bytes.len().min(max)].chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
+        let ascii: String = chunk
+            .iter()
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        out.push_str(&format!("{:08X}  {:<47}  {ascii}\n", i * 16, hex.join(" ")));
+    }
+    if bytes.len() > max {
+        out.push_str(&format!("… {} more", human_bytes(bytes.len() - max)));
+    }
+    out
 }
 
 /// Renders rows as tab separated text with a header line.
@@ -1083,6 +1200,17 @@ mod tests {
             vec![None, Some("a".into())],
             vec![Some("9".into()), None],
         ]
+    }
+
+    #[test]
+    fn binary() {
+        assert_eq!(decode_hex("89504E47"), Some(vec![0x89, b'P', b'N', b'G']));
+        assert_eq!(
+            image_kind(&decode_hex("89504E470D0A").unwrap()),
+            Some("png")
+        );
+        assert_eq!(binary_summary("DEADBEEF"), "0xDEADBEEF · 4 bytes");
+        assert!(hex_dump(b"Hello", 16).starts_with("00000000  48 65 6C 6C 6F"));
     }
 
     #[test]

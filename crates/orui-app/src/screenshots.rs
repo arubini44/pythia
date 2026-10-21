@@ -664,7 +664,14 @@ fn compile_conflict() {
         .to_owned();
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "orui@FREEPDB1".into(),
-        text: format!("{}\n/\n", sql.replacen("end demo_pkg;", "  -- changed by someone else\nend demo_pkg;", 1)),
+        text: format!(
+            "{}\n/\n",
+            sql.replacen(
+                "end demo_pkg;",
+                "  -- changed by someone else\nend demo_pkg;",
+                1
+            )
+        ),
         run: true,
     });
     wait_until(&mut h, "other compile", |app| !app.test_focused_busy());
