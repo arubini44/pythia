@@ -195,7 +195,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] LOB viewers: CLOB text, BLOB hex/image, XMLType, JSON pretty view (no XML pretty view)
 - [x] Single record view (transposed)
 - [x] Editable grid (`SELECT ... FOR UPDATE` / ROWID based): insert, update, delete rows
-- [ ] Cell editors per type (date picker, number, LOB editor dialog)
+- [x] Cell editors per type (date picker, number, LOB editor dialog) (dialog with calendar for dates and multi-line text; numbers inline)
 - [x] Copy as: TSV, CSV, INSERT statements, Markdown, JSON, with headers
 - [x] Paste from clipboard into grid (Excel ranges)
 - [x] Cell, row, and column selection; aggregates of selection (sum, count, avg, min, max) in the status bar

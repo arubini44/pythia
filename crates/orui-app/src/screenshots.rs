@@ -407,6 +407,26 @@ fn data_editing() {
             .edit_cell(&rows, 1, 2, Some("2021-02-03 04:05:06".into()));
     }
     save(&mut h, "06-editing-dark");
+    {
+        let w = h.state_mut().test_sql_window();
+        let r = &mut w.state.results[0];
+        let rows = r.rows.clone();
+        r.grid.open_value_editor(&rows, (0, 2));
+    }
+    h.run_steps(3);
+    save(&mut h, "06-editing-date-dark");
+    {
+        let w = h.state_mut().test_sql_window();
+        let r = &mut w.state.results[0];
+        let rows = r.rows.clone();
+        // Closing without Apply leaves the cell alone.
+        r.grid.close_value_editor();
+        assert_eq!(
+            r.grid.changes().unwrap().updates[&0].get(&2),
+            None,
+            "{rows:?}"
+        );
+    }
     let apply = |h: &mut Harness<'_, OruiApp>| {
         let (id, settings, connection) = cx(h.state_mut());
         let app = h.state_mut();

@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 
-use egui::{Align, Key, Layout, RichText, Sense, Ui};
+use egui::{Align, Align2, Key, Layout, RichText, Sense, Ui};
 use egui_extras::{Column as TableColumn, TableBuilder};
 use orui_data::Format;
 use orui_db::{Cell, Column};
@@ -40,6 +40,14 @@ pub struct GridState {
     follow: Option<(usize, usize)>,
     /// Columns hidden by the user; left out of copies and exports too.
     pub hidden: BTreeSet<usize>,
+    /// Cell edited in the dialog (long text, dates).
+    value_editor: Option<ValueEditor>,
+}
+
+struct ValueEditor {
+    view_row: usize,
+    col: usize,
+    text: String,
 }
 
 /// Rows related to a row, e.g. its parent through a foreign key.
@@ -409,12 +417,41 @@ impl GridState {
 
     fn start_edit(&mut self, rows: &[Vec<Cell>], cell: (usize, usize), initial: Option<String>) {
         let value = self.value(rows, cell.0, cell.1).map(str::to_owned);
+        // The inline editor is one line; it would lose line breaks.
+        let long = value
+            .as_deref()
+            .is_some_and(|v| v.contains('\n') || v.chars().count() > 200);
+        if long && initial.is_none() {
+            self.open_value_editor(rows, cell);
+            return;
+        }
         if let Some(edit) = &mut self.edit
             && edit.locked != Some(cell.1)
         {
             edit.active = Some((cell.0, cell.1, initial.or(value).unwrap_or_default()));
             edit.focus_editor = true;
         }
+    }
+
+    /// Edits a cell in the dialog (multi-line text, calendar for dates).
+    pub fn open_value_editor(&mut self, rows: &[Vec<Cell>], cell: (usize, usize)) {
+        let locked = self.edit.as_ref().map(|e| e.locked);
+        if locked.is_none() || locked == Some(Some(cell.1)) {
+            return;
+        }
+        let text = self
+            .value(rows, cell.0, cell.1)
+            .unwrap_or_default()
+            .to_owned();
+        self.value_editor = Some(ValueEditor {
+            view_row: cell.0,
+            col: cell.1,
+            text,
+        });
+    }
+
+    pub fn close_value_editor(&mut self) {
+        self.value_editor = None;
     }
 
     fn finish_edit(&mut self, rows: &[Vec<Cell>], commit: bool) {
@@ -492,6 +529,7 @@ impl<'a> ResultGrid<'a> {
         }
         out.selection_summary = summary(columns, rows, state);
         viewer(ui.ctx(), columns, rows, state, id);
+        value_editor(ui.ctx(), columns, rows, state, id);
         out
     }
 }
@@ -924,6 +962,12 @@ fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut
             }
             ui.close();
         }
+        if ui.button("Edit in dialog…").clicked() {
+            if let Some(cell) = state.cursor {
+                state.open_value_editor(rows, cell);
+            }
+            ui.close();
+        }
         if ui.button("Set NULL").clicked() {
             state.set_null(rows);
             ui.close();
@@ -1179,6 +1223,95 @@ fn record_view(
                     }
                 });
         });
+}
+
+fn is_temporal(col: &Column) -> bool {
+    let t = col.type_name.to_ascii_uppercase();
+    t.starts_with("DATE") || t.starts_with("TIMESTAMP")
+}
+
+/// The dialog editing one cell: multi-line text, a calendar for dates.
+fn value_editor(
+    ctx: &egui::Context,
+    columns: &[Column],
+    rows: &[Vec<Cell>],
+    state: &mut GridState,
+    id: egui::Id,
+) {
+    let Some(ed) = state.value_editor.as_mut() else {
+        return;
+    };
+    let column = columns.get(ed.col);
+    let name = column.map_or("", |c| c.name.as_str());
+    let date = column.is_some_and(is_temporal);
+    let mut open = true;
+    let mut result: Option<Cell> = None;
+    egui::Window::new(format!("Edit {name} — row {}", ed.view_row + 1))
+        .id(id.with("value-editor"))
+        .open(&mut open)
+        .pivot(Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
+        .default_size(if date { [480.0, 120.0] } else { [560.0, 360.0] })
+        .resizable(true)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            if date {
+                ui.horizontal(|ui| {
+                    // The date part from the picker, the time kept from the text.
+                    let today = jiff::Zoned::now().date();
+                    let mut day = ed
+                        .text
+                        .get(..10)
+                        .and_then(|d| d.parse::<jiff::civil::Date>().ok())
+                        .unwrap_or(today);
+                    ui.label("Date");
+                    if ui
+                        .add(
+                            egui_extras::DatePickerButton::new(&mut day)
+                                .id_salt("grid-date")
+                                .calendar_week(true),
+                        )
+                        .changed()
+                    {
+                        let time = ed.text.get(10..).unwrap_or_default().to_owned();
+                        let time = if time.trim().is_empty() {
+                            " 00:00:00".to_owned()
+                        } else {
+                            time
+                        };
+                        ed.text = format!("{day}{time}");
+                    }
+                    ui.weak("Format YYYY-MM-DD HH24:MI:SS");
+                });
+            }
+            let height = if date {
+                ui.text_style_height(&egui::TextStyle::Monospace) + 10.0
+            } else {
+                (ui.available_height() - 36.0).max(80.0)
+            };
+            ui.add_sized(
+                [ui.available_width(), height],
+                egui::TextEdit::multiline(&mut ed.text)
+                    .font(egui::TextStyle::Monospace)
+                    .lock_focus(true),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Apply").clicked() {
+                    result = Some(Some(ed.text.clone()));
+                }
+                if ui.button("Set NULL").clicked() {
+                    result = Some(None);
+                }
+                ui.weak(format!("{} characters", ed.text.chars().count()));
+            });
+        });
+    if let Some(value) = result {
+        let (view_row, col) = (ed.view_row, ed.col);
+        state.value_editor = None;
+        state.set_value(rows, view_row, col, value);
+    } else if !open {
+        state.value_editor = None;
+    }
 }
 
 fn viewer(
@@ -1467,5 +1600,29 @@ mod tests {
         assert_eq!(changes.updates[&0][&1], Some("y".into()));
         assert_eq!(changes.inserts, vec![vec![Some("6".into()), None]]);
         assert_eq!(state.cursor, Some((1, 1)));
+    }
+
+    #[test]
+    fn long_values_open_the_dialog() {
+        let columns = cols();
+        let rows = vec![vec![Some("1".into()), Some("line 1\nline 2".into())]];
+        let mut state = GridState::default();
+        state.set_editable(None);
+        state.sync(&rows, &columns);
+        state.start_edit(&rows, (0, 1), None);
+        assert!(state.edit.as_ref().unwrap().active.is_none());
+        let ed = state.value_editor.as_mut().unwrap();
+        assert_eq!(ed.text, "line 1\nline 2");
+        ed.text.push_str("\nline 3");
+        let text = ed.text.clone();
+        state.value_editor = None;
+        state.set_value(&rows, 0, 1, Some(text));
+        assert_eq!(
+            state.changes().unwrap().updates[&0][&1].as_deref(),
+            Some("line 1\nline 2\nline 3")
+        );
+        // Short values still edit inline.
+        state.start_edit(&rows, (0, 0), None);
+        assert!(state.edit.as_ref().unwrap().active.is_some());
     }
 }

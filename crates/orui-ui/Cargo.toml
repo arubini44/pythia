@@ -6,7 +6,8 @@ license.workspace = true
 
 [dependencies]
 egui.workspace = true
-egui_extras = { workspace = true, features = ["svg"] }
+egui_extras = { workspace = true, features = ["svg", "datepicker", "serde"] }
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 orui-data.workspace = true
 orui-db.workspace = true
 orui-plsql.workspace = true
