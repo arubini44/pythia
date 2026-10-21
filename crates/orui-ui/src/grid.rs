@@ -370,6 +370,41 @@ impl GridState {
         }
     }
 
+    /// Pastes tab separated text (e.g. an Excel range) at the cursor, adding
+    /// new rows past the end. Empty cells become NULL.
+    pub fn paste(&mut self, rows: &[Vec<Cell>], columns: usize, text: &str) {
+        let Some(locked) = self.edit.as_ref().map(|e| e.locked) else {
+            return;
+        };
+        self.sync(rows, &[]);
+        let targets: Vec<usize> = self
+            .visible_columns(columns)
+            .into_iter()
+            .filter(|&c| Some(c) != locked)
+            .collect();
+        let (r0, c0) = self.cursor.unwrap_or((0, targets.first().copied().unwrap_or(0)));
+        let targets: Vec<usize> = targets.into_iter().filter(|&c| c >= c0).collect();
+        let text = text.strip_suffix('\n').unwrap_or(text);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let mut last = None;
+        for (i, line) in text.split('\n').enumerate() {
+            let view_row = r0 + i;
+            while view_row >= self.view_len(rows) {
+                self.insert_row(columns);
+            }
+            for (cell, &col) in line.trim_end_matches('\r').split('\t').zip(&targets) {
+                let value = (!cell.is_empty()).then(|| cell.to_owned());
+                self.set_value(rows, view_row, col, value);
+                last = Some((view_row, col));
+            }
+        }
+        if let Some(last) = last {
+            self.anchor = Some((r0, targets.first().copied().unwrap_or(c0)));
+            self.cursor = Some(last);
+            self.scroll_to_cursor = true;
+        }
+    }
+
     fn start_edit(&mut self, rows: &[Vec<Cell>], cell: (usize, usize), initial: Option<String>) {
         let value = self.value(rows, cell.0, cell.1).map(str::to_owned);
         if let Some(edit) = &mut self.edit
@@ -482,6 +517,7 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
     let mut select_all = false;
     let mut start_edit = None;
     let mut set_null = false;
+    let mut paste = None;
     let editable = state.is_editable();
     ui.input(|i| {
         extend = i.modifiers.shift;
@@ -509,6 +545,7 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
                 },
                 egui::Event::Text(t) if editable && !ctrl => start_edit = Some(Some(t.clone())),
                 egui::Event::Copy => copy = Some(i.modifiers.shift),
+                egui::Event::Paste(text) if editable => paste = Some(text.clone()),
                 _ => {}
             }
         }
@@ -528,6 +565,9 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
     }
     if set_null {
         state.set_null(rows);
+    }
+    if let Some(text) = paste {
+        state.paste(rows, columns.len(), &text);
     }
     if let Some(with_header) = copy {
         ui.ctx()
@@ -1387,5 +1427,21 @@ mod tests {
         assert_eq!(c[0].name, "B");
         assert_eq!(d, vec![vec![Some("x".to_owned())]]);
         assert_eq!(state.visible_columns(2), vec![1]);
+    }
+
+    #[test]
+    fn pastes_ranges_and_adds_rows() {
+        let columns = cols();
+        let rows = vec![vec![Some("1".into()), Some("x".into())]];
+        let mut state = GridState::default();
+        state.set_editable(None);
+        state.sync(&rows, &columns);
+        state.cursor = Some((0, 0));
+        state.paste(&rows, 2, "5\ty\r\n6\t\r\n");
+        let changes = state.changes().unwrap();
+        assert_eq!(changes.updates[&0][&0], Some("5".into()));
+        assert_eq!(changes.updates[&0][&1], Some("y".into()));
+        assert_eq!(changes.inserts, vec![vec![Some("6".into()), None]]);
+        assert_eq!(state.cursor, Some((1, 1)));
     }
 }
