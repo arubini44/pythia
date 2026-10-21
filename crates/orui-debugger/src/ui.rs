@@ -408,10 +408,15 @@ impl DebugSession {
                     }
                     if !self.log.is_empty() {
                         ui.add_space(6.0);
-                        for line in self.log.iter().rev().take(5) {
-                            ui.add(egui::Label::new(RichText::new(line).small().weak()).truncate())
+                        // Not justified: that would stretch the words.
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                            for line in self.log.iter().rev().take(5) {
+                                ui.add(
+                                    egui::Label::new(RichText::new(line).small().weak()).truncate(),
+                                )
                                 .on_hover_text(line);
-                        }
+                            }
+                        });
                     }
                 });
 
