@@ -48,6 +48,7 @@ commands! {
     ToggleAutocommit => "Session: Toggle Auto-Commit",
     History => "Edit: Recall Statement (history)",
     Format => "Edit: Format Code",
+    RenameSymbol => "Edit: Rename Symbol",
     FoldAll => "Edit: Fold All",
     UnfoldAll => "Edit: Unfold All",
     FindObject => "Tools: Find Database Object…",
@@ -137,6 +138,7 @@ impl Keymap {
                 (Command::Rollback, KeyboardShortcut::new(shift, Key::F10)),
                 (Command::History, KeyboardShortcut::new(ctrl, Key::E)),
                 (Command::Format, KeyboardShortcut::new(ctrl | shift, Key::F)),
+                (Command::RenameSymbol, KeyboardShortcut::new(shift, Key::F6)),
                 (
                     Command::FindObject,
                     KeyboardShortcut::new(ctrl | shift, Key::O),

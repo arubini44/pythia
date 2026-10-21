@@ -916,6 +916,23 @@ impl OruiApp {
                 }
             }
             Command::History => self.history_dialog.toggle(),
+            Command::RenameSymbol => {
+                let editor = match self
+                    .focused
+                    .and_then(|id| self.docs.get_mut(&id))
+                    .map(|d| &mut d.kind)
+                {
+                    Some(DocKind::Sql(w)) => Some(&mut w.editor),
+                    Some(DocKind::Program(w)) => w.active_editor(),
+                    _ => None,
+                };
+                if let Some(editor) = editor {
+                    let message = rename_symbol(editor);
+                    if let Some(message) = message {
+                        self.log(message);
+                    }
+                }
+            }
             Command::FoldAll | Command::UnfoldAll => {
                 let editor = match self
                     .focused
@@ -1365,6 +1382,7 @@ impl OruiApp {
             });
             ui.menu_button("Edit", |ui| {
                 item(ui, Command::Format);
+                item(ui, Command::RenameSymbol);
                 item(ui, Command::History);
                 ui.separator();
                 item(ui, Command::FoldAll);
@@ -2311,6 +2329,24 @@ impl TabViewer for Viewer<'_> {
     }
 }
 
+/// Selects every occurrence of the local symbol at the caret, so typing
+/// renames them all at once. Returns a message for the log.
+fn rename_symbol(editor: &mut crate::editor::Editor) -> Option<String> {
+    let cursor = editor.cursor();
+    let refs = orui_lsp_core::references(editor.text(), cursor);
+    if refs.is_empty() {
+        return Some(
+            "Rename works for local variables, parameters, cursors, aliases and CTEs".into(),
+        );
+    }
+    let name = editor.text()[refs[0].clone()].to_owned();
+    editor.inner().select_ranges(&refs, cursor);
+    Some(format!(
+        "Renaming {} occurrences of {name}: type the new name, Esc when done",
+        refs.len()
+    ))
+}
+
 /// Formats the selection (or the whole text) as one undo step.
 fn format_editor(
     editor: &mut crate::editor::Editor,
@@ -2426,6 +2462,35 @@ mod format_tests {
         assert_eq!(
             format_editor(&mut editor, &orui_plsql::FormatOptions::default()),
             "Already formatted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::rename_symbol;
+    use crate::editor::Editor;
+
+    #[test]
+    fn renames_every_occurrence() {
+        let src = "declare\n  l_total number := 0;\nbegin\n  l_total := l_total + 1;\n  dbms_output.put_line(l_total);\nend;";
+        let mut e = Editor::new(src);
+        e.select(src.find("l_total :=").unwrap()..src.find("l_total :=").unwrap());
+        let message = rename_symbol(&mut e).unwrap();
+        assert!(
+            message.starts_with("Renaming 4 occurrences of l_total"),
+            "{message}"
+        );
+        e.inner().insert_at_cursor("l_sum");
+        let text = e.inner().text();
+        assert_eq!(text.matches("l_sum").count(), 4, "{text}");
+        assert!(!text.contains("l_total"));
+
+        let mut e = Editor::new("select 1 from dual");
+        assert!(
+            rename_symbol(&mut e)
+                .unwrap()
+                .starts_with("Rename works for")
         );
     }
 }

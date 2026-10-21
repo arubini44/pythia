@@ -19,6 +19,9 @@ for Linux, Windows and macOS.
   locals and parameters, schema objects and public synonyms.
 - Signature help, hover, Ctrl+click / F12 go to definition (also into the
   database), references, live syntax diagnostics and an outline.
+- Rename a local variable, parameter, alias or CTE in place (Shift+F6).
+- Code folding, numbered bookmarks (Ctrl+Shift+1..9 / Ctrl+1..9) and
+  snippets with placeholders (type a trigger, press Tab).
 
 ![Completion with live dictionary data](docs/screenshots/completion.png)
 
@@ -195,4 +198,7 @@ See [CONCEPT.md](CONCEPT.md) for the full plan and status.
 | Ctrl+B | Toggle breakpoint |
 | F9 / F6 / F7 / Shift+F7 / Shift+F9 | Continue / step over / into / out / stop |
 | Ctrl+O / Ctrl+S | Open / save file |
+| Shift+F6 | Rename symbol |
+| Ctrl+Shift+[ / ] | Fold / unfold |
+| Ctrl+Shift+1..9, Ctrl+1..9 | Set / jump to bookmark |
 | Ctrl+, | Settings |

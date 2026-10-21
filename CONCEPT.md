@@ -351,7 +351,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.21 Refactoring & Productivity (M8)
 
-- [ ] Rename local variable / parameter
+- [x] Rename local variable / parameter (live multi-cursor rename, Shift+F6)
 - [ ] Extract procedure from selection
 - [x] Generate: column list, `INSERT`/`UPDATE` template for table, record type, `%ROWTYPE` declarations (column list and SELECT/INSERT/UPDATE from the object browser; no record type or `%ROWTYPE` declarations)
 - [x] Generate package body stubs from spec

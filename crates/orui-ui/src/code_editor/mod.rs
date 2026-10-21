@@ -296,6 +296,29 @@ impl CodeEditor {
         self.scroll_to_cursor = true;
     }
 
+    /// Selects several byte ranges at once (multi-cursor), e.g. every
+    /// occurrence of a symbol to rename it by typing. The range containing
+    /// `primary` (a byte offset) becomes the primary selection.
+    pub fn select_ranges(&mut self, ranges: &[Range<usize>], primary: usize) {
+        let rope = &self.state.rope;
+        let len = rope.len_bytes();
+        let sels: Vec<Selection> = ranges
+            .iter()
+            .map(|r| {
+                Selection::new(
+                    rope.byte_to_char(r.start.min(len)),
+                    rope.byte_to_char(r.end.min(len)),
+                )
+            })
+            .collect();
+        let index = ranges
+            .iter()
+            .position(|r| r.start <= primary && primary <= r.end)
+            .unwrap_or(0);
+        self.state.set_selections(sels, index);
+        self.scroll_to_cursor = true;
+    }
+
     /// Moves the caret to the start of a 1-based line and scrolls to it.
     pub fn goto_line(&mut self, line: usize) {
         let pos = text::pos_of(&self.state.rope, line.saturating_sub(1), 0);
