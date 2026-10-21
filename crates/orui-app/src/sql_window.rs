@@ -59,6 +59,12 @@ pub struct RunState {
     pub results: Vec<QueryResult>,
     /// Foreign key lookups in flight: task id → result id.
     pub relation_requests: BTreeMap<u64, u64>,
+    /// "Execute to file": the file dialog (with the query), then the run.
+    pub to_file_pick: Option<(
+        std::sync::mpsc::Receiver<Option<std::path::PathBuf>>,
+        String,
+    )>,
+    pub to_file: Option<crate::to_file::ToFile>,
     pub plan: Option<Plan>,
     /// "Run with statistics": request id and report.
     pub statistics: Option<(u64, Option<Result<crate::statistics::Report, String>>)>,
@@ -222,6 +228,7 @@ impl SqlWindow {
 
     pub fn is_running(&self) -> bool {
         self.state.running.is_some()
+            || self.state.to_file.is_some()
             || self.state.fetching.is_some()
             || self.state.prompt.is_some()
             || self
@@ -376,6 +383,75 @@ impl SqlWindow {
             Ok(Box::new(report) as Box<dyn std::any::Any + Send>)
         });
         effects.request(Target::Own, DbRequest::Task { id, task });
+        effects
+    }
+
+    /// Runs the current query writing all rows to a file chosen by the user.
+    pub fn execute_to_file(&mut self) {
+        if self.is_running() || self.state.to_file_pick.is_some() {
+            return;
+        }
+        let Some(stmt) = self.statements(true).into_iter().next() else {
+            return;
+        };
+        let first = orui_plsql::tokenize(&stmt.sql)
+            .into_iter()
+            .find(|t| !t.kind.is_trivia())
+            .map(|t| stmt.sql[t.span].to_ascii_uppercase());
+        if !matches!(first.as_deref(), Some("SELECT" | "WITH")) {
+            self.warn("Execute to file works for queries");
+            self.state.bottom = BottomTab::Messages;
+            return;
+        }
+        if !find_binds(&stmt.sql).is_empty() {
+            self.warn("Execute to file doesn't support bind variables yet; use literals");
+            self.state.bottom = BottomTab::Messages;
+            return;
+        }
+        let sql = if self.substitution {
+            substitute(&stmt.sql, &self.defines)
+        } else {
+            stmt.sql
+        };
+        self.state.to_file_pick = Some((crate::to_file::pick_file(), sql));
+    }
+
+    /// Starts writing once the file was chosen; shows progress.
+    fn poll_to_file(&mut self, ui: &mut Ui) -> Effects {
+        let mut effects = Effects::default();
+        if let Some((rx, sql)) = &self.state.to_file_pick {
+            match rx.try_recv() {
+                Ok(Some(path)) => {
+                    let sql = sql.clone();
+                    self.state.to_file_pick = None;
+                    let id = request_id();
+                    let rows = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let (task_sql, task_path, progress) = (sql.clone(), path.clone(), rows.clone());
+                    let task: orui_db::TaskFn =
+                        Box::new(move |conn: &orui_db::oracle::Connection| {
+                            let n = crate::to_file::run(conn, &task_sql, &task_path, &progress)?;
+                            Ok(Box::new(n) as Box<dyn std::any::Any + Send>)
+                        });
+                    self.state.to_file = Some(crate::to_file::ToFile {
+                        id,
+                        path,
+                        sql,
+                        rows,
+                        started: std::time::Instant::now(),
+                    });
+                    effects.request(Target::Own, DbRequest::Task { id, task });
+                }
+                Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.state.to_file_pick = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ui.ctx().request_repaint_after(Duration::from_millis(100));
+                }
+            }
+        }
+        if self.state.to_file.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
         effects
     }
 
@@ -870,6 +946,31 @@ impl SqlWindow {
                     effects.request(Target::Main, DbRequest::Task { id: task_id, task });
                 }
             }
+            DbEvent::TaskDone { id, result }
+                if self.state.to_file.as_ref().is_some_and(|t| t.id == id) =>
+            {
+                let Some(job) = self.state.to_file.take() else {
+                    return effects;
+                };
+                match result.map(|any| any.downcast::<u64>().map(|n| *n).unwrap_or(0)) {
+                    Ok(rows) => {
+                        effects.executed.push(job.sql);
+                        self.info(format!(
+                            "{rows} rows written to {} in {}",
+                            job.path.display(),
+                            fmt_duration(job.started.elapsed())
+                        ));
+                    }
+                    Err(e) => {
+                        self.state.messages.push(Message {
+                            level: Level::Error,
+                            text: format!("Execute to file failed: {e}"),
+                            jump: None,
+                        });
+                    }
+                }
+                self.state.bottom = BottomTab::Messages;
+            }
             DbEvent::TaskDone { id, result } if self.state.relation_requests.contains_key(&id) => {
                 let result_id = self.state.relation_requests.remove(&id).unwrap_or_default();
                 let relations = result
@@ -1093,7 +1194,7 @@ impl SqlWindow {
     }
 
     fn bottom_ui(&mut self, ui: &mut Ui, cx: &DocContext) -> Effects {
-        let mut effects = Effects::default();
+        let mut effects = self.poll_to_file(ui);
         let mut edit_action = None;
         let state = &mut self.state;
         ui.horizontal(|ui| {
@@ -1118,7 +1219,23 @@ impl SqlWindow {
                 format!("Output ({})", state.output.len())
             };
             ui.selectable_value(&mut state.bottom, BottomTab::Output, output);
-            if state.running.is_some() || state.fetching.is_some() {
+            if let Some(job) = &state.to_file {
+                ui.spinner();
+                let rows = job.rows.load(std::sync::atomic::Ordering::Relaxed);
+                let name = job
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                ui.label(format!("Writing {rows} rows to {name}…"))
+                    .on_hover_text(job.path.display().to_string());
+                if icon_text_button(ui, Icon::Stop, "Break")
+                    .on_hover_text("Shift+Esc; the incomplete file is removed")
+                    .clicked()
+                {
+                    effects.cancel = true;
+                }
+            } else if state.running.is_some() || state.fetching.is_some() {
                 ui.spinner();
                 if state.total > 1 {
                     ui.add(

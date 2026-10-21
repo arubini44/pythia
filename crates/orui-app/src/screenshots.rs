@@ -861,3 +861,72 @@ end;
     });
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }
+
+/// "Execute to file" streams a query into a file and can be cancelled.
+#[test]
+fn execute_to_file() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "orui@FREEPDB1".into(),
+        text: String::new(),
+        run: false,
+    });
+    h.run_steps(2);
+    let dir = std::env::temp_dir().join(format!("orui-to-file-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let start_export = |h: &mut Harness<'_, OruiApp>, sql: &str, path: &std::path::Path| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Some(path.to_owned())).unwrap();
+        h.state_mut().test_sql_window().state.to_file_pick = Some((rx, sql.to_owned()));
+        h.run_steps(2);
+    };
+
+    let path = dir.join("rows.json");
+    start_export(
+        &mut h,
+        "select level as id, 'item ' || level as name from dual connect by level <= 5000",
+        &path,
+    );
+    wait_until(&mut h, "export", |app| !app.test_focused_busy());
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(json.as_array().unwrap().len(), 5000);
+    assert_eq!(json[4999]["ID"], 5000);
+    let w = h.state_mut().test_sql_window();
+    assert!(
+        w.state
+            .messages
+            .last()
+            .unwrap()
+            .text
+            .starts_with("5000 rows written to"),
+        "{:?}",
+        w.state.messages.last().map(|m| &m.text)
+    );
+
+    // Cancel a long export: the incomplete file is removed.
+    let path = dir.join("huge.csv");
+    start_export(
+        &mut h,
+        "select a.n, b.n as m from (select level n from dual connect by level <= 100000) a,
+                (select level n from dual connect by level <= 100000) b",
+        &path,
+    );
+    wait_until(&mut h, "rows", |app| {
+        app.test_sql_window_ref()
+            .and_then(|w| w.state.to_file.as_ref())
+            .is_some_and(|t| t.rows.load(std::sync::atomic::Ordering::Relaxed) > 0)
+    });
+    save(&mut h, "execute-to-file");
+    h.state_mut().test_command(crate::commands::Command::Cancel);
+    wait_until(&mut h, "cancel", |app| !app.test_focused_busy());
+    let w = h.state_mut().test_sql_window();
+    let last = &w.state.messages.last().unwrap().text;
+    assert!(last.contains("ORA-01013"), "{last}");
+    assert!(!path.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}

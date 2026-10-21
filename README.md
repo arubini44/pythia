@@ -37,6 +37,8 @@ for Linux, Windows and macOS.
 - **Edit results in place** — no `FOR UPDATE` locks: changes are checked
   against the fetched values when applied, so concurrent modifications are
   reported instead of overwritten. "Show SQL" previews the DML.
+- **Execute to file** streams a query of any size into CSV, TSV, JSON,
+  INSERT statements or Markdown, with live row count and cancel.
 - Explain plan (F5), DBMS_OUTPUT, statement history (Ctrl+E).
 
 ![Editing a result](docs/screenshots/grid-editing.png)

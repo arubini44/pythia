@@ -1,0 +1,135 @@
+//! "Execute to file": streams a query's rows straight into a file, for
+//! results too large for the grid.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use orui_data::{Format, Options, StreamWriter};
+use orui_db::DbError;
+use orui_db::oracle::Connection;
+
+/// Rows fetched per round trip and written per batch.
+const BATCH: usize = 1000;
+
+/// A running export, polled by the window for progress.
+pub struct ToFile {
+    pub id: u64,
+    pub path: PathBuf,
+    pub sql: String,
+    pub rows: Arc<AtomicU64>,
+    pub started: Instant,
+}
+
+/// The format for a file name; CSV when the extension isn't a streaming one.
+pub fn format_for(path: &Path) -> Format {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    Format::STREAMING
+        .iter()
+        .copied()
+        .find(|f| f.extension() == ext)
+        .unwrap_or(Format::Csv)
+}
+
+/// Runs `sql` and writes every row to `path`; removes the file on failure
+/// (including cancellation). Returns the number of rows written.
+pub fn run(
+    conn: &Connection,
+    sql: &str,
+    path: &Path,
+    progress: &AtomicU64,
+) -> Result<u64, DbError> {
+    let format = format_for(path);
+    let file = std::fs::File::create(path)
+        .map_err(|e| DbError::new(format!("{}: {e}", path.display())))?;
+    let out = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut out = Some(out);
+    let mut writer: Option<StreamWriter<std::io::BufWriter<std::fs::File>>> = None;
+    let io = |e: orui_data::Error| DbError::new(format!("{}: {e}", path.display()));
+    let result = orui_db::stream_query(conn, sql, BATCH, |columns, rows| {
+        if writer.is_none()
+            && let Some(out) = out.take()
+        {
+            let options = Options {
+                table: "my_table".into(),
+                ..Options::default()
+            };
+            writer = Some(StreamWriter::new(format, columns.to_vec(), options, out).map_err(io)?);
+        }
+        if let Some(w) = writer.as_mut() {
+            w.write(rows).map_err(io)?;
+            progress.store(w.rows(), Ordering::Relaxed);
+        }
+        Ok(())
+    })
+    .and_then(|count| {
+        if let Some(w) = writer.take() {
+            w.finish().map_err(io)?;
+        }
+        Ok(count)
+    });
+    if result.is_err() {
+        drop(writer);
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+/// Asks for the target file on a background thread (the dialog blocks).
+pub fn pick_file() -> std::sync::mpsc::Receiver<Option<PathBuf>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut dialog = rfd::FileDialog::new().set_file_name("result.csv");
+        for format in Format::STREAMING {
+            dialog = dialog.add_filter(format.label(), &[format.extension()]);
+        }
+        let _ = tx.send(dialog.save_file());
+    });
+    rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_format_from_extension() {
+        assert_eq!(format_for(Path::new("a.json")), Format::Json);
+        assert_eq!(format_for(Path::new("a.SQL")), Format::Insert);
+        assert_eq!(format_for(Path::new("a.txt")), Format::Csv);
+    }
+
+    #[test]
+    fn writes_query_to_file() {
+        let Ok(spec) = std::env::var("ORUI_TEST_DB") else {
+            return;
+        };
+        let (cred, db) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        let conn = Connection::connect(user, pw, db).unwrap();
+        let path = std::env::temp_dir().join(format!("orui-to-file-{}.csv", std::process::id()));
+        let progress = AtomicU64::new(0);
+        let n = run(
+            &conn,
+            "select level as n, 'row ' || level as label from dual connect by level <= 2500",
+            &path,
+            &progress,
+        )
+        .unwrap();
+        assert_eq!(n, 2500);
+        assert_eq!(progress.load(Ordering::Relaxed), 2500);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2501);
+        assert!(text.starts_with("N,LABEL\n1,row 1\n"));
+        std::fs::remove_file(&path).unwrap();
+
+        // A failing query leaves no file behind.
+        assert!(run(&conn, "select * from no_such_table_xyz", &path, &progress).is_err());
+        assert!(!path.exists());
+    }
+}

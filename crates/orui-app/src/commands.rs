@@ -41,6 +41,7 @@ commands! {
     ExecuteCurrent => "Session: Execute Current Statement",
     ExplainPlan => "Session: Explain Plan",
     ExecuteWithStatistics => "Session: Run with Statistics (actual plan)",
+    ExecuteToFile => "Session: Execute Query to File…",
     Cancel => "Session: Break (cancel execution)",
     Commit => "Session: Commit",
     Rollback => "Session: Rollback",

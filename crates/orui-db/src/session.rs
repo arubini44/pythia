@@ -379,6 +379,42 @@ fn connect(params: &ConnectParams) -> oracle::Result<Connection> {
     connector.connect()
 }
 
+/// Runs a query and hands its rows to `sink` in batches, without keeping
+/// them (e.g. to stream a large result into a file). The first call has no
+/// rows, so the columns are known even for an empty result. Returns the row
+/// count.
+pub fn stream_query(
+    conn: &Connection,
+    sql: &str,
+    batch: usize,
+    mut sink: impl FnMut(&[Column], &[Vec<Cell>]) -> Result<(), DbError>,
+) -> Result<u64, DbError> {
+    let mut stmt = conn.statement(sql).fetch_array_size(batch as u32).build()?;
+    let rows = stmt.query(&[])?;
+    let columns: Vec<Column> = rows
+        .column_info()
+        .iter()
+        .map(|c| column(c.name(), c.oracle_type()))
+        .collect();
+    sink(&columns, &[])?;
+    let mut buffer = Vec::with_capacity(batch);
+    let mut count = 0u64;
+    for row in rows {
+        let row = row?;
+        buffer.push(row.sql_values().iter().map(cell).collect());
+        if buffer.len() == batch {
+            count += buffer.len() as u64;
+            sink(&columns, &buffer)?;
+            buffer.clear();
+        }
+    }
+    count += buffer.len() as u64;
+    if !buffer.is_empty() {
+        sink(&columns, &buffer)?;
+    }
+    Ok(count)
+}
+
 fn column(name: &str, ty: &OracleType) -> Column {
     let numeric = matches!(
         ty,

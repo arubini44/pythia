@@ -34,6 +34,7 @@ mod stubs;
 mod table_editor;
 mod test_script;
 mod theme;
+mod to_file;
 
 use std::fs::{self, File};
 use std::sync::Mutex;

@@ -182,7 +182,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Warn on closing with an open transaction
 - [x] Query history per connection (searchable, persisted)
 - [x] Fetch modes: first N rows, fetch next page, fetch all
-- [ ] "Execute to file" for huge results
+- [x] "Execute to file" for huge results
 - [x] Error highlighting: jump to the error position in the statement
 - [x] Explain plan for current statement (F5)
 

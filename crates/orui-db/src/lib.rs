@@ -14,7 +14,7 @@ pub use meta::{
     CompileError, DbObject, Detail, Member, MetaQuery, MetaResult, ObjectType, TableColumn,
     like_pattern,
 };
-pub use session::Session;
+pub use session::{Session, stream_query};
 pub use types::{
     Cell, Column, Compiled, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
     TaskFn, TaskResult,
