@@ -127,6 +127,97 @@ pub fn export_to_vec(
     Ok(out)
 }
 
+/// Writes rows batch by batch, for results too large to hold in memory.
+/// Formats that need all rows up front (Excel, HTML) can't stream.
+pub struct StreamWriter<W: Write> {
+    format: Format,
+    columns: Vec<Column>,
+    options: Options,
+    out: W,
+    rows: u64,
+}
+
+impl Format {
+    /// Formats [`StreamWriter`] supports.
+    pub const STREAMING: &[Format] = &[
+        Format::Csv,
+        Format::Tsv,
+        Format::Json,
+        Format::Insert,
+        Format::Markdown,
+    ];
+}
+
+impl<W: Write> StreamWriter<W> {
+    pub fn new(format: Format, columns: Vec<Column>, options: Options, mut out: W) -> Result<Self> {
+        assert!(Format::STREAMING.contains(&format), "{format:?} can't stream");
+        match format {
+            Format::Csv | Format::Tsv if options.header => {
+                let delimiter = if format == Format::Csv { b',' } else { b'\t' };
+                let mut writer = csv::WriterBuilder::new()
+                    .delimiter(delimiter)
+                    .from_writer(&mut out);
+                writer.write_record(columns.iter().map(|c| c.name.as_str()))?;
+                writer.flush()?;
+            }
+            Format::Json => write!(out, "[")?,
+            Format::Markdown => markdown_header(&columns, &mut out)?,
+            _ => {}
+        }
+        Ok(Self {
+            format,
+            columns,
+            options,
+            out,
+            rows: 0,
+        })
+    }
+
+    pub fn write(&mut self, rows: &[Vec<Cell>]) -> Result<()> {
+        let options = Options {
+            header: false,
+            ..self.options.clone()
+        };
+        match self.format {
+            Format::Csv => delimited(b',', &self.columns, rows, &options, &mut self.out)?,
+            Format::Tsv => delimited(b'\t', &self.columns, rows, &options, &mut self.out)?,
+            Format::Insert => inserts(&self.columns, rows, &options, &mut self.out)?,
+            Format::Markdown => markdown_rows(rows, &mut self.out)?,
+            Format::Json => {
+                for (i, row) in rows.iter().enumerate() {
+                    let sep = if self.rows == 0 && i == 0 { "\n" } else { ",\n" };
+                    let object = serde_json::to_string_pretty(&json_object(&self.columns, row))?;
+                    write!(self.out, "{sep}{}", indent(&object))?;
+                }
+            }
+            Format::Xlsx | Format::Html => unreachable!(),
+        }
+        self.rows += rows.len() as u64;
+        Ok(())
+    }
+
+    pub fn rows(&self) -> u64 {
+        self.rows
+    }
+
+    pub fn finish(mut self) -> Result<W> {
+        if self.format == Format::Json {
+            let close = if self.rows == 0 { "]\n" } else { "\n]\n" };
+            write!(self.out, "{close}")?;
+        }
+        self.out.flush()?;
+        Ok(self.out)
+    }
+}
+
+/// Indents a pretty-printed JSON object by two spaces (array element).
+fn indent(text: &str) -> String {
+    text.lines()
+        .map(|l| format!("  {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn delimited(
     delimiter: u8,
     columns: &[Column],
@@ -148,29 +239,26 @@ fn delimited(
 }
 
 fn json(columns: &[Column], rows: &[Vec<Cell>], out: &mut dyn Write) -> Result<()> {
-    let array: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|row| {
-            let object = columns
-                .iter()
-                .zip(row)
-                .map(|(col, cell)| {
-                    let value = match cell {
-                        None => serde_json::Value::Null,
-                        Some(v) if col.numeric => {
-                            number(v).map_or_else(|| v.clone().into(), Into::into)
-                        }
-                        Some(v) => v.clone().into(),
-                    };
-                    (col.name.clone(), value)
-                })
-                .collect();
-            serde_json::Value::Object(object)
-        })
-        .collect();
+    let array: Vec<serde_json::Value> = rows.iter().map(|row| json_object(columns, row)).collect();
     serde_json::to_writer_pretty(&mut *out, &array)?;
     writeln!(out)?;
     Ok(())
+}
+
+fn json_object(columns: &[Column], row: &[Cell]) -> serde_json::Value {
+    let object = columns
+        .iter()
+        .zip(row)
+        .map(|(col, cell)| {
+            let value = match cell {
+                None => serde_json::Value::Null,
+                Some(v) if col.numeric => number(v).map_or_else(|| v.clone().into(), Into::into),
+                Some(v) => v.clone().into(),
+            };
+            (col.name.clone(), value)
+        })
+        .collect();
+    serde_json::Value::Object(object)
 }
 
 /// Parses a number for typed output, keeping integers exact.
@@ -335,18 +423,30 @@ fn identifier(name: &str) -> String {
 }
 
 fn markdown(columns: &[Column], rows: &[Vec<Cell>], out: &mut dyn Write) -> Result<()> {
-    let escape = |s: &str| s.replace('|', "\\|").replace('\n', " ");
-    let header: Vec<String> = columns.iter().map(|c| escape(&c.name)).collect();
+    markdown_header(columns, out)?;
+    markdown_rows(rows, out)
+}
+
+fn markdown_escape(s: &str) -> String {
+    s.replace('|', "\\|").replace('\n', " ")
+}
+
+fn markdown_header(columns: &[Column], out: &mut dyn Write) -> Result<()> {
+    let header: Vec<String> = columns.iter().map(|c| markdown_escape(&c.name)).collect();
     writeln!(out, "| {} |", header.join(" | "))?;
     let rule: Vec<&str> = columns
         .iter()
         .map(|c| if c.numeric { "---:" } else { "---" })
         .collect();
     writeln!(out, "| {} |", rule.join(" | "))?;
+    Ok(())
+}
+
+fn markdown_rows(rows: &[Vec<Cell>], out: &mut dyn Write) -> Result<()> {
     for row in rows {
         let cells: Vec<String> = row
             .iter()
-            .map(|c| escape(c.as_deref().unwrap_or("")))
+            .map(|c| markdown_escape(c.as_deref().unwrap_or("")))
             .collect();
         writeln!(out, "| {} |", cells.join(" | "))?;
     }
@@ -476,5 +576,50 @@ mod tests {
         let (c, r) = sample();
         let bytes = export_to_vec(Format::Xlsx, &c, &r, &Options::default()).unwrap();
         assert_eq!(&bytes[..2], b"PK");
+    }
+
+    #[test]
+    fn streams_like_export() {
+        let columns = vec![
+            Column {
+                name: "ID".into(),
+                type_name: "NUMBER".into(),
+                numeric: true,
+            },
+            Column {
+                name: "NAME".into(),
+                type_name: "VARCHAR2".into(),
+                numeric: false,
+            },
+        ];
+        let rows: Vec<Vec<Cell>> = (0..5)
+            .map(|i| vec![Some(i.to_string()), Some(format!("n|{i},\"x\""))])
+            .collect();
+        for &format in Format::STREAMING {
+            let options = Options::default();
+            let whole = export_to_vec(format, &columns, &rows, &options).unwrap();
+            let mut stream =
+                StreamWriter::new(format, columns.clone(), options, Vec::new()).unwrap();
+            stream.write(&rows[..2]).unwrap();
+            stream.write(&rows[2..]).unwrap();
+            assert_eq!(stream.rows(), 5);
+            let streamed = stream.finish().unwrap();
+            if format == Format::Json {
+                let a: serde_json::Value = serde_json::from_slice(&whole).unwrap();
+                let b: serde_json::Value = serde_json::from_slice(&streamed).unwrap();
+                assert_eq!(a, b);
+            } else {
+                assert_eq!(
+                    String::from_utf8(whole).unwrap(),
+                    String::from_utf8(streamed).unwrap(),
+                    "{format:?}"
+                );
+            }
+        }
+        let empty = StreamWriter::new(Format::Json, columns, Options::default(), Vec::new())
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&empty).unwrap(), serde_json::json!([]));
     }
 }
