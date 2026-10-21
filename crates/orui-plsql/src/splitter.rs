@@ -101,6 +101,16 @@ pub fn split_statements(src: &str) -> Vec<Statement> {
     Splitter::new(src).run()
 }
 
+/// Like [`split_statements`], reusing tokens from [`tokenize`].
+pub(crate) fn split_with_tokens(src: &str, tokens: Vec<Token>) -> Vec<Statement> {
+    Splitter {
+        src,
+        tokens,
+        out: Vec::new(),
+    }
+    .run()
+}
+
 /// Returns the statement the cursor at byte `offset` belongs to.
 ///
 /// A cursor in the gap between two statements belongs to the preceding one,

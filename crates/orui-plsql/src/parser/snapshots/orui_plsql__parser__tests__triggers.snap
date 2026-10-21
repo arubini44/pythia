@@ -1,0 +1,15 @@
+---
+source: crates/orui-plsql/src/parser/tests.rs
+expression: dump(TRIGGERS)
+---
+S0 Root
+  S1 Trigger EMPLOYEES_BIU owner=HR on=HR.EMPLOYEES
+    Variable L_NOW: date None
+  S2 Trigger EMP_COMPOUND on=EMPLOYEES
+    Type T_IDS of employees.employee_id%type
+    Variable G_IDS: t_ids None
+    S3 Block
+    S4 Block
+    S5 Block
+      S6 Loop
+        LoopIndex I: PLS_INTEGER None
