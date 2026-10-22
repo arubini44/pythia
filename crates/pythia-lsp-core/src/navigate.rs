@@ -401,7 +401,8 @@ fn declaration_text(sema: &Sema, s: &Symbol) -> String {
     out.trim_end().trim_end_matches(';').trim_end().to_owned()
 }
 
-fn describe(sema: &Sema, resolved: &Resolved) -> (String, String) {
+/// Title and text for hover (and completion documentation).
+pub(crate) fn describe(sema: &Sema, resolved: &Resolved) -> (String, String) {
     match resolved {
         Resolved::Local(r) => {
             let s = sema.symbol(*r);

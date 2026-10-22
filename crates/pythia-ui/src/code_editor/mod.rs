@@ -50,6 +50,8 @@ pub struct EditorConfig {
     pub auto_complete_delay_ms: u64,
     /// How long the mouse must rest on a word before a hover request.
     pub hover_delay_ms: u64,
+    /// Rows the completion list shows at most (fewer if the window has no room).
+    pub completion_rows: usize,
 }
 
 impl Default for EditorConfig {
@@ -64,6 +66,7 @@ impl Default for EditorConfig {
             auto_complete_min_chars: 2,
             auto_complete_delay_ms: 150,
             hover_delay_ms: 400,
+            completion_rows: 15,
         }
     }
 }
@@ -722,6 +725,7 @@ impl CodeEditor {
     /// (kind [`CompletionKind::Snippet`]; accepting one expands it).
     pub fn snippet_completions(&self, prefix: &str) -> Vec<CompletionEntry> {
         let prefix = prefix.to_lowercase();
+        let unit = self.state.indent_unit();
         self.snippets
             .iter()
             .filter(|s| s.trigger.to_lowercase().starts_with(&prefix))
@@ -730,6 +734,11 @@ impl CodeEditor {
                 detail: s.description.clone(),
                 kind: CompletionKind::Snippet,
                 insert_text: s.body.clone(),
+                // What it inserts, placeholders filled in.
+                documentation: Some((
+                    s.description.clone(),
+                    snippet::expand(&s.body, "", &unit).text,
+                )),
             })
             .collect()
     }

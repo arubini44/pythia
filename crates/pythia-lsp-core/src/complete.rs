@@ -7,8 +7,9 @@ use pythia_plsql::ast::*;
 use pythia_plsql::{Token, TokenKind};
 
 use crate::builtins;
-use crate::catalog::{CatalogMember, CatalogRequest, MemberKind};
-use crate::sema::{FieldInfo, MemberTarget, Part, Sema, SymRef, is_ref_token};
+use crate::catalog::{CatalogMember, CatalogObject, CatalogRequest, MemberKind};
+use crate::navigate::describe;
+use crate::sema::{FieldInfo, MemberTarget, Part, Resolved, Sema, SymRef, is_ref_token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompletionKind {
@@ -48,6 +49,10 @@ pub struct CompletionItem {
     pub caret: Option<usize>,
     /// Items are sorted by this key; the app may re-sort but shouldn't need to.
     pub sort_key: String,
+    /// What hover shows for it, as title and text (a column's type,
+    /// nullability and comment, a subprogram's signatures and doc comment);
+    /// `None` when there's no more to say than `detail`.
+    pub documentation: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -543,6 +548,7 @@ impl Builder {
         }
     }
 
+    /// Adds an item; returns it unless it doesn't match or is a duplicate.
     fn push(
         &mut self,
         label: String,
@@ -551,12 +557,10 @@ impl Builder {
         insert: String,
         caret: Option<usize>,
         priority: u8,
-    ) {
-        let Some(rank) = match_rank(&label, &self.prefix) else {
-            return;
-        };
+    ) -> Option<&mut CompletionItem> {
+        let rank = match_rank(&label, &self.prefix)?;
         if !self.seen.insert((label.to_uppercase(), kind)) {
-            return;
+            return None;
         }
         let bucket = u8::from(rank > 0);
         let sort_key = format!("{bucket}{priority}{rank}{}", label.to_lowercase());
@@ -567,8 +571,10 @@ impl Builder {
             insert_text: insert,
             caret,
             sort_key: sort_key.clone(),
+            documentation: None,
         };
         self.items.push((sort_key, item));
+        self.items.last_mut().map(|(_, item)| item)
     }
 
     fn keyword(&mut self, kw: &str) {
@@ -589,18 +595,30 @@ impl Builder {
         }
     }
 
-    fn dictionary_name(&mut self, name: &str, kind: CompletionKind, detail: String, priority: u8) {
+    fn dictionary_name(
+        &mut self,
+        name: &str,
+        kind: CompletionKind,
+        detail: String,
+        priority: u8,
+    ) -> Option<&mut CompletionItem> {
         let text = self.name_text(name);
         let label = if needs_quotes(name) {
             text.clone()
         } else {
             self.cased(name)
         };
-        self.push(label, kind, detail, text, None, priority);
+        self.push(label, kind, detail, text, None, priority)
     }
 
     /// A name declared in the source: insert as written there.
-    fn source_name(&mut self, written: &str, kind: CompletionKind, detail: String, priority: u8) {
+    fn source_name(
+        &mut self,
+        written: &str,
+        kind: CompletionKind,
+        detail: String,
+        priority: u8,
+    ) -> Option<&mut CompletionItem> {
         self.push(
             written.to_owned(),
             kind,
@@ -608,7 +626,7 @@ impl Builder {
             written.to_owned(),
             None,
             priority,
-        );
+        )
     }
 
     fn finish(mut self, max: usize) -> Vec<CompletionItem> {
@@ -794,7 +812,7 @@ fn fill(sema: &Sema, ctx: &Ctx, at: usize, prefix: &str, b: &mut Builder) {
             if sema.ast.query(*q).scope != Ast::ROOT || sema.ast.scope_at(at) != Ast::ROOT {
                 locals(sema, at, b, false);
             }
-            builtin_items(b);
+            builtin_items(sema, b);
             b.keywords(builtins::EXPRESSION_KEYWORDS);
             if typed {
                 objects(sema, b, &["FUNCTION", "PACKAGE", "SEQUENCE", "SYNONYM"]);
@@ -804,7 +822,7 @@ fn fill(sema: &Sema, ctx: &Ctx, at: usize, prefix: &str, b: &mut Builder) {
         Ctx::InsertColumns(q) => {
             if !sema.ast.query(*q).sources.is_empty() {
                 for f in sema.source_columns(*q, 0, 0) {
-                    field_item(b, &f, None);
+                    field_item(sema, b, &f, None);
                 }
             }
         }
@@ -830,14 +848,14 @@ fn fill(sema: &Sema, ctx: &Ctx, at: usize, prefix: &str, b: &mut Builder) {
         Ctx::PlsqlStatement => {
             locals(sema, at, b, false);
             b.keywords(builtins::PLSQL_STATEMENT_KEYWORDS);
-            builtin_items(b);
+            builtin_items(sema, b);
             if typed {
                 objects(sema, b, &["PACKAGE", "PROCEDURE", "FUNCTION", "SYNONYM"]);
             }
         }
         Ctx::PlsqlExpr => {
             locals(sema, at, b, false);
-            builtin_items(b);
+            builtin_items(sema, b);
             b.keywords(builtins::EXPRESSION_KEYWORDS);
             if typed {
                 objects(sema, b, &["PACKAGE", "FUNCTION", "SEQUENCE", "SYNONYM"]);
@@ -879,21 +897,23 @@ fn objects(sema: &Sema, b: &mut Builder, types: &[&str]) {
     }
 }
 
-fn builtin_items(b: &mut Builder) {
+fn builtin_items(sema: &Sema, b: &mut Builder) {
     for f in builtins::FUNCTIONS {
         let text = b.cased(f.name);
-        b.push(
+        if let Some(item) = b.push(
             text.clone(),
             CompletionKind::Builtin,
             f.signature(),
             text,
             None,
             P_BUILTIN,
-        );
+        ) {
+            item.documentation = Some(describe(sema, &Resolved::Builtin(f)));
+        }
     }
 }
 
-fn field_item(b: &mut Builder, f: &FieldInfo, origin: Option<&str>) {
+fn field_item(sema: &Sema, b: &mut Builder, f: &FieldInfo, origin: Option<&str>) {
     let mut detail = f.data_type.to_lowercase();
     if let Some(origin) = origin {
         detail = if detail.is_empty() {
@@ -907,7 +927,9 @@ fn field_item(b: &mut Builder, f: &FieldInfo, origin: Option<&str>) {
     } else {
         CompletionKind::Field
     };
-    b.dictionary_name(&f.name, kind, detail, P_COLUMN);
+    if let Some(item) = b.dictionary_name(&f.name, kind, detail, P_COLUMN) {
+        item.documentation = Some(describe(sema, &Resolved::Field(f.clone())));
+    }
 }
 
 /// Columns of all sources in scope, plus their aliases.
@@ -927,9 +949,15 @@ fn source_items(sema: &Sema, q: QueryId, b: &mut Builder) {
             SourceKind::Subquery(_) => "inline view".into(),
             SourceKind::Function => "table function".into(),
         };
-        b.source_name(&written, CompletionKind::Alias, what, P_MEMBER);
+        if let Some(item) = b.source_name(&written, CompletionKind::Alias, what, P_MEMBER) {
+            let source = Resolved::Source {
+                query: qid,
+                index: idx,
+            };
+            item.documentation = Some(describe(sema, &source));
+        }
         for f in sema.source_columns(qid, idx, 0) {
-            field_item(b, &f, Some(&written));
+            field_item(sema, b, &f, Some(&written));
         }
     }
 }
@@ -958,7 +986,13 @@ fn locals(sema: &Sema, at: usize, b: &mut Builder, targets_only: bool) {
             SymbolKind::Attribute => (CompletionKind::Field, type_text(s)),
             SymbolKind::Label => continue,
         };
-        b.source_name(sema.text(&s.name.span), kind, detail, P_LOCAL);
+        // Not loop indexes: describing a cursor loop's record may need more
+        // dictionary data.
+        if let Some(item) = b.source_name(sema.text(&s.name.span), kind, detail, P_LOCAL)
+            && s.kind != SymbolKind::LoopIndex
+        {
+            item.documentation = Some(describe(sema, &Resolved::Local(r)));
+        }
     }
 }
 
@@ -1015,18 +1049,18 @@ fn member_items(sema: &Sema, parts: &[Part], at: usize, b: &mut Builder) {
     match sema.member_target(parts, at, query) {
         MemberTarget::Fields(fields) => {
             for f in &fields {
-                field_item(b, f, None);
+                field_item(sema, b, f, None);
             }
         }
         MemberTarget::Members {
+            object,
             members,
             attributes,
-            ..
         } => {
             for f in &attributes {
-                field_item(b, f, None);
+                field_item(sema, b, f, None);
             }
-            add_members(b, &members);
+            add_members(sema, b, &object, &members);
         }
         MemberTarget::LocalPackage(pkg) => {
             let scope = sema.ast.scope(pkg);
@@ -1042,7 +1076,9 @@ fn member_items(sema: &Sema, parts: &[Part], at: usize, b: &mut Builder) {
                     SymbolKind::Type | SymbolKind::Subtype => (CompletionKind::Type, "type".into()),
                     _ => continue,
                 };
-                b.source_name(sema.text(&s.name.span), kind, detail, P_MEMBER);
+                if let Some(item) = b.source_name(sema.text(&s.name.span), kind, detail, P_MEMBER) {
+                    item.documentation = Some(describe(sema, &Resolved::Local(r)));
+                }
             }
         }
         MemberTarget::Objects { objects, .. } => {
@@ -1062,23 +1098,34 @@ fn member_items(sema: &Sema, parts: &[Part], at: usize, b: &mut Builder) {
     }
 }
 
-fn add_members(b: &mut Builder, members: &[CatalogMember]) {
+fn add_members(sema: &Sema, b: &mut Builder, object: &CatalogObject, members: &[CatalogMember]) {
     let mut seen: Vec<&str> = Vec::new();
     for m in members {
         if seen.contains(&m.name.as_str()) {
             continue;
         }
         seen.push(&m.name);
-        let overloads = members.iter().filter(|x| x.name == m.name).count();
+        let overloads: Vec<CatalogMember> = members
+            .iter()
+            .filter(|x| x.name == m.name)
+            .cloned()
+            .collect();
         let mut detail = member_signature(m);
-        if overloads > 1 {
-            detail.push_str(&format!("  (+{} overloads)", overloads - 1));
+        if overloads.len() > 1 {
+            detail.push_str(&format!("  (+{} overloads)", overloads.len() - 1));
         }
         let kind = match m.kind {
             MemberKind::Procedure => CompletionKind::Procedure,
             MemberKind::Function => CompletionKind::Function,
         };
-        b.dictionary_name(&m.name, kind, detail, P_MEMBER);
+        if let Some(item) = b.dictionary_name(&m.name, kind, detail, P_MEMBER) {
+            let member = Resolved::Member {
+                object: object.clone(),
+                name: m.name.clone(),
+                members: overloads,
+            };
+            item.documentation = Some(describe(sema, &member));
+        }
     }
 }
 

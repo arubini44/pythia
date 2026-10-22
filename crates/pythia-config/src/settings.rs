@@ -130,6 +130,8 @@ pub struct EditorSettings {
     /// Identifier characters typed before completions appear.
     pub auto_complete_min_chars: usize,
     pub auto_complete_delay_ms: u64,
+    /// Rows the completion list shows at most (fewer if the window has no room).
+    pub completion_rows: usize,
 }
 
 impl Default for EditorSettings {
@@ -144,6 +146,7 @@ impl Default for EditorSettings {
             auto_complete: true,
             auto_complete_min_chars: 2,
             auto_complete_delay_ms: 150,
+            completion_rows: 15,
         }
     }
 }

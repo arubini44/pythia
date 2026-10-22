@@ -706,6 +706,38 @@ fn hover_info() {
 }
 
 #[test]
+fn completion_items_carry_what_hover_shows() {
+    let doc = |src: &str, label: &str| {
+        completion(src, &hr())
+            .items
+            .into_iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("no {label}"))
+            .documentation
+    };
+    let pair = |title: &str, text: &str| Some((title.to_owned(), text.to_owned()));
+    assert_eq!(
+        doc("select e.¦ from employees e", "last_name"),
+        pair(
+            "column HR.EMPLOYEES.LAST_NAME",
+            "VARCHAR2(25) NOT NULL\nFamily name"
+        )
+    );
+    let (title, text) = doc("begin emp_pkg.¦ end;", "raise_salary").unwrap();
+    assert_eq!(title, "procedure HR.EMP_PKG.RAISE_SALARY");
+    assert_eq!(text.lines().count(), 2, "both overloads: {text}");
+    let src = "declare\n  -- Running total.\n  l_total number;\nbegin\n  l_¦\nend;";
+    assert_eq!(
+        doc(src, "l_total"),
+        pair("variable l_total", "Running total.\nl_total number")
+    );
+    let (title, text) = doc("select nv¦ from dual", "nvl").unwrap();
+    assert_eq!(title, "function NVL");
+    assert!(text.starts_with("NVL(expr1, expr2)"), "{text}");
+    assert_eq!(doc("select * from employ¦", "employees"), None);
+}
+
+#[test]
 fn hover_reports_missing() {
     let cat = CatalogCache::new("HR");
     let (text, offset) = split("select * from employ¦ees");

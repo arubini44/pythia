@@ -211,6 +211,7 @@ impl eframe::App for Demo {
                         detail: detail.into(),
                         kind,
                         insert_text: label.into(),
+                        documentation: None,
                     };
                     let mut items = vec![
                         entry("EMPLOYEES", "HR · table", CompletionKind::Table),

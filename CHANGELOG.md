@@ -23,6 +23,14 @@ All notable changes to Pythia are documented here. The format follows
   view's text where the database keeps it there (23ai) instead of
   searching all constraints. `RUST_LOG=pythia_db=debug` logs how long each
   metadata query took.
+- Completion: the list shows up to 15 suggestions (Settings → Code
+  assistance → Visible rows), as many as fit below the line, and opens
+  above the line when there is more room there instead of covering it. It
+  is as wide as its entries need, up to a limit; long names and details are
+  cut with "…" instead of running into each other. A pane next to the list
+  shows what hover shows for the selected entry: a column's type,
+  nullability and comment, a subprogram's signatures and doc comment, a
+  snippet's text.
 
 ### Added
 - Editors: a context menu. On a database object it offers what the object
@@ -112,6 +120,8 @@ All notable changes to Pythia are documented here. The format follows
   they are read) read as NULL. Oracle's agent has no values for them until
   the package is first used; the watch now says so. NULL globals of an
   instantiated package still read as NULL.
+- Completion: after a short list (e.g. filtered down to three matches),
+  later lists no longer stay that small until the app restarts.
 
 ## [0.1.0] - 2026-10-22
 

@@ -361,6 +361,7 @@ impl Editor {
                 usize::MAX
             },
             auto_complete_delay_ms: settings.auto_complete_delay_ms,
+            completion_rows: settings.completion_rows,
             read_only,
             ..EditorConfig::default()
         };

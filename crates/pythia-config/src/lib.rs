@@ -156,5 +156,6 @@ mod tests {
             settings.editor.font_size,
             EditorSettings::default().font_size
         );
+        assert_eq!(settings.editor.completion_rows, 15);
     }
 }

@@ -363,6 +363,14 @@ fn code_assist(ui: &mut Ui, s: &mut Settings) {
             },
         );
     });
+    row(
+        ui,
+        "Visible rows",
+        "Suggestions the completion list shows at once, if the window has room",
+        |ui| {
+            ui.add(egui::Slider::new(&mut e.completion_rows, 5..=40));
+        },
+    );
     ui.add_space(6.0);
     ui.label(
         RichText::new("Typing . after a table alias or package always completes immediately.")

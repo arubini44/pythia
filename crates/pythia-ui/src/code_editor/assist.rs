@@ -79,6 +79,9 @@ pub struct CompletionEntry {
     pub kind: CompletionKind,
     /// Text inserted on accept.
     pub insert_text: String,
+    /// Title and text of the pane shown next to the list while the entry is
+    /// selected, e.g. what hover shows for it; `None` shows no pane.
+    pub documentation: Option<(String, String)>,
 }
 
 /// Why and where completion items are wanted. `offset` is a byte offset.
@@ -104,6 +107,12 @@ pub struct Completion {
     pub selected: usize,
     /// Set when the selection moved by keyboard; the view scrolls to it.
     pub scroll_to_selected: bool,
+    /// Rows the list showed in the last frame (PageUp/PageDown step).
+    pub page: usize,
+    /// Scroll offset of the list in the last frame.
+    pub scroll: f32,
+    /// Width the filtered items need, measured by the view.
+    pub width: Option<f32>,
 }
 
 impl Completion {
@@ -135,6 +144,9 @@ impl Completion {
             filtered: Vec::new(),
             selected: 0,
             scroll_to_selected: true,
+            page: 1,
+            scroll: 0.0,
+            width: None,
         };
         c.update(state).then_some(c)
     }
@@ -180,7 +192,12 @@ impl Completion {
             return false;
         }
         let previous = self.selected_entry().map(|e| e.label.clone());
-        self.filtered = filter(&self.items, &prefix);
+        let filtered = filter(&self.items, &prefix);
+        if filtered != self.filtered {
+            self.filtered = filtered;
+            self.width = None;
+            self.scroll_to_selected = true;
+        }
         // Keep the selected item if it still matches.
         self.selected = previous
             .and_then(|label| {
@@ -327,6 +344,7 @@ mod tests {
             detail: String::new(),
             kind,
             insert_text: label.into(),
+            documentation: None,
         }
     }
 

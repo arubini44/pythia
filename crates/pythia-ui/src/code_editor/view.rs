@@ -9,7 +9,7 @@ use egui::{
 };
 use pythia_plsql::TokenKind;
 
-use super::assist::{self, CompletionTrigger};
+use super::assist::{self, Completion, CompletionEntry, CompletionTrigger};
 use super::find::FindAction;
 use super::fold::{DisplayMap, Region, RegionKind};
 use super::highlight::lex_line;
@@ -180,8 +180,19 @@ impl Layout {
 }
 
 const BLINK_PERIOD: f64 = 1.1;
-/// Visible rows of the completion popup.
-const POPUP_ROWS: usize = 12;
+/// Gap between the caret line and the completion list, and between the list
+/// and its details pane.
+const POPUP_GAP: f32 = 2.0;
+/// Width of the completion list; longer labels and details are cut with "…".
+const POPUP_MIN_WIDTH: f32 = 200.0;
+const POPUP_MAX_WIDTH: f32 = 560.0;
+/// Space for the kind glyph before a completion label, between label and
+/// detail, and after the detail.
+const ROW_LEAD: f32 = 26.0;
+const ROW_GAP: f32 = 16.0;
+const ROW_TRAIL: f32 = 6.0;
+/// Widest the details pane next to the completion list gets.
+const DETAILS_MAX_WIDTH: f32 = 380.0;
 
 impl CodeEditor {
     pub fn ui(&mut self, ui: &mut Ui, config: &EditorConfig) -> EditorOutput {
@@ -285,7 +296,8 @@ impl CodeEditor {
 
                 let caret_rect = self.caret_rect(&layout);
                 if layout.visible_rect().contains(caret_rect.center()) {
-                    self.completion_popup(ui, caret_rect, char_w, &font, focused);
+                    let rows = config.completion_rows;
+                    self.completion_popup(ui, caret_rect, char_w, &font, focused, rows);
                     self.signature_popup(ui, caret_rect, &font);
                 }
                 self.hover_popup(ui, &layout, &font);
@@ -783,11 +795,12 @@ impl CodeEditor {
         if m.command || m.alt {
             return false;
         }
+        let page = completion.page.max(1) as isize;
         match key {
             Key::ArrowUp => completion.move_selection(-1),
             Key::ArrowDown => completion.move_selection(1),
-            Key::PageUp => completion.move_selection(-(POPUP_ROWS as isize)),
-            Key::PageDown => completion.move_selection(POPUP_ROWS as isize),
+            Key::PageUp => completion.move_selection(-page),
+            Key::PageDown => completion.move_selection(page),
             Key::Enter | Key::Tab => {
                 let completion = self.completion.take().expect("checked above");
                 completion.accept(&mut self.state, time);
@@ -932,6 +945,7 @@ impl CodeEditor {
         char_w: f32,
         font: &FontId,
         focused: bool,
+        max_rows: usize,
     ) {
         if !focused {
             return;
@@ -939,91 +953,85 @@ impl CodeEditor {
         let Some(completion) = self.completion.as_mut() else {
             return;
         };
-        let dark = ui.visuals().dark_mode;
         let row_h = (caret.height() + 4.0).max(18.0);
-        let mut accept = None;
+        let frame = egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(3));
+        let chrome = frame.total_margin().sum();
+        let screen = ui.ctx().content_rect();
+        // The side follows all items, not the filtered ones, so the list
+        // doesn't jump across the line while typing.
+        let wanted = completion.items().len().min(max_rows.max(1));
+        let (above, fit) = popup_rows(caret, screen, row_h, chrome.y, wanted);
+        let list_h = completion.filtered.len().min(fit) as f32 * row_h;
+        let measured = match completion.width {
+            Some(w) => w,
+            None => *completion.width.insert(list_width(ui, completion, font)),
+        };
+        let width = measured
+            .clamp(POPUP_MIN_WIDTH, POPUP_MAX_WIDTH)
+            .min((screen.width() - chrome.x).max(POPUP_MIN_WIDTH));
         // Align the labels with the start of the word being completed.
         let typed = self.state.primary().head.saturating_sub(completion.start());
         let word_x = caret.min.x - typed as f32 * char_w;
-        egui::Area::new(ui.id().with("completion-popup"))
+        let x = (word_x - ROW_LEAD - chrome.x / 2.0)
+            .min(screen.max.x - width - chrome.x)
+            .max(screen.min.x);
+        let y = if above {
+            caret.min.y - POPUP_GAP - list_h - chrome.y
+        } else {
+            caret.max.y + POPUP_GAP
+        };
+        let mut accept = None;
+        let list = egui::Area::new(ui.id().with("completion-popup"))
             .order(egui::Order::Foreground)
-            .fixed_pos(pos2(word_x - 29.0, caret.max.y + 2.0))
+            .fixed_pos(pos2(x, y))
             .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style())
-                    .inner_margin(egui::Margin::same(3))
-                    .show(ui, |ui| {
-                        ui.set_width(400.0);
-                        egui::ScrollArea::vertical()
-                            .max_height(row_h * POPUP_ROWS as f32)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 0.0;
-                                for (i, &item_idx) in completion.filtered.iter().enumerate() {
-                                    let item = &completion.items()[item_idx];
-                                    let selected = i == completion.selected;
-                                    let size = vec2(ui.available_width(), row_h);
-                                    let (rect, response) =
-                                        ui.allocate_exact_size(size, Sense::click());
-                                    let visuals = ui.visuals();
-                                    let painter = ui.painter();
-                                    if selected {
-                                        painter.rect_filled(rect, 3.0, visuals.selection.bg_fill);
-                                    } else if response.hovered() {
-                                        painter.rect_filled(
-                                            rect,
-                                            3.0,
-                                            visuals.widgets.hovered.weak_bg_fill,
-                                        );
-                                    }
-                                    let glyph_rect = Rect::from_center_size(
-                                        pos2(rect.min.x + 12.0, rect.center().y),
-                                        vec2(16.0, 16.0),
-                                    );
-                                    let color = item.kind.color(dark);
-                                    painter.rect_filled(
-                                        glyph_rect,
-                                        3.0,
-                                        color.gamma_multiply(0.22),
-                                    );
-                                    painter.text(
-                                        glyph_rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        item.kind.glyph(),
-                                        FontId::monospace(font.size * 0.85),
-                                        color,
-                                    );
-                                    let text_color = if selected {
-                                        visuals.selection.stroke.color
-                                    } else {
-                                        visuals.text_color()
-                                    };
-                                    painter.text(
-                                        pos2(rect.min.x + 26.0, rect.center().y),
-                                        egui::Align2::LEFT_CENTER,
-                                        &item.label,
-                                        font.clone(),
-                                        text_color,
-                                    );
-                                    if !item.detail.is_empty() {
-                                        painter.text(
-                                            pos2(rect.max.x - 6.0, rect.center().y),
-                                            egui::Align2::RIGHT_CENTER,
-                                            &item.detail,
-                                            FontId::proportional(font.size * 0.9),
-                                            visuals.weak_text_color(),
-                                        );
-                                    }
-                                    if selected && completion.scroll_to_selected {
-                                        response.scroll_to_me(None);
-                                    }
-                                    if response.clicked() {
-                                        accept = Some(i);
-                                    }
-                                }
-                            });
-                        completion.scroll_to_selected = false;
+                frame.show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let mut scroll = egui::ScrollArea::vertical()
+                        .max_height(list_h)
+                        // The area's last size limits its content: without
+                        // this, a short list would cap all later ones.
+                        .min_scrolled_height(list_h)
+                        .auto_shrink([false, true]);
+                    if completion.scroll_to_selected {
+                        let top = completion.selected as f32 * row_h;
+                        let offset = completion.scroll.min(top).max(top + row_h - list_h);
+                        scroll = scroll.vertical_scroll_offset(offset);
+                    }
+                    let n = completion.filtered.len();
+                    let out = scroll.show_rows(ui, row_h, n, |ui, range| {
+                        for i in range {
+                            let item = &completion.items()[completion.filtered[i]];
+                            let size = vec2(ui.available_width(), row_h);
+                            let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                            let selected = i == completion.selected;
+                            paint_completion_row(
+                                ui,
+                                rect,
+                                item,
+                                selected,
+                                response.hovered(),
+                                font,
+                            );
+                            if response.clicked() {
+                                accept = Some(i);
+                            }
+                        }
                     });
-            });
+                    completion.page = ((out.inner_rect.height() / row_h).round() as usize).max(1);
+                    completion.scroll = out.state.offset.y;
+                    completion.scroll_to_selected = false;
+                });
+            })
+            .response
+            .rect;
+        if let Some((title, text)) = completion
+            .selected_entry()
+            .and_then(|e| e.documentation.as_ref())
+        {
+            completion_details(ui, list, above, font, title, text);
+        }
         if let Some(i) = accept {
             let mut completion = self.completion.take().expect("open");
             completion.selected = i;
@@ -1924,4 +1932,352 @@ fn caret_on_pairable(rope: &ropey::Rope, pos: usize) -> bool {
     ["BEGIN", "END", "IF", "LOOP", "CASE"]
         .iter()
         .any(|k| word.eq_ignore_ascii_case(k))
+}
+
+/// Where the completion list goes for `wanted` rows: below the caret line if
+/// they fit there, else on the side with more room. Returns whether it's
+/// above and how many rows fit (at least one). `chrome` is the frame height.
+fn popup_rows(caret: Rect, screen: Rect, row_h: f32, chrome: f32, wanted: usize) -> (bool, usize) {
+    let fit = |space: f32| ((space - POPUP_GAP - chrome) / row_h).floor().max(0.0) as usize;
+    let below = fit(screen.max.y - caret.max.y);
+    let above = fit(caret.min.y - screen.min.y);
+    if below >= wanted || below >= above {
+        (false, below.min(wanted).max(1))
+    } else {
+        (true, above.min(wanted).max(1))
+    }
+}
+
+/// Width the completion rows need to show the filtered entries uncut.
+fn list_width(ui: &Ui, completion: &Completion, font: &FontId) -> f32 {
+    let detail_font = detail_font(font);
+    ui.fonts_mut(|f| {
+        let mut width = |text: &str, font: &FontId| -> f32 {
+            text.chars().map(|c| f.glyph_width(font, c)).sum()
+        };
+        completion
+            .filtered
+            .iter()
+            .map(|&i| {
+                let item = &completion.items()[i];
+                let detail = if item.detail.is_empty() {
+                    0.0
+                } else {
+                    ROW_GAP + width(&item.detail, &detail_font)
+                };
+                // A little slack: shaping may differ from the glyph widths.
+                ROW_LEAD + width(&item.label, font) + detail + ROW_TRAIL + 2.0
+            })
+            .fold(0.0, f32::max)
+    })
+}
+
+fn detail_font(font: &FontId) -> FontId {
+    FontId::proportional(font.size * 0.9)
+}
+
+/// Widths for a row's label and detail within `room`. Both stay whole if
+/// they fit; else the label keeps up to 60 % of the row and the detail gets
+/// the rest. A detail left with too little room is dropped (width 0).
+fn fit_columns(label: f32, detail: f32, room: f32) -> (f32, f32) {
+    if detail <= 0.0 || label + ROW_GAP + detail <= room {
+        return (label.min(room), detail);
+    }
+    let label_w = label.min((room - ROW_GAP - detail).max(room * 0.6));
+    let detail_w = room - ROW_GAP - label_w;
+    if detail_w < detail.min(3.0 * ROW_GAP) {
+        (label.min(room), 0.0)
+    } else {
+        (label_w, detail_w)
+    }
+}
+
+/// One line of text, cut with "…" beyond `max_width`.
+fn one_line(
+    ui: &Ui,
+    text: &str,
+    font: &FontId,
+    color: Color32,
+    max_width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = LayoutJob::simple_singleline(text.to_owned(), font.clone(), color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width);
+    ui.fonts_mut(|f| f.layout_job(job))
+}
+
+/// One row of the completion list: kind glyph, label and the detail on the
+/// right, cut rather than overlapping.
+fn paint_completion_row(
+    ui: &Ui,
+    rect: Rect,
+    item: &CompletionEntry,
+    selected: bool,
+    hovered: bool,
+    font: &FontId,
+) {
+    let visuals = ui.visuals();
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, 3.0, visuals.selection.bg_fill);
+    } else if hovered {
+        painter.rect_filled(rect, 3.0, visuals.widgets.hovered.weak_bg_fill);
+    }
+    let glyph_rect =
+        Rect::from_center_size(pos2(rect.min.x + 12.0, rect.center().y), vec2(16.0, 16.0));
+    let color = item.kind.color(visuals.dark_mode);
+    painter.rect_filled(glyph_rect, 3.0, color.gamma_multiply(0.22));
+    painter.text(
+        glyph_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        item.kind.glyph(),
+        FontId::monospace(font.size * 0.85),
+        color,
+    );
+    let text_color = if selected {
+        visuals.selection.stroke.color
+    } else {
+        visuals.text_color()
+    };
+    let detail_font = detail_font(font);
+    let weak = visuals.weak_text_color();
+    let left = rect.min.x + ROW_LEAD;
+    let right = rect.max.x - ROW_TRAIL;
+    let mut label = one_line(ui, &item.label, font, text_color, f32::INFINITY);
+    let mut detail = (!item.detail.is_empty())
+        .then(|| one_line(ui, &item.detail, &detail_font, weak, f32::INFINITY));
+    let detail_w = detail.as_ref().map_or(0.0, |d| d.size().x);
+    let (label_max, detail_max) = fit_columns(label.size().x, detail_w, right - left);
+    if label.size().x > label_max {
+        label = one_line(ui, &item.label, font, text_color, label_max);
+    }
+    if detail_max <= 0.0 {
+        detail = None;
+    } else if detail_w > detail_max {
+        detail = Some(one_line(ui, &item.detail, &detail_font, weak, detail_max));
+    }
+    let top = |g: &egui::Galley| rect.center().y - g.size().y / 2.0;
+    painter.galley(pos2(left, top(&label)), label, text_color);
+    if let Some(detail) = detail {
+        painter.galley(pos2(right - detail.size().x, top(&detail)), detail, weak);
+    }
+}
+
+/// The selected completion entry's documentation next to the list: right of
+/// it, or left if there's no room there. It grows away from the caret line.
+fn completion_details(ui: &Ui, list: Rect, above: bool, font: &FontId, title: &str, text: &str) {
+    let frame = egui::Frame::popup(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
+    let chrome = frame.total_margin().sum();
+    let screen = ui.ctx().content_rect();
+    let visuals = ui.visuals();
+    let wrap = DETAILS_MAX_WIDTH - chrome.x;
+    let room = if above {
+        list.max.y - screen.min.y
+    } else {
+        screen.max.y - list.min.y
+    } - chrome.y;
+    let layout = |text: &str, font: FontId, color: Color32, max_rows: usize| {
+        let mut job = LayoutJob::simple(text.to_owned(), font, color, wrap);
+        job.wrap.max_rows = max_rows;
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+    let strong = visuals.strong_text_color();
+    let title = layout(title, font.clone(), strong, 2);
+    // A separator line with space around it.
+    let rule = 9.0;
+    let body_font = egui::TextStyle::Body.resolve(ui.style());
+    let body_row = ui.fonts_mut(|f| f.row_height(&body_font));
+    let body_rows = ((room - title.size().y - rule) / body_row).floor().max(0.0) as usize;
+    let body = (!text.is_empty() && body_rows > 0)
+        .then(|| layout(text, body_font, visuals.text_color(), body_rows));
+    let size = vec2(
+        title
+            .size()
+            .x
+            .max(body.as_ref().map_or(0.0, |b| b.size().x)),
+        title.size().y + body.as_ref().map_or(0.0, |b| rule + b.size().y),
+    );
+    let outer = size + chrome;
+    let x = if list.max.x + POPUP_GAP + outer.x <= screen.max.x {
+        list.max.x + POPUP_GAP
+    } else if list.min.x - POPUP_GAP - outer.x >= screen.min.x {
+        list.min.x - POPUP_GAP - outer.x
+    } else {
+        return;
+    };
+    let y = if above {
+        list.max.y - outer.y
+    } else {
+        list.min.y
+    };
+    let line = visuals.widgets.noninteractive.bg_stroke;
+    let text_color = visuals.text_color();
+    egui::Area::new(ui.id().with("completion-details"))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .fixed_pos(pos2(x, y))
+        .show(ui.ctx(), |ui| {
+            frame.show(ui, |ui| {
+                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                let painter = ui.painter();
+                let below_title = rect.min.y + title.size().y;
+                painter.galley(rect.min, title, strong);
+                if let Some(body) = body {
+                    painter.hline(rect.x_range(), below_title + rule / 2.0, line);
+                    painter.galley(pos2(rect.min.x, below_title + rule), body, text_color);
+                }
+            });
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::code_editor::CompletionKind;
+
+    /// Runs frames of an editor filling a 1000×800 window; `events` go to the first.
+    fn frames(ctx: &egui::Context, editor: &mut CodeEditor, n: usize, mut events: Vec<Event>) {
+        let config = EditorConfig::default();
+        for _ in 0..n {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                events: std::mem::take(&mut events),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                editor.ui(ui, &config);
+            });
+            output.textures_delta.clear();
+        }
+    }
+
+    fn entry(label: &str) -> CompletionEntry {
+        CompletionEntry {
+            label: label.into(),
+            detail: "number".into(),
+            kind: CompletionKind::Column,
+            insert_text: label.into(),
+            documentation: None,
+        }
+    }
+
+    fn key(key: Key) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    /// Rows the completion list showed in the last frame.
+    fn visible_rows(editor: &CodeEditor) -> usize {
+        editor.completion.as_ref().expect("open").page
+    }
+
+    #[test]
+    fn completion_list_grows_back_after_a_short_list() {
+        let ctx = egui::Context::default();
+        let mut editor = CodeEditor::new("select ");
+        editor.goto(1, 8);
+        editor.request_focus();
+        let rows = EditorConfig::default().completion_rows;
+        let mut items: Vec<_> = (0..50).map(|i| entry(&format!("col_{i:02}"))).collect();
+        items.extend(["zz_a", "zz_b", "zz_c"].map(entry));
+        frames(&ctx, &mut editor, 2, vec![]);
+        editor.show_completions(7..7, items.clone());
+        frames(&ctx, &mut editor, 3, vec![]);
+        assert_eq!(visible_rows(&editor), rows);
+
+        frames(&ctx, &mut editor, 3, vec![Event::Text("zz".into())]);
+        assert_eq!(editor.completion_labels(), ["zz_a", "zz_b", "zz_c"]);
+        assert_eq!(visible_rows(&editor), 3);
+
+        // The area remembers the short list; the next one must still grow.
+        frames(&ctx, &mut editor, 2, vec![key(Key::Escape)]);
+        assert!(!editor.is_completion_open());
+        frames(
+            &ctx,
+            &mut editor,
+            2,
+            vec![key(Key::Backspace), key(Key::Backspace)],
+        );
+        assert_eq!(editor.text(), "select ");
+        editor.show_completions(7..7, items);
+        frames(&ctx, &mut editor, 3, vec![]);
+        assert_eq!(visible_rows(&editor), rows);
+        // PageDown moves by what is shown.
+        frames(&ctx, &mut editor, 2, vec![key(Key::PageDown)]);
+        assert_eq!(editor.completion.as_ref().unwrap().selected, rows);
+    }
+
+    #[test]
+    fn completion_popups_stay_off_the_line() {
+        let ctx = egui::Context::default();
+        let mut editor = CodeEditor::new(&"x\n".repeat(100));
+        let items: Vec<_> = (0..50)
+            .map(|i| CompletionEntry {
+                documentation: Some(("column T.X".into(), "NUMBER NOT NULL".into())),
+                ..entry(&format!("x_{i:02}"))
+            })
+            .collect();
+        for (line, above) in [(3, false), (40, true)] {
+            editor.goto(line, 2);
+            editor.request_focus();
+            frames(&ctx, &mut editor, 2, vec![]);
+            let at = editor.cursor();
+            editor.show_completions(at - 1..at, items.clone());
+            frames(&ctx, &mut editor, 3, vec![]);
+            let layout = editor.last_layout.as_ref().unwrap();
+            let (top, bottom) = (layout.row_y(line - 1), layout.row_y(line));
+            // The list and the details pane.
+            let popups: Vec<Rect> = ctx.memory(|m| {
+                let layers = m.areas().visible_layer_ids();
+                layers
+                    .into_iter()
+                    .filter(|l| l.order == egui::Order::Foreground)
+                    .filter_map(|l| m.area_rect(l.id))
+                    .collect()
+            });
+            assert_eq!(popups.len(), 2, "line {line}");
+            for rect in popups {
+                if above {
+                    assert!(rect.max.y <= top, "line {line}: {rect:?} over {top}");
+                } else {
+                    assert!(rect.min.y >= bottom, "line {line}: {rect:?} over {bottom}");
+                }
+            }
+            editor.hide_completions();
+        }
+    }
+
+    #[test]
+    fn completion_list_opens_where_there_is_room() {
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0));
+        let line = |y: f32| Rect::from_min_size(pos2(100.0, y), vec2(2.0, 16.0));
+        // Room below: below, as many rows as wanted.
+        assert_eq!(popup_rows(line(100.0), screen, 20.0, 8.0, 15), (false, 15));
+        // Near the bottom: above, not over the line.
+        assert_eq!(popup_rows(line(700.0), screen, 20.0, 8.0, 15), (true, 15));
+        // Short list near the bottom: still below.
+        assert_eq!(popup_rows(line(700.0), screen, 20.0, 8.0, 3), (false, 3));
+        // Little room either way: the larger side, limited.
+        let small = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 200.0));
+        assert_eq!(popup_rows(line(60.0), small, 20.0, 8.0, 15), (false, 5));
+        assert_eq!(popup_rows(line(120.0), small, 20.0, 8.0, 15), (true, 5));
+    }
+
+    #[test]
+    fn label_and_detail_share_the_row() {
+        // Both fit: unchanged.
+        assert_eq!(fit_columns(100.0, 80.0, 300.0), (100.0, 80.0));
+        // A long detail is cut, the label stays whole.
+        assert_eq!(fit_columns(100.0, 250.0, 300.0), (100.0, 184.0));
+        // A long label gets at most 60 % if the detail needs the rest.
+        assert_eq!(fit_columns(400.0, 200.0, 300.0), (180.0, 104.0));
+        // A short detail stays whole, the label gives way.
+        assert_eq!(fit_columns(290.0, 10.0, 300.0), (274.0, 10.0));
+        // No detail: the label gets the row.
+        assert_eq!(fit_columns(400.0, 0.0, 300.0), (300.0, 0.0));
+    }
 }

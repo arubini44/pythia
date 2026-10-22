@@ -605,6 +605,7 @@ fn entry(item: pythia_lsp_core::CompletionItem) -> CompletionEntry {
         detail: item.detail,
         kind,
         insert_text: item.insert_text,
+        documentation: item.documentation,
     }
 }
 
