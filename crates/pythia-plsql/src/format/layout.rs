@@ -235,6 +235,8 @@ pub(crate) struct Layout<'a, 's> {
     unary: bool,
     /// Structure the formatter doesn't handle: keep the statement as is.
     pub bail: bool,
+    /// Code that isn't to be reformatted at all (wrapped, Java).
+    pub opaque: bool,
     /// The last subprogram had a body (not just a declaration).
     had_body: bool,
 }
@@ -261,6 +263,7 @@ impl<'a, 's> Layout<'a, 's> {
             prev2: None,
             unary: false,
             bail: false,
+            opaque: false,
             had_body: false,
         }
     }
@@ -1162,6 +1165,7 @@ impl<'a, 's> Layout<'a, 's> {
         }
         if (0..14).any(|i| self.word_at(i, "WRAPPED")) {
             self.bail = true;
+            self.opaque = true;
             return self.rest();
         }
         let kind = self
@@ -1204,6 +1208,7 @@ impl<'a, 's> Layout<'a, 's> {
             "VIEW" => self.create_view(),
             "JAVA" | "LIBRARY" => {
                 self.bail = true;
+                self.opaque = true;
                 self.rest()
             }
             _ => group(self.expr(&|_| false)),

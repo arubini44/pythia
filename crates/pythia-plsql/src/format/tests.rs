@@ -91,7 +91,7 @@ fn corpus_statements_are_formatted() {
                     continue;
                 }
                 assert!(
-                    try_format_statement(text, stmt.kind, o).is_some(),
+                    try_format_statement(text, stmt.kind, o).is_ok(),
                     "{name} (options #{i}): fell back for\n{text}"
                 );
             }
@@ -505,4 +505,20 @@ fn learned_style_round_trips() {
         assert_eq!(learned.comma, style.comma);
         assert_eq!(learned.parameters, style.parameters);
     }
+}
+
+#[test]
+fn kept_as_written_lists_what_could_be_formatted() {
+    let src = "set serveroutput on\n\
+               create or replace trigger t_c for update on t compound trigger\n\
+               before statement is begin null; end before statement;\n\
+               end t_c;\n/\n\
+               create or replace package p wrapped\na000000\nabcd\n/\n\
+               select 1 from dual;\n";
+    let kept = kept_as_written(src, &FormatOptions::default());
+    let texts: Vec<_> = kept.iter().map(|r| &src[r.clone()]).collect();
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].contains("compound trigger"));
+    assert!(equivalent("select a\nfrom   t", "SELECT A FROM T"));
+    assert!(!equivalent("select a from t", "select b from t"));
 }

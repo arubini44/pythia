@@ -10,7 +10,8 @@ mod parser;
 mod splitter;
 
 pub use format::{
-    Case, CommaStyle, FormatOptions, Formatted, Wrap, format, format_range, infer as infer_format,
+    Case, CommaStyle, FormatOptions, Formatted, Wrap, equivalent as only_layout_differs, format,
+    format_range, infer as infer_format, kept_as_written,
 };
 pub use header::{UnitHeader, unit_header};
 pub use keywords::is_keyword;

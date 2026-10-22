@@ -294,29 +294,62 @@ fn ends_in_line_comment(line: &str) -> bool {
 
 /// Formats one statement (no terminator), falling back to the original text
 /// if formatting would change anything but whitespace and case.
-fn format_statement(text: &str, kind: StatementKind, o: &FormatOptions) -> String {
-    try_format_statement(text, kind, o).unwrap_or_else(|| text.to_owned())
+/// The statements [`format`] keeps as written although they are SQL or
+/// PL/SQL: constructs it doesn't support and statements that failed the
+/// safety check, as byte ranges of `src`. SQL*Plus commands, wrapped code
+/// and Java sources aren't listed.
+pub fn kept_as_written(src: &str, options: &FormatOptions) -> Vec<Range<usize>> {
+    split_statements(src)
+        .into_iter()
+        .filter(|s| {
+            try_format_statement(&src[s.range.clone()], s.kind, options) == Err(Kept::Unsupported)
+        })
+        .map(|s| s.range)
+        .collect()
 }
 
-/// `None` if the statement is kept as written (SQL*Plus commands,
-/// unsupported constructs, or a failed safety check).
-fn try_format_statement(text: &str, kind: StatementKind, o: &FormatOptions) -> Option<String> {
+fn format_statement(text: &str, kind: StatementKind, o: &FormatOptions) -> String {
+    try_format_statement(text, kind, o).unwrap_or_else(|_| text.to_owned())
+}
+
+/// Why a statement is kept as written.
+#[derive(Debug, PartialEq, Eq)]
+enum Kept {
+    /// SQL*Plus commands, wrapped code, Java sources.
+    Opaque,
+    /// A construct the formatter doesn't support, or a failed safety check.
+    Unsupported,
+}
+
+fn try_format_statement(
+    text: &str,
+    kind: StatementKind,
+    o: &FormatOptions,
+) -> Result<String, Kept> {
     if kind == StatementKind::SqlPlus {
-        return None;
+        return Err(Kept::Opaque);
     }
     let toks: Vec<Tok> = tokens(text).into_iter().map(|(t, _)| t).collect();
     let mut layout = Layout::new(&toks, o);
     let doc = layout.statement();
+    if layout.opaque {
+        return Err(Kept::Opaque);
+    }
     if layout.bail {
-        return None;
+        return Err(Kept::Unsupported);
     }
     let formatted = doc::render(&doc, o.max_width.max(20));
-    equivalent(text, &formatted).then_some(formatted)
+    if equivalent(text, &formatted) {
+        Ok(formatted)
+    } else {
+        Err(Kept::Unsupported)
+    }
 }
 
 /// Same tokens in the same order, ignoring whitespace, the case of words and
-/// trailing blanks of line comments.
-pub(crate) fn equivalent(a: &str, b: &str) -> bool {
+/// trailing blanks of line comments: `b` is `a` laid out differently. The
+/// formatter's safety check, also for formatting done elsewhere.
+pub fn equivalent(a: &str, b: &str) -> bool {
     let sig = |s: &str| -> Vec<(TokenKind, String)> {
         tokenize(s)
             .into_iter()
