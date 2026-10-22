@@ -26,6 +26,9 @@ pub struct Settings {
     pub ui_scale: f32,
     /// Rows fetched per round trip and shown before "fetch more".
     pub fetch_size: usize,
+    /// SQL windows commit after each statement. Never on production
+    /// connections, where Commit asks first.
+    pub autocommit: bool,
     pub editor: EditorSettings,
     /// Host name or address the database uses to reach Pythia's debugger
     /// (empty: this machine's host name).
@@ -104,6 +107,7 @@ impl Default for Settings {
             keymap: KeymapPreset::default(),
             ui_scale: 1.0,
             fetch_size: 500,
+            autocommit: false,
             editor: EditorSettings::default(),
             debug_host: String::new(),
             compile_debug_info: false,

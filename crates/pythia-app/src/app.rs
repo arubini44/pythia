@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 
 use crate::browser::Browser;
 use crate::commands::{Command, Keymap};
-use crate::connections::{Connections, Notify, SessionKey};
+use crate::connections::{Connection, Connections, Notify, SessionKey};
 use crate::dialogs::{
     CommandPalette, Confirm, ConfirmAction, ConnectDialog, FinderAction, HistoryDialog,
     ObjectFinder, confirm_ui, opens_as_program,
@@ -276,6 +276,7 @@ impl PythiaApp {
             ThemeChoice::Light => egui::ThemePreference::Light,
         });
         ctx.set_zoom_factor(self.settings.ui_scale);
+        self.sync_autocommit();
     }
 
     fn save_user_reports(&self) {
@@ -761,8 +762,14 @@ impl PythiaApp {
             };
             match (target, doc) {
                 (Target::Own | Target::Connection(_), Some(id)) => {
+                    let autocommit = self
+                        .conns
+                        .get(&name)
+                        .is_some_and(|c| self.autocommit_for(id, c));
                     let conn = self.conns.get_mut(&name).expect("checked above");
-                    conn.doc_session(id, &self.notify).session.send(request);
+                    conn.doc_session(id, autocommit, &self.notify)
+                        .session
+                        .send(request);
                 }
                 (Target::Meta, doc) if let Some(req) = request_key(&request) => {
                     if let Some(id) = doc {
@@ -822,7 +829,7 @@ impl PythiaApp {
             let params = conn.params().clone();
             let task_id = request.id;
             let task = crate::invalid_window::recompile_task(request, params);
-            conn.doc_session(id, &self.notify)
+            conn.doc_session(id, false, &self.notify)
                 .session
                 .send(DbRequest::Task { id: task_id, task });
         }
@@ -1418,10 +1425,14 @@ impl PythiaApp {
                     else {
                         continue;
                     };
+                    let autocommit = self
+                        .conns
+                        .get(&connection)
+                        .is_some_and(|c| self.autocommit_for(doc, c));
                     let Some(conn) = self.conns.get_mut(&connection) else {
                         continue;
                     };
-                    let session = conn.doc_session(doc, &self.notify);
+                    let session = conn.doc_session(doc, autocommit, &self.notify);
                     // Units with breakpoints need debug info; compile those
                     // without on the same session so it happens before the
                     // block runs.
@@ -1819,13 +1830,14 @@ impl PythiaApp {
             }
             Command::Rollback => self.end_transaction(false),
             Command::ToggleAutocommit => {
-                if let Some((id, name)) = self.focused_session()
-                    && let Some(conn) = self.conns.get_mut(&name)
-                {
-                    let s = conn.doc_session(id, &self.notify);
-                    s.autocommit = !s.autocommit;
-                    s.session.send(DbRequest::SetAutocommit(s.autocommit));
-                }
+                self.settings.autocommit = !self.settings.autocommit;
+                self.save_settings();
+                self.sync_autocommit();
+                self.log(if self.settings.autocommit {
+                    "Auto-commit on for SQL windows (not on production connections)"
+                } else {
+                    "Auto-commit off"
+                });
             }
             Command::History => self.history_dialog.toggle(),
             Command::SaveAsReport => {
@@ -2189,6 +2201,40 @@ impl PythiaApp {
         }
     }
 
+    /// Whether a window's session commits after each statement: SQL windows
+    /// with auto-commit on in the settings, except on production connections.
+    fn autocommit_for(&self, id: DocId, conn: &Connection) -> bool {
+        self.settings.autocommit
+            && !conn.profile.production
+            && self
+                .docs
+                .get(&id)
+                .is_some_and(|d| matches!(d.kind, DocKind::Sql(_)))
+    }
+
+    /// Brings the open window sessions in line with the auto-commit setting.
+    fn sync_autocommit(&mut self) {
+        let this = &*self;
+        let wanted: Vec<(String, DocId, bool)> = this
+            .conns
+            .open
+            .iter()
+            .flat_map(|(name, conn)| {
+                conn.docs
+                    .keys()
+                    .map(move |id| (name.clone(), *id, this.autocommit_for(*id, conn)))
+            })
+            .collect();
+        for (name, id, on) in wanted {
+            if let Some(s) = self.conns.get_mut(&name).and_then(|c| c.docs.get_mut(&id))
+                && s.autocommit != on
+            {
+                s.autocommit = on;
+                s.session.send(DbRequest::SetAutocommit(on));
+            }
+        }
+    }
+
     /// Whether Debug can start in the focused window, or why not.
     fn debug_state(&self) -> Result<(), &'static str> {
         let doc = self.focused.and_then(|id| self.docs.get(&id));
@@ -2505,8 +2551,10 @@ impl PythiaApp {
         let user_reports = &self.user_reports;
         let mut delete = None;
         let ctx = ui.ctx().clone();
+        let autocommit = self.settings.autocommit;
         let mut item = |ui: &mut Ui, command: Command| {
             let button = egui::Button::new(command.short_label())
+                .selected(command == Command::ToggleAutocommit && autocommit)
                 .shortcut_text(keymap.shortcut_text(&ctx, command));
             if ui.add(button).clicked() {
                 commands.push(command);
@@ -2681,7 +2729,6 @@ impl PythiaApp {
         let connected = conn.is_some_and(|c| c.is_connected());
         let session = self.focused_doc_session();
         let pending = session.is_some_and(|s| s.pending_tx);
-        let autocommit = session.is_some_and(|s| s.autocommit);
         let ctx = ui.ctx().clone();
         let tip = |c: Command| match self.keymap.shortcut(c) {
             Some(s) => format!("{} ({})", c.short_label(), ctx.format_shortcut(s)),
@@ -2901,30 +2948,6 @@ impl PythiaApp {
                     commands.push(command);
                 }
             }
-            let autocommit_state = if !is_sql {
-                Err("Only in SQL windows")
-            } else {
-                need_connection()
-            };
-            let toggle = ui
-                .add_enabled(
-                    autocommit_state.is_ok(),
-                    egui::Button::selectable(autocommit, "Auto-commit")
-                        .frame_when_inactive(false)
-                        .min_size(egui::vec2(28.0, 28.0)),
-                )
-                .on_hover_text(format!(
-                    "{}: {}",
-                    tip(Command::ToggleAutocommit),
-                    if autocommit { "on" } else { "off" }
-                ));
-            let toggle = match autocommit_state {
-                Err(reason) => toggle.on_disabled_hover_text(reason),
-                Ok(()) => toggle,
-            };
-            if toggle.clicked() {
-                commands.push(Command::ToggleAutocommit);
-            }
             ui.separator();
 
             // Tools.
@@ -3005,7 +3028,7 @@ impl PythiaApp {
                     } else {
                         ui.weak("No transaction");
                     }
-                    if session.is_some_and(|s| s.autocommit) {
+                    if focused.is_some_and(|(id, _)| self.autocommit_for(id, conn)) {
                         ui.separator();
                         ui.label("Auto-commit");
                     }

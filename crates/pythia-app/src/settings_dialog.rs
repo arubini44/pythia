@@ -417,6 +417,15 @@ fn query(ui: &mut Ui, s: &mut Settings) {
             );
         },
     );
+    row(
+        ui,
+        "Auto-commit",
+        "SQL windows commit after each statement. Never on production connections, where \
+         Commit asks first. Also Session → Toggle Auto-Commit.",
+        |ui| {
+            ui.checkbox(&mut s.autocommit, "");
+        },
+    );
 }
 
 fn invalid_objects(ui: &mut Ui, s: &mut Settings) {

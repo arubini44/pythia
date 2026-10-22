@@ -178,7 +178,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Substitution variable prompt (`&var`, `&&var`)
 - [x] Execution timing, rows affected, DBMS_OUTPUT capture
 - [x] Cancel running statement
-- [x] Auto-commit toggle, commit/rollback buttons, pending transaction indicator
+- [x] Auto-commit setting (never on production connections), commit/rollback buttons, pending transaction indicator
 - [x] Warn on closing with an open transaction
 - [x] Query history per connection (searchable, persisted)
 - [x] Fetch modes: first N rows, fetch next page, fetch all

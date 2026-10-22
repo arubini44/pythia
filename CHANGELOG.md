@@ -12,6 +12,13 @@ All notable changes to Pythia are documented here. The format follows
   disabled says why; in a program window it points to Test… for a block
   that calls the unit.
 
+### Changed
+- Auto-commit is a setting (Settings → Query, off by default) instead of a
+  toolbar toggle per window. It applies to all SQL windows, including those
+  already open, but never to production connections, where Commit asks
+  first. Session → Toggle Auto-Commit switches the setting and shows its
+  state; the status bar still says when it's on.
+
 ### Fixed
 - Oracle 11.2 to 21c (#16, tested against 11.2 XE, 18c XE, 21c XE and
   23ai Free). Queries no longer use `FETCH FIRST` or dictionary columns

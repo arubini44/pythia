@@ -2557,6 +2557,83 @@ fn toolbar_follows_the_transaction() {
     });
 }
 
+/// Auto-commit is a setting: SQL windows follow it, also those already
+/// open, and production connections never auto-commit.
+#[test]
+fn autocommit_setting() {
+    use crate::commands::Command;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let script = "begin\n  execute immediate 'drop table pythia_autocommit_t';\nexception\n  when others then null;\nend;\n/\n\
+                  create table pythia_autocommit_t (n number);\n\
+                  insert into pythia_autocommit_t values (1);\n";
+    let open = |h: &mut Ui| {
+        h.state_mut().test_open(OpenRequest::Sql {
+            connection: "pythia@FREEPDB1".into(),
+            text: script.into(),
+            run: false,
+        });
+        h.run_steps(2);
+    };
+    let run = |h: &mut Ui| {
+        h.state_mut().test_execute_focused();
+        h.run_steps(2);
+        wait_until(h, "script", |app| !app.test_focused_busy());
+    };
+
+    let mut h = harness(true);
+    h.state_mut().test_settings_mut().autocommit = true;
+    h.state_mut()
+        .test_connect(profile.clone(), password.clone());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    open(&mut h);
+    run(&mut h);
+    assert_eq!(h.state().test_transaction_state(), Err("Auto-commit is on"));
+    // Another session sees the row: it was committed.
+    let spec = std::env::var("PYTHIA_TEST_DB").unwrap();
+    let (cred, db) = spec.rsplit_once('@').unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let other = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+    let rows = || {
+        other
+            .query_row_as::<u32>("select count(*) from pythia_autocommit_t", &[])
+            .unwrap()
+    };
+    assert_eq!(rows(), 1);
+    // Switched off, the open window's session follows.
+    h.state_mut().test_command(Command::ToggleAutocommit);
+    assert!(!h.state_mut().test_settings_mut().autocommit);
+    run(&mut h);
+    assert_eq!(h.state().test_transaction_state(), Ok(()));
+    assert_eq!(rows(), 0, "the new row isn't committed");
+    h.state_mut().test_command(Command::Rollback);
+    wait_until(&mut h, "rolled back", |app| {
+        app.test_transaction_state() == Err("No transaction")
+    });
+    drop(h);
+
+    let mut h = harness(true);
+    h.state_mut().test_settings_mut().autocommit = true;
+    let production = ConnectionProfile {
+        production: true,
+        ..profile
+    };
+    h.state_mut().test_connect(production, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    open(&mut h);
+    h.state_mut().test_execute_focused();
+    h.run_steps(2);
+    h.get_by_label("Run on production").click();
+    h.run_steps(2);
+    wait_until(&mut h, "script", |app| !app.test_focused_busy());
+    assert_eq!(h.state().test_transaction_state(), Ok(()));
+    h.state_mut().test_command(Command::Rollback);
+    wait_until(&mut h, "rolled back", |app| {
+        app.test_transaction_state() == Err("No transaction")
+    });
+}
+
 /// The toolbar's Debug button is enabled only with the cursor in an
 /// anonymous block of a connected SQL window.
 #[test]

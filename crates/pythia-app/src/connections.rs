@@ -73,13 +73,24 @@ impl Connection {
             .unwrap_or_else(|| self.profile.username.to_uppercase())
     }
 
-    /// The document's session, opening it on first use.
-    pub fn doc_session(&mut self, doc: DocId, notify: &Notify) -> &mut DocSession {
+    /// The document's session, opening it on first use (with `autocommit`).
+    pub fn doc_session(
+        &mut self,
+        doc: DocId,
+        autocommit: bool,
+        notify: &Notify,
+    ) -> &mut DocSession {
         let params = &self.params;
-        self.docs.entry(doc).or_insert_with(|| DocSession {
-            session: Session::connect(params.clone(), notify.callback()),
-            pending_tx: false,
-            autocommit: false,
+        self.docs.entry(doc).or_insert_with(|| {
+            let session = Session::connect(params.clone(), notify.callback());
+            if autocommit {
+                session.send(DbRequest::SetAutocommit(true));
+            }
+            DocSession {
+                session,
+                pending_tx: false,
+                autocommit,
+            }
         })
     }
 
