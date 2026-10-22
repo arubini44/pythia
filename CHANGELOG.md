@@ -83,6 +83,9 @@ All notable changes to Pythia are documented here. The format follows
   Query. A window without an open connection can still pick one.
 
 ### Fixed
+- A window learned whether a transaction is open, and got the statement's
+  DBMS_OUTPUT, only after the statement's result. For a moment after an
+  INSERT it showed no transaction (#44).
 - Closing a SQL window with an uncommitted transaction (its tab's ×,
   Close Window, Close Other Windows) rolled the transaction back without
   asking. It now asks: Commit and close, Roll back and close, or Cancel

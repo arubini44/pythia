@@ -107,13 +107,17 @@ fn query_fetch_more_and_output() {
         max_rows: 10,
         binds: vec![],
     });
-    assert!(matches!(h.next_result(), DbEvent::Executed { id: 2, .. }));
+    // The output comes before the statement's result.
+    let mut output = Vec::new();
     loop {
-        if let DbEvent::Output(lines) = h.next() {
-            assert_eq!(lines, ["hello"]);
-            break;
+        match h.next() {
+            DbEvent::Output(lines) => output.extend(lines),
+            DbEvent::Transaction { .. } => {}
+            DbEvent::Executed { id: 2, .. } => break,
+            other => panic!("unexpected {other:?}"),
         }
     }
+    assert_eq!(output, ["hello"]);
 }
 
 #[test]
@@ -151,11 +155,12 @@ fn transaction_state() {
         max_rows: 1,
         binds: vec![],
     });
-    let DbEvent::Executed { summary, .. } = h.next_result() else {
+    // The transaction state comes before the statement's result.
+    assert!(matches!(h.next(), DbEvent::Transaction { pending: true }));
+    let DbEvent::Executed { summary, .. } = h.next() else {
         panic!("expected Executed")
     };
     assert_eq!(summary.rows_affected, Some(1));
-    assert!(matches!(h.next(), DbEvent::Transaction { pending: true }));
     h.session.send(DbRequest::Rollback);
     assert!(matches!(h.next(), DbEvent::Notice(_)));
     assert!(matches!(h.next(), DbEvent::Transaction { pending: false }));

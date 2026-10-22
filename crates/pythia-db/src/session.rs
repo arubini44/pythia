@@ -174,9 +174,10 @@ impl Worker {
                         ok = result.is_ok(),
                         "task done"
                     );
-                    worker.events.send(DbEvent::TaskDone { id, result });
-                    // Tasks (data edits, debug runs, …) can open a transaction.
+                    // Tasks (data edits, debug runs, …) can open a
+                    // transaction; its state arrives before the result.
                     worker.report_transaction();
+                    worker.events.send(DbEvent::TaskDone { id, result });
                 }
                 DbRequest::Disconnect => break,
             }
@@ -207,17 +208,24 @@ impl Worker {
     fn execute(&mut self, id: u64, sql: &str, max_rows: usize, binds: &[(String, Option<String>)]) {
         self.open_query = None;
         let started = Instant::now();
-        let result = self.execute_inner(id, sql, max_rows, binds, started);
-        if let Err(error) = result {
-            self.events.send(DbEvent::Failed {
+        let done = match self.execute_inner(id, sql, max_rows, binds, started) {
+            Ok(done) => done,
+            Err(error) => Some(DbEvent::Failed {
                 id,
                 error,
                 elapsed: started.elapsed(),
-            });
-        }
+            }),
+        };
+        // Output and the transaction state come first: the event that ends
+        // the statement finds them up to date.
         self.after_statement();
+        if let Some(done) = done {
+            self.events.send(done);
+        }
     }
 
+    /// Runs a statement; returns the event that ends it (rows of a query,
+    /// or what was executed).
     fn execute_inner(
         &mut self,
         id: u64,
@@ -225,7 +233,7 @@ impl Worker {
         max_rows: usize,
         binds: &[(String, Option<String>)],
         started: Instant,
-    ) -> Result<(), DbError> {
+    ) -> Result<Option<DbEvent>, DbError> {
         let named: Vec<(&str, &dyn crate::oracle::sql_type::ToSql)> = binds
             .iter()
             .map(|(name, value)| (name.as_str(), value as &dyn crate::oracle::sql_type::ToSql))
@@ -241,8 +249,7 @@ impl Worker {
                 .collect();
             self.events.send(DbEvent::QueryStarted { id, columns });
             self.open_query = Some(OpenQuery { id, rows });
-            self.fetch(max_rows, started);
-            return Ok(());
+            return Ok(self.fetch(max_rows, started));
         }
 
         stmt.execute_named(&named)?;
@@ -260,12 +267,11 @@ impl Worker {
             rows_affected,
             compiled,
         };
-        self.events.send(DbEvent::Executed {
+        Ok(Some(DbEvent::Executed {
             id,
             summary,
             elapsed: started.elapsed(),
-        });
-        Ok(())
+        }))
     }
 
     /// After `CREATE` of a stored unit, reads its compile errors.
@@ -287,16 +293,17 @@ impl Worker {
     }
 
     fn fetch_more(&mut self, id: u64, max_rows: usize) {
-        if self.open_query.as_ref().is_some_and(|q| q.id == id) {
-            self.fetch(max_rows, Instant::now());
+        if self.open_query.as_ref().is_some_and(|q| q.id == id)
+            && let Some(rows) = self.fetch(max_rows, Instant::now())
+        {
+            self.events.send(rows);
         }
     }
 
-    /// Fetches up to `max_rows` from the open query and reports them.
-    fn fetch(&mut self, max_rows: usize, started: Instant) {
-        let Some(query) = self.open_query.as_mut() else {
-            return;
-        };
+    /// Fetches up to `max_rows` from the open query: the rows, or the
+    /// error.
+    fn fetch(&mut self, max_rows: usize, started: Instant) -> Option<DbEvent> {
+        let query = self.open_query.as_mut()?;
         let id = query.id;
         let mut rows = Vec::with_capacity(max_rows.min(10_000));
         let mut more = true;
@@ -305,12 +312,11 @@ impl Worker {
                 Some(Ok(row)) => rows.push(row.sql_values().iter().map(cell).collect()),
                 Some(Err(e)) => {
                     self.open_query = None;
-                    self.events.send(DbEvent::Failed {
+                    return Some(DbEvent::Failed {
                         id,
                         error: e.into(),
                         elapsed: started.elapsed(),
                     });
-                    return;
                 }
                 None => {
                     more = false;
@@ -321,12 +327,12 @@ impl Worker {
         if !more {
             self.open_query = None;
         }
-        self.events.send(DbEvent::Rows {
+        Some(DbEvent::Rows {
             id,
             rows,
             more,
             elapsed: started.elapsed(),
-        });
+        })
     }
 
     fn end_transaction(&mut self, commit: bool) {
