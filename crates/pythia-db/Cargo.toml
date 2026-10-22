@@ -10,14 +10,24 @@ license.workspace = true
 thin = ["dep:oracledb"]
 
 [dependencies]
+futures-util.workspace = true
 mysql.workspace = true
 oracle.workspace = true
 oracledb = { workspace = true, optional = true }
 pythia-config.workspace = true
 pythia-plsql.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tiberius.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 oracledb.workspace = true

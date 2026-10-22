@@ -12,6 +12,10 @@ All notable changes to Pythia are documented here. The format follows
   work; tools that rely on Oracle's dictionary or PL/SQL are hidden on
   MySQL connections. `pythia_db::Dialect` says what a connection's database
   supports, and `DbRequest::Run` runs tool code on any database.
+- PostgreSQL and SQL Server connections (experimental): *Type: PostgreSQL*
+  and *Type: SQL Server*, with the same tools as MySQL. Scripts split the
+  database's way: dollar-quoted routine bodies and `::` casts on
+  PostgreSQL, `GO` batches and `BEGIN … END` blocks on SQL Server.
 - Toolbar: a Debug button next to Execute (Ctrl+F9). It is enabled only
   with the cursor in an anonymous block of a connected SQL window, and when
   disabled says why; in a program window it points to Test… for a block

@@ -744,7 +744,7 @@ impl ProgramWindow {
             ));
             part.editor
                 .format_as_typed(&out, cx.settings.format_auto, &cx.settings.format);
-            part.assist.background(&mut part.editor, ui);
+            part.assist.background(&mut part.editor, ui, true);
             if let Some(line) = out.gutter_clicked {
                 effects.breakpoints.push((unit.clone(), line as u32));
             }

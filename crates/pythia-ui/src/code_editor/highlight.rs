@@ -26,6 +26,34 @@ pub enum LineState {
     Str,
     /// Inside `q'<open>...<close>'`.
     QStr { open: char, close: char },
+    /// Inside PostgreSQL's `$tag$...$tag$`.
+    Dollar(DollarTag),
+}
+
+/// The tag of a dollar-quoted string, `$$` or `$body$` (kept in place so
+/// line states stay `Copy`; longer tags are cut, which only matters to
+/// strings that contain a longer tag's start).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DollarTag {
+    len: u8,
+    bytes: [u8; 30],
+}
+
+impl DollarTag {
+    fn new(tag: &str) -> Self {
+        let len = tag.len().min(30);
+        let mut bytes = [0; 30];
+        bytes[..len].copy_from_slice(&tag.as_bytes()[..len]);
+        Self {
+            len: len as u8,
+            bytes,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        // Tags are ASCII (letters, digits, `_`).
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
 }
 
 /// A token of one line; `range` is a byte range into the line text.
@@ -37,8 +65,27 @@ pub struct LineToken {
 
 /// Lexes one line (without line break) that starts in `state`.
 pub fn lex_line(line: &str, state: LineState) -> (Vec<LineToken>, LineState) {
+    if let LineState::Dollar(tag) = state {
+        // A routine's body: code up to the closing tag.
+        let close = format!("${}$", tag.as_str());
+        let Some(at) = line.find(&close) else {
+            return (code(line, 0), state);
+        };
+        let mut tokens = code(&line[..at], 0);
+        let after = at + close.len();
+        tokens.push(LineToken {
+            range: at..after,
+            kind: TokenKind::String,
+        });
+        let (rest, end) = lex_line(&line[after..], LineState::Normal);
+        tokens.extend(rest.into_iter().map(|t| LineToken {
+            range: t.range.start + after..t.range.end + after,
+            kind: t.kind,
+        }));
+        return (tokens, end);
+    }
     let prefix: String = match state {
-        LineState::Normal => String::new(),
+        LineState::Normal | LineState::Dollar(_) => String::new(),
         LineState::Comment => "/*".into(),
         LineState::Hint => "/*+".into(),
         LineState::Str => "'".into(),
@@ -53,15 +100,59 @@ pub fn lex_line(line: &str, state: LineState) -> (Vec<LineToken>, LineState) {
     let mut tokens: Vec<LineToken> = raw
         .into_iter()
         .filter(|t| t.span.end > p)
-        .map(|t| LineToken {
-            range: t.span.start.saturating_sub(p)..t.span.end - p,
-            kind: t.kind,
+        .flat_map(|t| {
+            let token = LineToken {
+                range: t.span.start.saturating_sub(p)..t.span.end - p,
+                kind: t.kind,
+            };
+            if t.kind == TokenKind::String && src[t.span.clone()].starts_with('$') {
+                dollar_parts(line, token)
+            } else {
+                vec![token]
+            }
         })
         .collect();
     if state == LineState::Normal {
         mark_sqlplus(line, &mut tokens);
     }
     (tokens, end_state)
+}
+
+/// Text lexed as code, its tokens moved by `at`.
+fn code(text: &str, at: usize) -> Vec<LineToken> {
+    tokenize(text)
+        .into_iter()
+        .map(|t| LineToken {
+            range: t.span.start + at..t.span.end + at,
+            kind: t.kind,
+        })
+        .collect()
+}
+
+/// A dollar-quoted string as its tags (strings) around its body, shown as
+/// code: it is usually a routine's.
+fn dollar_parts(line: &str, token: LineToken) -> Vec<LineToken> {
+    let text = &line[token.range.clone()];
+    let open = text[1..].find('$').map_or(text.len(), |i| i + 2);
+    let closed = text.len() >= 2 * open && text.ends_with(&text[..open]);
+    let body_end = if closed {
+        text.len() - open
+    } else {
+        text.len()
+    };
+    let start = token.range.start;
+    let mut parts = vec![LineToken {
+        range: start..start + open,
+        kind: TokenKind::String,
+    }];
+    parts.extend(code(&text[open..body_end], start + open));
+    if closed {
+        parts.push(LineToken {
+            range: start + body_end..token.range.end,
+            kind: TokenKind::String,
+        });
+    }
+    parts
 }
 
 /// SQL*Plus commands that start a line (in column 0).
@@ -242,6 +333,15 @@ fn end_state(text: &str, kind: TokenKind) -> LineState {
     match kind {
         TokenKind::BlockComment if !(text.len() >= 4 && text.ends_with("*/")) => LineState::Comment,
         TokenKind::Hint if !(text.len() >= 5 && text.ends_with("*/")) => LineState::Hint,
+        TokenKind::String if text.starts_with('$') => {
+            let tag = &text[1..text[1..].find('$').map_or(1, |i| i + 1)];
+            let open = format!("${tag}$");
+            if text.len() >= 2 * open.len() && text.ends_with(&open) {
+                LineState::Normal
+            } else {
+                LineState::Dollar(DollarTag::new(tag))
+            }
+        }
         TokenKind::String if !string_terminated(text) => LineState::Str,
         TokenKind::QString => {
             let body = text.trim_start_matches(['n', 'N']);
@@ -400,6 +500,49 @@ mod tests {
         assert_eq!(kinds("/*+ hint", LineState::Normal).1, LineState::Hint);
         assert_eq!(kinds("", LineState::Comment).1, LineState::Comment);
         assert_eq!(kinds("-- '/*", LineState::Normal).1, LineState::Normal);
+
+        // PostgreSQL's dollar quotes, with and without a tag.
+        let body = LineState::Dollar(DollarTag::new(""));
+        assert_eq!(kinds("language sql as $$", LineState::Normal).1, body);
+        assert_eq!(kinds("  select 'x';", body).1, body);
+        assert_eq!(
+            kinds("$$; select 1", body),
+            (
+                vec![
+                    (TokenKind::String, "$$"),
+                    (TokenKind::Semicolon, ";"),
+                    (TokenKind::Keyword, "select"),
+                    (TokenKind::Number, "1")
+                ],
+                LineState::Normal
+            )
+        );
+        let tagged = LineState::Dollar(DollarTag::new("body"));
+        assert_eq!(kinds("do $body$ begin", LineState::Normal).1, tagged);
+        assert_eq!(kinds("x := $$;", tagged).1, tagged);
+        assert_eq!(kinds("end $body$;", tagged).1, LineState::Normal);
+        assert_eq!(kinds("$$ $$", LineState::Normal).1, LineState::Normal);
+        // The body between the tags is shown as code.
+        assert_eq!(
+            kinds("as $$ select 1 $$;", LineState::Normal).0,
+            vec![
+                (TokenKind::Keyword, "as"),
+                (TokenKind::String, "$$"),
+                (TokenKind::Keyword, "select"),
+                (TokenKind::Number, "1"),
+                (TokenKind::String, "$$"),
+                (TokenKind::Semicolon, ";"),
+            ]
+        );
+        assert_eq!(kinds("begin", body).0, vec![(TokenKind::Keyword, "begin")]);
+        // Oracle's directives are no strings.
+        assert_eq!(
+            kinds("$$plsql_unit", LineState::Normal),
+            (
+                vec![(TokenKind::Error, "$$"), (TokenKind::Ident, "plsql_unit")],
+                LineState::Normal
+            )
+        );
     }
 
     #[test]

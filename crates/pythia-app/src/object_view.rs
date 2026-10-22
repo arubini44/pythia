@@ -252,7 +252,7 @@ impl ObjectView {
                     } else if let Some(Loaded::Ready(ddl)) = &self.state.ddl
                         && ui
                             .button("Edit")
-                            .on_hover_text("Open a script that drops and creates it again")
+                            .on_hover_text("Open a script that creates it again")
                             .clicked()
                     {
                         effects.open.push(OpenRequest::Sql {

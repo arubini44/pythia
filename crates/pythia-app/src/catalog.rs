@@ -55,60 +55,172 @@ pub fn request(id: u64, request: CatalogRequest, dialect: Dialect) -> DbRequest 
             id,
             task: task(request),
         },
-        DbKind::MySql => DbRequest::Run {
+        DbKind::MySql | DbKind::Postgres | DbKind::SqlServer => DbRequest::Run {
             id,
             task: Box::new(move |client| {
-                let answer = mysql::fetch(client, request)?;
+                let answer = dictionary::fetch(client, request)?;
                 Ok(Box::new(answer) as Box<dyn std::any::Any + Send>)
             }),
         },
     }
 }
 
-/// MySQL's dictionary. Code assistance asks with uppercase names (Oracle's
-/// rule for unquoted ones); MySQL keeps their case, so names are compared
-/// without it and answered as stored.
-mod mysql {
-    use pythia_db::{Cell, Client, DbError};
+/// The dictionaries of MySQL, PostgreSQL and SQL Server. Code assistance
+/// asks with uppercase names (Oracle's rule for unquoted ones); these
+/// databases keep their case (PostgreSQL folds unquoted names to
+/// lowercase), so names are compared without it and answered as stored.
+mod dictionary {
+    use pythia_db::{Cell, Client, DbError, DbKind};
     use pythia_lsp_core::{CatalogColumn, CatalogObject, CatalogRequest};
 
     use super::Answer;
 
-    /// Tables, views and routines as `(owner, name, type)`.
-    const OBJECTS: &str = "select table_schema as owner, table_name as name, \
-                                  if(table_type = 'VIEW', 'VIEW', 'TABLE') as type \
-                             from information_schema.tables \
-                           union all \
-                           select routine_schema, routine_name, routine_type \
-                             from information_schema.routines";
+    /// A database's queries; parameters are written by [`Sql::param`].
+    struct Sql {
+        kind: DbKind,
+        schemas: &'static str,
+        /// The schema unqualified names are looked up in.
+        current: &'static str,
+        /// Tables, views and routines as `(owner, name, type)`.
+        objects: &'static str,
+        /// What makes a query return one row.
+        first_row: &'static str,
+        /// `(name, type, nullable, comment)` of the table of schema `1` and
+        /// name `2`.
+        columns: &'static str,
+    }
+
+    impl Sql {
+        fn of(kind: DbKind) -> &'static Sql {
+            match kind {
+                DbKind::Postgres => &POSTGRES,
+                DbKind::SqlServer => &SQLSERVER,
+                _ => &MYSQL,
+            }
+        }
+
+        /// Parameter `n` (from 1) as the database writes it.
+        fn param(&self, n: usize) -> String {
+            match self.kind {
+                DbKind::Postgres => format!("${n}"),
+                DbKind::SqlServer => format!("@P{n}"),
+                _ => "?".into(),
+            }
+        }
+    }
+
+    const MYSQL: Sql = Sql {
+        kind: DbKind::MySql,
+        schemas: "select schema_name from information_schema.schemata order by 1",
+        current: "select database()",
+        objects: "select table_schema as owner, table_name as name, \
+                         if(table_type = 'VIEW', 'VIEW', 'TABLE') as type \
+                    from information_schema.tables \
+                  union all \
+                  select routine_schema, routine_name, routine_type \
+                    from information_schema.routines",
+        first_row: "limit 1",
+        columns: "select column_name, column_type, is_nullable, nullif(column_comment, '') \
+                    from information_schema.columns \
+                   where lower(table_schema) = lower(?) and lower(table_name) = lower(?) \
+                   order by ordinal_position",
+    };
+
+    const POSTGRES: Sql = Sql {
+        kind: DbKind::Postgres,
+        schemas: "select nspname from pg_namespace \
+                   where nspname not like 'pg\\_toast%' and nspname not like 'pg\\_temp\\_%' \
+                   order by 1",
+        current: "select current_schema()",
+        objects: "select n.nspname as owner, c.relname as name, \
+                         case c.relkind when 'v' then 'VIEW' when 'm' then 'MATERIALIZED VIEW' \
+                              else 'TABLE' end as type \
+                    from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+                   where c.relkind in ('r', 'p', 'f', 'v', 'm') and not c.relispartition \
+                  union \
+                  select n.nspname, p.proname, \
+                         case p.prokind when 'p' then 'PROCEDURE' else 'FUNCTION' end \
+                    from pg_proc p join pg_namespace n on n.oid = p.pronamespace \
+                   where p.prokind in ('f', 'p')",
+        first_row: "limit 1",
+        // The table whose name matches best: exactly, then as folded.
+        columns: "select a.attname, format_type(a.atttypid, a.atttypmod), \
+                         case when a.attnotnull then 'NO' else 'YES' end, \
+                         col_description(a.attrelid, a.attnum) \
+                    from pg_attribute a \
+                   where a.attnum > 0 and not a.attisdropped \
+                     and a.attrelid = (select c.oid from pg_class c \
+                                         join pg_namespace n on n.oid = c.relnamespace \
+                                        where lower(n.nspname) = lower($1) \
+                                          and lower(c.relname) = lower($2) \
+                                        order by (c.relname = $2) desc, \
+                                                 (c.relname = lower($2)) desc \
+                                        limit 1) \
+                   order by a.attnum",
+    };
+
+    const SQLSERVER: Sql = Sql {
+        kind: DbKind::SqlServer,
+        schemas: "select name from sys.schemas where schema_id < 16384 or schema_id > 16399 \
+                   order by 1",
+        current: "select schema_name()",
+        objects: "select s.name as owner, o.name as name, \
+                         case when o.type = 'U' then 'TABLE' when o.type = 'V' then 'VIEW' \
+                              when o.type in ('P', 'PC') then 'PROCEDURE' \
+                              else 'FUNCTION' end as type \
+                    from sys.objects o join sys.schemas s on s.schema_id = o.schema_id \
+                   where o.type in ('U', 'V', 'P', 'PC', 'FN', 'IF', 'TF', 'FS', 'FT') \
+                     and o.is_ms_shipped = 0",
+        first_row: "offset 0 rows fetch next 1 rows only",
+        columns: "select column_name, \
+                         data_type + case when character_maximum_length = -1 then '(max)' \
+                              when character_maximum_length is not null \
+                                then '(' + cast(character_maximum_length as varchar(10)) + ')' \
+                              when data_type in ('decimal', 'numeric') \
+                                then '(' + cast(numeric_precision as varchar(10)) + ',' \
+                                     + cast(numeric_scale as varchar(10)) + ')' \
+                              else '' end, \
+                         is_nullable, null \
+                    from information_schema.columns \
+                   where table_schema = @P1 and table_name = @P2 \
+                   order by ordinal_position",
+    };
 
     pub(super) fn fetch(
         client: &mut dyn Client,
         request: CatalogRequest,
     ) -> Result<Answer, DbError> {
+        let sql = Sql::of(client.dialect().kind());
         Ok(match request {
             CatalogRequest::Schemas => {
-                let rows = client.query(
-                    "select schema_name from information_schema.schemata order by 1",
-                    &[],
-                )?;
+                let rows = client.query(sql.schemas, &[])?;
                 Answer::Schemas(rows.into_iter().filter_map(first).collect())
             }
             CatalogRequest::Objects { schema } => {
-                let owner = owner(client, schema.as_deref())?;
+                let owner = owner(client, sql, schema.as_deref())?;
                 let rows = client.query(
-                    &format!("select * from ({OBJECTS}) o where lower(owner) = lower(?)"),
+                    &format!(
+                        "select * from ({}) o where lower(owner) = lower({})",
+                        sql.objects,
+                        sql.param(1)
+                    ),
                     &[&owner],
                 )?;
                 Answer::Objects(schema, rows.into_iter().filter_map(object).collect())
             }
             CatalogRequest::Resolve { schema, name } => {
-                let owner = owner(client, schema.as_deref())?;
+                let owner = owner(client, sql, schema.as_deref())?;
                 let rows = client.query(
                     &format!(
-                        "select * from ({OBJECTS}) o \
-                          where lower(owner) = lower(?) and lower(name) = lower(?) \
-                          order by name = ? desc, type = 'TABLE' desc limit 1"
+                        "select * from ({}) o \
+                          where lower(owner) = lower({}) and lower(name) = lower({}) \
+                          order by case when name = {} then 0 else 1 end, \
+                                   case when type = 'TABLE' then 0 else 1 end {}",
+                        sql.objects,
+                        sql.param(1),
+                        sql.param(2),
+                        sql.param(3),
+                        sql.first_row
                     ),
                     &[&owner, &name, &name],
                 )?;
@@ -116,13 +228,7 @@ mod mysql {
                 Answer::Resolved(schema, name, object)
             }
             CatalogRequest::Columns { owner, name } => {
-                let rows = client.query(
-                    "select column_name, column_type, is_nullable, nullif(column_comment, '') \
-                       from information_schema.columns \
-                      where lower(table_schema) = lower(?) and lower(table_name) = lower(?) \
-                      order by ordinal_position",
-                    &[&owner, &name],
-                )?;
+                let rows = client.query(sql.columns, &[&owner, &name])?;
                 let columns = rows
                     .into_iter()
                     .filter_map(|mut r| {
@@ -142,12 +248,12 @@ mod mysql {
         })
     }
 
-    /// The schema asked for, or the current database.
-    fn owner(client: &mut dyn Client, schema: Option<&str>) -> Result<String, DbError> {
+    /// The schema asked for, or the current one (MySQL's database).
+    fn owner(client: &mut dyn Client, sql: &Sql, schema: Option<&str>) -> Result<String, DbError> {
         if let Some(schema) = schema {
             return Ok(schema.to_owned());
         }
-        let rows = client.query("select database()", &[])?;
+        let rows = client.query(sql.current, &[])?;
         Ok(rows.into_iter().find_map(first).unwrap_or_default())
     }
 
@@ -535,21 +641,23 @@ mod tests {
     }
 }
 
-/// Completion with MySQL's dictionary (skipped unless `PYTHIA_TEST_MYSQL`
-/// is set to `user/password@host:port/database`).
+/// Completion with the dictionaries of MySQL, PostgreSQL and SQL Server
+/// (each skipped unless `PYTHIA_TEST_MYSQL`, `PYTHIA_TEST_POSTGRES` or
+/// `PYTHIA_TEST_MSSQL` is set to `user/password@host:port/database`).
 #[cfg(test)]
-mod mysql_live {
+mod dictionary_live {
     use std::sync::mpsc;
     use std::time::Duration;
 
     use pythia_db::{ConnectParams, DbEvent, Session};
-    use pythia_lsp_core::{Analysis, CatalogCache, CatalogRequest};
+    use pythia_lsp_core::{Analysis, CatalogCache, CatalogRequest, NameStyle};
 
     use super::*;
 
     struct Live {
         session: Session,
         wake: mpsc::Receiver<()>,
+        dialect: Dialect,
     }
 
     impl Live {
@@ -565,8 +673,7 @@ mod mysql_live {
         }
 
         fn answer(&mut self, request: CatalogRequest) -> Answer {
-            self.session
-                .send(super::request(7, request, Dialect::MYSQL));
+            self.session.send(super::request(7, request, self.dialect));
             loop {
                 if let DbEvent::TaskDone { result, .. } = self.next() {
                     return *result
@@ -594,17 +701,21 @@ mod mysql_live {
         }
     }
 
-    #[test]
-    fn columns_after_an_alias() {
-        let Ok(spec) = std::env::var("PYTHIA_TEST_MYSQL") else {
-            return;
-        };
+    /// Completes the columns of `cat_orders` after its alias, created by
+    /// `create` on the database of `env`; returns `(label, inserted text)`.
+    fn complete_columns(
+        env: &str,
+        kind: DbKind,
+        names: NameStyle,
+        create: &str,
+    ) -> Option<Vec<(String, String)>> {
+        let spec = std::env::var(env).ok()?;
         let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
         let (username, password) = credentials.split_once('/').unwrap();
         let (tx, wake) = mpsc::channel();
         let session = Session::connect(
             ConnectParams {
-                kind: DbKind::MySql,
+                kind,
                 username: username.into(),
                 password: password.into(),
                 connect_string: connect_string.into(),
@@ -615,16 +726,20 @@ mod mysql_live {
                 let _ = tx.send(());
             },
         );
-        let mut live = Live { session, wake };
+        let mut live = Live {
+            session,
+            wake,
+            dialect: kind.into(),
+        };
         let DbEvent::Connected(server) = live.next() else {
             panic!("not connected")
         };
         live.run("drop table if exists cat_orders");
-        live.run("create table cat_orders (id int primary key, Customer varchar(30), `order` int)");
+        live.run(create);
 
-        let mut cache = CatalogCache::new(server.current_schema)
-            .with_names(pythia_lsp_core::NameStyle::AsStored);
-        let src = "select o.\n  from cat_orders o";
+        let mut cache = CatalogCache::new(server.current_schema).with_names(names);
+        // Code assistance looks names up in uppercase.
+        let src = "select o.\n  from CAT_ORDERS o";
         let analysis = Analysis::new(src);
         let mut items = Vec::new();
         for _ in 0..8 {
@@ -637,14 +752,63 @@ mod mysql_live {
                 live.answer(request).apply(&mut cache);
             }
         }
-        // Names as stored; backticks only where MySQL needs them.
-        let inserted: Vec<(&str, &str)> = items
-            .iter()
-            .map(|i| (i.label.as_str(), i.insert_text.as_str()))
-            .collect();
-        assert!(inserted.contains(&("Customer", "Customer")), "{inserted:?}");
-        assert!(inserted.contains(&("order", "`order`")), "{inserted:?}");
         live.run("drop table cat_orders");
+        Some(
+            items
+                .into_iter()
+                .map(|i| (i.label, i.insert_text))
+                .collect(),
+        )
+    }
+
+    fn has(items: &[(String, String)], label: &str, text: &str) -> bool {
+        items.iter().any(|(l, t)| l == label && t == text)
+    }
+
+    #[test]
+    fn mysql_columns_after_an_alias() {
+        let Some(items) = complete_columns(
+            "PYTHIA_TEST_MYSQL",
+            DbKind::MySql,
+            NameStyle::Backticks,
+            "create table cat_orders (id int primary key, Customer varchar(30), `order` int)",
+        ) else {
+            return;
+        };
+        // Names as stored; backticks only where MySQL needs them.
+        assert!(has(&items, "Customer", "Customer"), "{items:?}");
+        assert!(has(&items, "order", "`order`"), "{items:?}");
+    }
+
+    #[test]
+    fn postgres_columns_after_an_alias() {
+        let Some(items) = complete_columns(
+            "PYTHIA_TEST_POSTGRES",
+            DbKind::Postgres,
+            NameStyle::Lower,
+            "create table cat_orders (id int primary key, \"Customer\" varchar(30), \"order\" int)",
+        ) else {
+            return;
+        };
+        // Lowercase names as typed; quotes where PostgreSQL needs them.
+        assert!(has(&items, "id", "id"), "{items:?}");
+        assert!(has(&items, "\"Customer\"", "\"Customer\""), "{items:?}");
+        assert!(has(&items, "\"order\"", "\"order\""), "{items:?}");
+    }
+
+    #[test]
+    fn sqlserver_columns_after_an_alias() {
+        let Some(items) = complete_columns(
+            "PYTHIA_TEST_MSSQL",
+            DbKind::SqlServer,
+            NameStyle::Brackets,
+            "create table cat_orders (id int primary key, Customer varchar(30), [order] int)",
+        ) else {
+            return;
+        };
+        // Names as stored; brackets only where SQL Server needs them.
+        assert!(has(&items, "Customer", "Customer"), "{items:?}");
+        assert!(has(&items, "order", "[order]"), "{items:?}");
     }
 }
 

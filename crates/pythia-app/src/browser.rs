@@ -1448,6 +1448,19 @@ impl Browser {
 /// and a link's name can't be qualified: its dots belong to the name.
 fn drop_sql(dialect: Dialect, o: &ObjectRef) -> String {
     let kind = o.object_type.dictionary_name().to_lowercase();
+    if dialect == Dialect::POSTGRES && o.object_type == ObjectType::Trigger {
+        // PostgreSQL's triggers are named per table.
+        return format!(
+            "do $$\ndeclare\n  t text;\nbegin\n  \
+             for t in select c.oid::regclass from pg_trigger g join pg_class c on c.oid = g.tgrelid \
+             join pg_namespace n on n.oid = c.relnamespace \
+             where n.nspname = {} and g.tgname = {} loop\n    \
+             execute format('drop trigger %I on %s', {}, t);\n  end loop;\nend\n$$",
+            pg_literal(&o.owner),
+            pg_literal(&o.name),
+            pg_literal(&o.name)
+        );
+    }
     if dialect != Dialect::ORACLE {
         return format!("drop {kind} {}", dialect.qualified(&o.owner, &o.name));
     }
@@ -1458,16 +1471,54 @@ fn drop_sql(dialect: Dialect, o: &ObjectRef) -> String {
     }
 }
 
-/// A script that replaces a stored object with its (edited) DDL, for
-/// databases without `CREATE OR REPLACE` for routines: drop, then create,
-/// ended by `/` like a PL/SQL unit so the body's `;` stay in it.
+/// A script that replaces a stored object with its (edited) DDL. MySQL has
+/// no `CREATE OR REPLACE` for routines: drop, then create, ended by `/` like
+/// a PL/SQL unit so the body's `;` stay in it. PostgreSQL's routines and
+/// views come with `CREATE OR REPLACE`, its triggers get it; SQL Server's
+/// get `CREATE OR ALTER`.
 pub fn replace_script(dialect: Dialect, o: &ObjectRef, ddl: &str) -> String {
-    format!(
-        "drop {} if exists {};\n\n{}\n/\n",
-        o.object_type.dictionary_name().to_lowercase(),
-        dialect.qualified(&o.owner, &o.name),
-        ddl.trim_end()
-    )
+    let ddl = ddl.trim_end();
+    let qualified = dialect.qualified(&o.owner, &o.name);
+    match (dialect.kind(), o.object_type) {
+        (pythia_db::DbKind::Postgres, ObjectType::Trigger) => {
+            format!("{}\n", create_or(ddl, "or replace", "TRIGGER"))
+        }
+        (pythia_db::DbKind::Postgres, ObjectType::MaterializedView) => {
+            format!("drop materialized view if exists {qualified};\n\n{ddl}\n")
+        }
+        (pythia_db::DbKind::Postgres, _) => format!("{ddl}\n"),
+        (pythia_db::DbKind::SqlServer, _) => format!("{}\n", create_or(ddl, "or alter", "")),
+        _ => format!(
+            "drop {} if exists {qualified};\n\n{ddl}\n/\n",
+            o.object_type.dictionary_name().to_lowercase(),
+        ),
+    }
+}
+
+/// `ddl` with `words` after its leading `CREATE` (when followed by `next`,
+/// if given), unless it has them already.
+fn create_or(ddl: &str, words: &str, next: &str) -> String {
+    let tokens = pythia_plsql::tokenize(ddl);
+    let mut significant = tokens.iter().filter(|t| !t.kind.is_trivia());
+    match (significant.next(), significant.next()) {
+        (Some(create), Some(after))
+            if ddl[create.span.clone()].eq_ignore_ascii_case("create")
+                && !ddl[after.span.clone()].eq_ignore_ascii_case("or")
+                && (next.is_empty() || ddl[after.span.clone()].eq_ignore_ascii_case(next)) =>
+        {
+            format!(
+                "{} {words}{}",
+                &ddl[..create.span.end],
+                &ddl[create.span.end..]
+            )
+        }
+        _ => ddl.to_owned(),
+    }
+}
+
+/// A PostgreSQL string literal.
+fn pg_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Entries of an object's context menu besides those for its type.
@@ -1806,6 +1857,57 @@ mod tests {
         let statements = pythia_plsql::split_statements(&script);
         assert_eq!(statements.len(), 2, "{statements:?}");
         assert!(statements[1].text(&script).ends_with("end"));
+    }
+
+    #[test]
+    fn postgres_and_sqlserver_statements() {
+        let o = |name: &str, object_type| ObjectRef {
+            owner: "app".into(),
+            name: name.into(),
+            object_type,
+        };
+        let function = "CREATE OR REPLACE FUNCTION app.f()\n RETURNS integer\n LANGUAGE sql\nAS $function$select 1; $function$\n;";
+        assert_eq!(
+            replace_script(Dialect::POSTGRES, &o("f", ObjectType::Function), function),
+            format!("{function}\n")
+        );
+        assert_eq!(
+            replace_script(
+                Dialect::POSTGRES,
+                &o("t", ObjectType::Trigger),
+                "CREATE TRIGGER t BEFORE INSERT ON app.x FOR EACH ROW EXECUTE FUNCTION app.f();"
+            ),
+            "CREATE or replace TRIGGER t BEFORE INSERT ON app.x FOR EACH ROW EXECUTE FUNCTION app.f();\n"
+        );
+        let drop = drop_sql(Dialect::POSTGRES, &o("t", ObjectType::Trigger));
+        assert!(drop.contains("g.tgname = 't'"), "{drop}");
+        assert_eq!(
+            pythia_plsql::split_statements_in(&drop, pythia_plsql::Syntax::Postgres).len(),
+            1
+        );
+        assert_eq!(
+            drop_sql(Dialect::POSTGRES, &o("Emp", ObjectType::Table)),
+            "drop table app.\"Emp\""
+        );
+
+        let procedure = "-- adds\ncreate procedure dbo.p as\nbegin\n  select 1;\nend\nGO\n";
+        let script = replace_script(
+            Dialect::SQLSERVER,
+            &o("p", ObjectType::Procedure),
+            procedure,
+        );
+        assert_eq!(
+            script,
+            "-- adds\ncreate or alter procedure dbo.p as\nbegin\n  select 1;\nend\nGO\n"
+        );
+        assert_eq!(
+            pythia_plsql::split_statements_in(&script, pythia_plsql::Syntax::TSql).len(),
+            1
+        );
+        assert_eq!(
+            drop_sql(Dialect::SQLSERVER, &o("my proc", ObjectType::Procedure)),
+            "drop procedure app.[my proc]"
+        );
     }
 }
 

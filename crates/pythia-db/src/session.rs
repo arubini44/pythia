@@ -46,6 +46,8 @@ impl Session {
                 match params.kind {
                     DbKind::Oracle => Worker::run(params, req_rx, events, shared),
                     DbKind::MySql => crate::mysql_session::run(params, req_rx, events, shared),
+                    DbKind::Postgres => crate::pg_session::run(params, req_rx, events, shared),
+                    DbKind::SqlServer => crate::mssql_session::run(params, req_rx, events, shared),
                 }
             })
             .expect("spawning db worker thread");
@@ -67,7 +69,8 @@ impl Session {
     }
 
     /// Interrupts the statement currently running on this session (OCIBreak
-    /// on Oracle, `KILL QUERY` on MySQL).
+    /// on Oracle, `KILL QUERY` on MySQL, a cancel request on PostgreSQL,
+    /// the attention signal on SQL Server).
     pub fn cancel(&self) {
         let cancel = self.cancel.lock().expect("cancel mutex").clone();
         if let Some(cancel) = cancel {

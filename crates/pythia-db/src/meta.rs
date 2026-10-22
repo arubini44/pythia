@@ -891,6 +891,58 @@ pub(crate) fn errors(
     Ok(out)
 }
 
+/// One step of another database's execution plan, for [`plan_table`].
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct PlanStep {
+    /// Index of the parent step in the plan.
+    pub parent: Option<usize>,
+    pub depth: usize,
+    pub operation: String,
+    pub object: Option<String>,
+    pub cost: Option<String>,
+    pub rows: Option<String>,
+    pub access: Option<String>,
+    pub filter: Option<String>,
+}
+
+/// A plan as the `PLAN_TABLE` rows the plan view reads (ids from 1).
+pub(crate) fn plan_table(steps: Vec<PlanStep>) -> MetaResult {
+    let column = |name: &str, numeric: bool| Column {
+        name: name.into(),
+        type_name: if numeric { "NUMBER" } else { "VARCHAR2" }.into(),
+        numeric,
+    };
+    let columns = vec![
+        column("ID", true),
+        column("PARENT_ID", true),
+        column("DEPTH", true),
+        column("OPERATION", false),
+        column("OBJECT", false),
+        column("COST", true),
+        column("ROWS", true),
+        column("ACCESS_PRED", false),
+        column("FILTER_PRED", false),
+    ];
+    let rows = steps
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| {
+            vec![
+                Some((i + 1).to_string()),
+                s.parent.map(|p| (p + 1).to_string()),
+                Some(s.depth.to_string()),
+                Some(s.operation),
+                s.object,
+                s.cost,
+                s.rows,
+                s.access,
+                s.filter,
+            ]
+        })
+        .collect();
+    MetaResult::Table { columns, rows }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

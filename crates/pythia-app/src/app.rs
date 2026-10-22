@@ -2528,7 +2528,9 @@ impl PythiaApp {
                 let schema = server.current_schema.clone();
                 let names = match server.dialect.kind() {
                     pythia_db::DbKind::Oracle => pythia_lsp_core::NameStyle::Upper,
-                    pythia_db::DbKind::MySql => pythia_lsp_core::NameStyle::AsStored,
+                    pythia_db::DbKind::Postgres => pythia_lsp_core::NameStyle::Lower,
+                    pythia_db::DbKind::MySql => pythia_lsp_core::NameStyle::Backticks,
+                    pythia_db::DbKind::SqlServer => pythia_lsp_core::NameStyle::Brackets,
                 };
                 self.catalogs.insert(
                     name.to_owned(),

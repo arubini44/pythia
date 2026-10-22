@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 use crate::dialect::Dialect;
 use crate::meta::{MetaQuery, MetaResult};
 use crate::session::{CancelSlot, Canceller, Events};
+use crate::sql_text::{hex, leading_words, release, replace_binds, statement_kind};
 use crate::types::{
     Cell, Client, Column, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
 };
@@ -540,38 +541,17 @@ fn kill_query(opts: &Opts, id: u32) {
     }
 }
 
-/// `9.4.0` → `(9, 4)`, `10.11.6-MariaDB` → `(10, 11)`.
-fn release(version: &str) -> crate::compat::Release {
-    let mut parts = version
-        .split(|c: char| !c.is_ascii_digit())
-        .map(|p| p.parse().unwrap_or(0));
-    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
-}
-
-/// Replaces `:name` binds by `?` with their values in order. Names match
-/// without case, as Oracle's do.
+/// Replaces `:name` binds by `?` with their values in order.
 fn positional(sql: &str, binds: &[(String, Option<String>)]) -> (String, Vec<Value>) {
-    let mut out = String::with_capacity(sql.len());
     let mut values = Vec::new();
-    let mut last = 0;
-    for token in pythia_plsql::tokenize(sql) {
-        if token.kind != pythia_plsql::TokenKind::BindVar {
-            continue;
-        }
-        let name = &sql[token.span.start + 1..token.span.end];
-        let Some((_, value)) = binds.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) else {
-            continue;
-        };
-        out.push_str(&sql[last..token.span.start]);
-        out.push('?');
-        last = token.span.end;
+    let sql = replace_binds(sql, binds, |_, value| {
         values.push(match value {
             Some(v) => Value::Bytes(v.clone().into_bytes()),
             None => Value::NULL,
         });
-    }
-    out.push_str(&sql[last..]);
-    (out, values)
+        "?".into()
+    });
+    (sql, values)
 }
 
 pub(crate) fn column(c: &mysql::Column) -> Column {
@@ -709,37 +689,6 @@ pub(crate) fn cell(value: &Value, column: &mysql::Column) -> Cell {
             }
         }
     })
-}
-
-/// Uppercase hex, at most 4000 bytes of it like a RAW column.
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    const MAX: usize = 4000;
-    let mut out = String::with_capacity(bytes.len().min(MAX) * 2);
-    for b in bytes.iter().take(MAX) {
-        let _ = write!(out, "{b:02X}");
-    }
-    if bytes.len() > MAX {
-        let _ = write!(out, "… ({} bytes)", bytes.len());
-    }
-    out
-}
-
-/// The first one or two words of a statement, uppercase, comments skipped.
-fn leading_words(sql: &str) -> Vec<String> {
-    pythia_plsql::tokenize(sql)
-        .into_iter()
-        .filter(|t| !t.kind.is_trivia())
-        .take(2)
-        .map(|t| sql[t.span].to_ascii_uppercase())
-        .collect()
-}
-
-fn statement_kind(sql: &str) -> String {
-    leading_words(sql)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| "Statement".into())
 }
 
 fn is_dml(kind: &str) -> bool {

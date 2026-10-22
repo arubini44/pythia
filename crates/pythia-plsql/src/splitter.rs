@@ -5,6 +5,8 @@
 //!   end only at a line containing only `/` (or end of input), since they
 //!   contain `;` themselves.
 //! - SQL*Plus commands (`SET`, `PROMPT`, `@file`, ...) end at the end of the line.
+//!
+//! Other databases' scripts follow their own rules ([`Syntax`]).
 
 use std::ops::Range;
 
@@ -16,6 +18,39 @@ pub enum StatementKind {
     PlSql,
     SqlPlus,
 }
+
+/// Where a database's scripts end their statements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Syntax {
+    /// SQL*Plus (also used for MySQL so far).
+    #[default]
+    Oracle,
+    /// PostgreSQL: every statement ends at `;`. Routine bodies are
+    /// (dollar-quoted) strings; `BEGIN ATOMIC … END` keeps its `;`.
+    Postgres,
+    /// T-SQL: `GO` on a line of its own ends a batch. Routines and scripts
+    /// that `DECLARE` variables need a batch of their own, so they run up to
+    /// the next `GO` (or `/`); `BEGIN … END` blocks keep their `;`.
+    TSql,
+}
+
+/// The client commands of SQL*Plus that Pythia runs itself; the rest of
+/// SQL*Plus's words are statements on other databases.
+const CLIENT_COMMANDS: &[&str] = &[
+    "DEF", "DEFINE", "PRO", "PROMPT", "REM", "REMARK", "UNDEF", "UNDEFINE", "WHENEVER",
+];
+
+/// T-SQL routines, which must start a batch.
+const TSQL_UNITS: &[&str] = &["PROC", "PROCEDURE", "FUNCTION", "TRIGGER"];
+
+/// Words after T-SQL's `BEGIN` that make it a statement rather than a block.
+const TSQL_BEGIN_STATEMENTS: &[&str] = &[
+    "TRAN",
+    "TRANSACTION",
+    "DISTRIBUTED",
+    "DIALOG",
+    "CONVERSATION",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statement {
@@ -98,7 +133,12 @@ const CREATE_MODIFIERS: &[&str] = &[
 ];
 
 pub fn split_statements(src: &str) -> Vec<Statement> {
-    Splitter::new(src).run()
+    split_statements_in(src, Syntax::Oracle)
+}
+
+/// Splits a script of a database with `syntax`.
+pub fn split_statements_in(src: &str, syntax: Syntax) -> Vec<Statement> {
+    Splitter::new(src, syntax).run()
 }
 
 /// Like [`split_statements`], reusing tokens from [`tokenize`].
@@ -106,6 +146,7 @@ pub(crate) fn split_with_tokens(src: &str, tokens: Vec<Token>) -> Vec<Statement>
     Splitter {
         src,
         tokens,
+        syntax: Syntax::Oracle,
         out: Vec::new(),
     }
     .run()
@@ -116,7 +157,12 @@ pub(crate) fn split_with_tokens(src: &str, tokens: Vec<Token>) -> Vec<Statement>
 /// A cursor in the gap between two statements belongs to the preceding one,
 /// so executing right after typing `;` runs the statement just written.
 pub fn statement_at(src: &str, offset: usize) -> Option<Statement> {
-    let statements = split_statements(src);
+    statement_at_in(src, offset, Syntax::Oracle)
+}
+
+/// [`statement_at`] in a script of a database with `syntax`.
+pub fn statement_at_in(src: &str, offset: usize, syntax: Syntax) -> Option<Statement> {
+    let statements = split_statements_in(src, syntax);
     let idx = statements
         .iter()
         .rposition(|s| s.range.start <= offset)
@@ -127,14 +173,16 @@ pub fn statement_at(src: &str, offset: usize) -> Option<Statement> {
 struct Splitter<'a> {
     src: &'a str,
     tokens: Vec<Token>,
+    syntax: Syntax,
     out: Vec<Statement>,
 }
 
 impl<'a> Splitter<'a> {
-    fn new(src: &'a str) -> Self {
+    fn new(src: &'a str, syntax: Syntax) -> Self {
         Self {
             src,
             tokens: tokenize(src),
+            syntax,
             out: Vec::new(),
         }
     }
@@ -150,14 +198,77 @@ impl<'a> Splitter<'a> {
     /// True if the token is a `/` alone on its line (ignoring whitespace).
     fn is_slash_line(&self, idx: usize) -> bool {
         let t = &self.tokens[idx];
-        if t.kind != TokenKind::Operator || self.text(t) != "/" {
+        t.kind == TokenKind::Operator && self.text(t) == "/" && self.line_of(t).trim() == "/"
+    }
+
+    /// True if the token starts T-SQL's batch separator: `GO`, or `GO n`,
+    /// alone on its line.
+    fn is_go_line(&self, idx: usize) -> bool {
+        let t = &self.tokens[idx];
+        if self.syntax != Syntax::TSql || !self.word_eq(t, &["GO"]) {
             return false;
         }
+        let line = self.line_of(t).trim();
+        line.get(..2)
+            .is_some_and(|go| go.eq_ignore_ascii_case("go"))
+            && line[2..].trim().chars().all(|c| c.is_ascii_digit())
+            && self.src[..t.span.start]
+                .rsplit('\n')
+                .next()
+                .is_some_and(|before| before.trim().is_empty())
+    }
+
+    /// True if the token ends a block or batch: `/` or `GO` on its own line.
+    fn is_terminator_line(&self, idx: usize) -> bool {
+        self.is_slash_line(idx) || self.is_go_line(idx)
+    }
+
+    /// The index of the newline ending the line of token `idx` (the count
+    /// of `GO 2` belongs to the separator).
+    fn line_end(&self, idx: usize) -> usize {
+        self.tokens[idx..]
+            .iter()
+            .position(|t| t.kind == TokenKind::Newline)
+            .map_or(self.tokens.len(), |n| idx + n)
+    }
+
+    /// The text of the line the token is on.
+    fn line_of(&self, t: &Token) -> &'a str {
         let line_start = self.src[..t.span.start].rfind('\n').map_or(0, |i| i + 1);
         let line_end = self.src[t.span.end..]
             .find('\n')
             .map_or(self.src.len(), |i| t.span.end + i);
-        self.src[line_start..line_end].trim() == "/"
+        &self.src[line_start..line_end]
+    }
+
+    /// The first significant token after `idx`.
+    fn next_word(&self, idx: usize) -> Option<&Token> {
+        self.significant_from(idx + 1).next()
+    }
+
+    /// How the token changes the nesting of blocks whose `;` don't end the
+    /// statement: `BEGIN … END` (T-SQL), `BEGIN ATOMIC … END` (PostgreSQL)
+    /// and the `CASE … END` inside them.
+    fn depth_change(&self, idx: usize, depth: usize) -> isize {
+        let t = &self.tokens[idx];
+        if self.syntax == Syntax::Oracle || !t.kind.is_word() {
+            return 0;
+        }
+        if self.word_eq(t, &["CASE"]) {
+            return 1;
+        }
+        if self.word_eq(t, &["END"]) {
+            return if depth > 0 { -1 } else { 0 };
+        }
+        if self.word_eq(t, &["BEGIN"]) {
+            let next = self.next_word(idx);
+            let block = match self.syntax {
+                Syntax::TSql => !next.is_some_and(|n| self.word_eq(n, TSQL_BEGIN_STATEMENTS)),
+                _ => next.is_some_and(|n| self.word_eq(n, &["ATOMIC"])),
+            };
+            return isize::from(block);
+        }
+        0
     }
 
     fn significant_from(&self, idx: usize) -> impl Iterator<Item = &Token> {
@@ -171,6 +282,27 @@ impl<'a> Splitter<'a> {
         };
         if self.text(first) == "@" || self.text(first) == "@@" {
             return StatementKind::SqlPlus;
+        }
+        if self.syntax != Syntax::Oracle {
+            if self.word_eq(first, CLIENT_COMMANDS) {
+                return StatementKind::SqlPlus;
+            }
+            if self.syntax == Syntax::TSql {
+                if self.word_eq(first, &["DECLARE"]) {
+                    return StatementKind::PlSql;
+                }
+                if self.word_eq(first, &["CREATE", "ALTER"]) {
+                    for t in words.take(3) {
+                        if self.word_eq(t, TSQL_UNITS) {
+                            return StatementKind::PlSql;
+                        }
+                        if !self.word_eq(t, &["OR", "ALTER"]) {
+                            break;
+                        }
+                    }
+                }
+            }
+            return StatementKind::Sql;
         }
         if self.word_eq(first, &["DECLARE", "BEGIN"]) || self.text(first) == "<<" {
             return StatementKind::PlSql;
@@ -215,29 +347,35 @@ impl<'a> Splitter<'a> {
     fn run(mut self) -> Vec<Statement> {
         let mut i = 0;
         while i < self.tokens.len() {
-            if self.tokens[i].kind.is_trivia() || self.is_slash_line(i) {
+            if self.tokens[i].kind.is_trivia() {
                 i += 1;
+                continue;
+            }
+            if self.is_terminator_line(i) {
+                i = self.line_end(i);
                 continue;
             }
             let start = i;
             let kind = self.classify(start);
             // Index of the last significant token that belongs to the statement.
             let mut last = start;
+            let mut depth = self.depth_change(start, 0).max(0) as usize;
             i += 1;
             while i < self.tokens.len() {
                 let t = &self.tokens[i];
                 match kind {
                     StatementKind::SqlPlus if t.kind == TokenKind::Newline => break,
-                    StatementKind::Sql if t.kind == TokenKind::Semicolon => {
+                    StatementKind::Sql if t.kind == TokenKind::Semicolon && depth == 0 => {
                         i += 1;
                         break;
                     }
-                    StatementKind::Sql | StatementKind::PlSql if self.is_slash_line(i) => {
-                        i += 1;
+                    StatementKind::Sql | StatementKind::PlSql if self.is_terminator_line(i) => {
+                        i = self.line_end(i);
                         break;
                     }
                     _ => {}
                 }
+                depth = depth.saturating_add_signed(self.depth_change(i, depth));
                 if !t.kind.is_trivia() {
                     last = i;
                 }
@@ -370,6 +508,85 @@ mod tests {
                 (StatementKind::SqlPlus, "exec dbms_lock.sleep(1)"),
                 (StatementKind::SqlPlus, "@install.sql"),
                 (StatementKind::Sql, "select 1 from dual"),
+            ]
+        );
+    }
+
+    fn split_in(src: &str, syntax: Syntax) -> Vec<(StatementKind, &str)> {
+        split_statements_in(src, syntax)
+            .iter()
+            .map(|s| (s.kind, s.text(src)))
+            .collect()
+    }
+
+    #[test]
+    fn postgres_scripts() {
+        let src = "set search_path to app, public;\n\
+                   create function f(a int) returns int language plpgsql as $$\nbegin\n  return a + 1;\nend;\n$$;\n\
+                   do $body$ begin perform f(1); end $body$;\n\
+                   select x::text, case when y then 1 end from t;\n\
+                   create function g() returns int language sql begin atomic select 1; end;\n\
+                   begin;\nprompt done\nshow work_mem";
+        assert_eq!(
+            split_in(src, Syntax::Postgres),
+            vec![
+                (StatementKind::Sql, "set search_path to app, public"),
+                (
+                    StatementKind::Sql,
+                    "create function f(a int) returns int language plpgsql as $$\nbegin\n  return a + 1;\nend;\n$$"
+                ),
+                (
+                    StatementKind::Sql,
+                    "do $body$ begin perform f(1); end $body$"
+                ),
+                (
+                    StatementKind::Sql,
+                    "select x::text, case when y then 1 end from t"
+                ),
+                (
+                    StatementKind::Sql,
+                    "create function g() returns int language sql begin atomic select 1; end"
+                ),
+                (StatementKind::Sql, "begin"),
+                (StatementKind::SqlPlus, "prompt done"),
+                (StatementKind::Sql, "show work_mem"),
+            ]
+        );
+    }
+
+    #[test]
+    fn tsql_batches() {
+        let src = "set nocount on;\n\
+                   create or alter procedure dbo.p as\nbegin\n  select 1;\n  select 2;\nend\nGO\n\
+                   declare @n int = 1;\nselect @n;\ngo 2\n\
+                   begin tran;\n\
+                   if @@trancount > 0 begin\n  update t set a = 1;\n  commit;\nend;\n\
+                   begin try select 1/0; end try begin catch select error_message(); end catch;\n\
+                   select case when a = 1 then 'x' end as go from t;\n\
+                   exec sp_who\n  @loginame = 'sa';";
+        assert_eq!(
+            split_in(src, Syntax::TSql),
+            vec![
+                (StatementKind::Sql, "set nocount on"),
+                (
+                    StatementKind::PlSql,
+                    "create or alter procedure dbo.p as\nbegin\n  select 1;\n  select 2;\nend"
+                ),
+                (StatementKind::PlSql, "declare @n int = 1;\nselect @n;"),
+                (StatementKind::Sql, "begin tran"),
+                (
+                    StatementKind::Sql,
+                    "if @@trancount > 0 begin\n  update t set a = 1;\n  commit;\nend"
+                ),
+                (
+                    StatementKind::Sql,
+                    "begin try select 1/0; end try begin catch select error_message(); end catch"
+                ),
+                (
+                    StatementKind::Sql,
+                    "select case when a = 1 then 'x' end as go from t"
+                ),
+                (StatementKind::Sql, "exec sp_who\n  @loginame = 'sa'"),
             ]
         );
     }

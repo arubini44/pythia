@@ -159,6 +159,30 @@ for Linux, Windows and macOS.
   the form editors — isn't offered on MySQL connections. As in SQL\*Plus,
   end a routine with `/` on a line of its own (there is no `DELIMITER`).
 
+**PostgreSQL and SQL Server (experimental)**
+- *Type: PostgreSQL* with `host:5432/database` (`?sslmode=require` for TLS,
+  `verify-full` to check the certificate; a `postgresql://` URL works too),
+  and *Type: SQL Server* with `host:1433/database` or `host\instance`
+  (`?trust` for a self-signed certificate; an ADO.NET connection string
+  works too). Both drivers are pure Rust: no client library needed. Tested
+  with PostgreSQL 18 and SQL Server 2022.
+- The same tools as on MySQL: SQL windows with results, fetching on demand,
+  Break, explain plan (`EXPLAIN (FORMAT JSON)`, `SHOWPLAN_ALL`), completion,
+  the object browser (also materialized views and sequences, synonyms on
+  SQL Server) and object views with the DDL. Transactions work as with
+  Oracle; on PostgreSQL a failing statement doesn't abort the transaction,
+  and notices (`RAISE NOTICE`) show as messages.
+- Scripts split the database's way: PostgreSQL's dollar-quoted routine
+  bodies stay whole and `::` casts aren't bind variables; on SQL Server,
+  `GO` on a line of its own ends a batch, routines and scripts with
+  `DECLARE`d variables run up to the next `GO`, and `BEGIN … END` blocks
+  keep their `;`. *Edit* opens a routine as `CREATE OR REPLACE` (PostgreSQL)
+  or `CREATE OR ALTER` (SQL Server).
+- On SQL Server a batch shows its first result set. After Break, the
+  connection is opened again: the driver can't go on after a cancel, so
+  changes that weren't committed are rolled back. `PRINT` output isn't
+  shown yet.
+
 ## Installing
 
 Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
@@ -242,6 +266,8 @@ PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 |---|---|
 | `PYTHIA_TEST_DB` | integration tests (app user) |
 | `PYTHIA_TEST_MYSQL` | MySQL tests, e.g. `pythia/pythia@localhost:3306/pythia` for `docker compose up -d mysql` |
+| `PYTHIA_TEST_POSTGRES` | PostgreSQL tests, e.g. `pythia/pythia@localhost:5432/pythia` for `docker compose up -d postgres` |
+| `PYTHIA_TEST_MSSQL` | SQL Server tests, e.g. `pythia/pythia@localhost:1433/pythia?trust` for `docker compose up -d mssql mssql-init` |
 | `PYTHIA_TEST_DB_DBA` | monitor, compare and debugger tests (`system/oracle@…`) |
 | `PYTHIA_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local Podman container; with Docker on Linux, the compose network's gateway from `docker network inspect pythia_default`) |
 | `PYTHIA_SCREENSHOT_DIR` | renders the real UI offscreen into PNGs (`cargo test -p pythia-app screenshots`) |
@@ -262,7 +288,7 @@ once with `PYTHIA_SCREENSHOT_DIR` set. The reports test needs
 |---|---|
 | `pythia-app` | the application: documents, docking, commands, dialogs |
 | `pythia-ui` | code editor, data grid, icon set |
-| `pythia-db` | sessions on worker threads (Oracle, MySQL), dictionary queries, what each database supports (`Dialect`, `Feature`) |
+| `pythia-db` | sessions on worker threads (Oracle, MySQL, PostgreSQL, SQL Server), dictionary queries, what each database supports (`Dialect`, `Feature`) |
 | `pythia-plsql` | lexer, statement splitter, error-tolerant parser |
 | `pythia-lsp-core` | completion, hover, navigation, outline, diagnostics |
 | `pythia-data` | export and import |

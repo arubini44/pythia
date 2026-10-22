@@ -29,6 +29,17 @@ oracle = "0.6"
 oracledb = "=26.0.0-beta.4"
 # Pure Rust, synchronous like the session workers; rustls on ring as ureq uses.
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "buffer-pool", "rustls-tls-ring"] }
+# PostgreSQL and SQL Server: pure Rust async drivers, each session worker
+# drives its own single-threaded runtime.
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tokio-postgres = "0.7"
+tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
+tiberius = { version = "0.13", default-features = false, features = ["tds80", "rustls", "sql-browser-tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
+futures-util = { version = "0.3", default-features = false }
 logos = "0.16"
 regex = "1"
 ropey = "1.6"
