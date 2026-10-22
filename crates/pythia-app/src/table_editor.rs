@@ -1061,7 +1061,7 @@ fn columns_ui(
     let mut keys = Vec::new();
     let mut renamed = None;
     let n = table.columns.len();
-    egui::ScrollArea::vertical()
+    egui::ScrollArea::both()
         .auto_shrink([false, true])
         .max_height(ui.available_height() - 40.0)
         .show(ui, |ui| {
@@ -1169,7 +1169,7 @@ fn columns_ui(
                         }
                         let mut comment = col.comment.clone().unwrap_or_default();
                         if ui
-                            .add_sized([260.0, 22.0], egui::TextEdit::singleline(&mut comment))
+                            .add_sized([220.0, 22.0], egui::TextEdit::singleline(&mut comment))
                             .changed()
                         {
                             col.comment = Some(comment).filter(|c| !c.is_empty());

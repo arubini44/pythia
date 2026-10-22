@@ -2397,6 +2397,7 @@ create table pythia_bnm_t (id number primary key);"
 
     h.get_by_label("Tables").click_secondary();
     h.run_steps(2);
+    save(&mut h, "browser-new-folder-menu");
     h.get_by_label("New table…").click();
     h.run_steps(2);
     wait_until(&mut h, "table builder", |app| !app.test_focused_busy());
@@ -2409,6 +2410,7 @@ create table pythia_bnm_t (id number primary key);"
     // Submenus carry their arrow in the label.
     h.get_by_label("New ⏵").hover();
     h.run_steps(2);
+    save(&mut h, "browser-new-submenu");
     h.get_by_label("Index on this table…").click();
     h.run_steps(2);
     wait_until(&mut h, "index form", |app| !app.test_focused_busy());
