@@ -98,6 +98,23 @@ pub fn show(
         }
         ui.separator();
 
+        if !cx.settings.ai.backends.is_empty() {
+            ui.menu_button("AI", |ui| {
+                for c in [
+                    Command::AiExplain,
+                    Command::AiFix,
+                    Command::AiRewrite,
+                    Command::AiAnalyzePlan,
+                ] {
+                    command(ui, c);
+                }
+                ui.separator();
+                command(ui, Command::AiGenerateSql);
+                command(ui, Command::AiAsk);
+            });
+            ui.separator();
+        }
+
         if item(ui, "Cut", shortcut(Key::X), selected) {
             if let Some(range) = editor.selection() {
                 ui.ctx().copy_text(editor.text()[range].to_owned());

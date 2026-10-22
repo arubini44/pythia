@@ -463,5 +463,11 @@ pub fn def(icon: Icon) -> Def {
             BLUE,
             r#"<path d="M4 2.75a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v11.5L8 11.25l-4 3z" stroke="$A" fill="$A" fill-opacity=".25"/>"#,
         ),
+        Icon::Sparkle => color(
+            "sparkle",
+            PURPLE,
+            BLUE,
+            r#"<path d="M6.75 3.5c.45 2.9 1.6 4.05 4.5 4.5-2.9.45-4.05 1.6-4.5 4.5-.45-2.9-1.6-4.05-4.5-4.5 2.9-.45 4.05-1.6 4.5-4.5z" stroke="$A" fill="$A" fill-opacity=".35"/><path d="M12.25 1.75c.2 1.15.6 1.55 1.75 1.75-1.15.2-1.55.6-1.75 1.75-.2-1.15-.6-1.55-1.75-1.75 1.15-.2 1.55-.6 1.75-1.75z" stroke="$B" stroke-width="1" fill="$B"/>"#,
+        ),
     }
 }

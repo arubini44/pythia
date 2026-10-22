@@ -4,7 +4,7 @@ use egui::{RichText, Ui};
 use pythia_db::DbError;
 
 use super::style::{self, Kpi, Palette, compact, duration, section};
-use super::{Want, Wants};
+use super::{Analysis, Want, Wants};
 use crate::queries::{Capabilities, TraceFile, explain_error};
 use crate::tkprof::{self, CallKind, CallStats, Report, SortKey, Statement, WaitStats};
 
@@ -217,6 +217,25 @@ impl TraceView {
                 if ui.small_button("Copy report").clicked() {
                     ui.ctx().copy_text(report.to_text(self.sort));
                 }
+                if wants.analyze
+                    && ui
+                        .small_button("Analyze with AI")
+                        .on_hover_text("Have the AI assistant explain where the traced time went")
+                        .clicked()
+                {
+                    let binds = report
+                        .statements
+                        .iter()
+                        .filter(|s| !s.binds.is_empty())
+                        .map(bind_line)
+                        .collect();
+                    wants.push(Want::Analyze(Analysis {
+                        title: format!("the trace file {name}"),
+                        details: report.to_text(self.sort),
+                        binds,
+                        ..Default::default()
+                    }));
+                }
             });
             ui.add_space(4.0);
             if self.text_mode {
@@ -234,7 +253,7 @@ impl TraceView {
                     if s.is_recursive() && !self.show_recursive {
                         continue;
                     }
-                    statement_ui(ui, rank + 1, i, s);
+                    statement_ui(ui, rank + 1, i, s, name, wants);
                     ui.add_space(4.0);
                 }
             });
@@ -285,7 +304,23 @@ fn summary(ui: &mut Ui, report: &Report) {
     }
 }
 
-fn statement_ui(ui: &mut Ui, rank: usize, idx: usize, s: &Statement) {
+/// A statement's captured binds, as `SQL_ID: values`.
+fn bind_line(s: &Statement) -> String {
+    format!(
+        "{}: {}",
+        s.sql_id.as_deref().unwrap_or("statement"),
+        s.binds.join(", ")
+    )
+}
+
+fn statement_ui(
+    ui: &mut Ui,
+    rank: usize,
+    idx: usize,
+    s: &Statement,
+    trace: &str,
+    wants: &mut Wants,
+) {
     let t = s.total();
     let first = s
         .text
@@ -324,6 +359,30 @@ fn statement_ui(ui: &mut Ui, rank: usize, idx: usize, s: &Statement) {
                         s.call(CallKind::Parse).misses,
                         s.call(CallKind::Execute).misses
                     ));
+                    if wants.analyze
+                        && ui
+                            .small_button("Analyze with AI")
+                            .on_hover_text(
+                                "Have the AI assistant explain why this statement is slow",
+                            )
+                            .clicked()
+                    {
+                        let what = match &s.sql_id {
+                            Some(id) => format!("statement {id} from the trace file {trace}"),
+                            None => format!("statement #{rank} from the trace file {trace}"),
+                        };
+                        wants.push(Want::Analyze(Analysis {
+                            title: what,
+                            sql: Some(s.text.clone()),
+                            details: s.to_text(),
+                            binds: if s.binds.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![bind_line(s)]
+                            },
+                            ..Default::default()
+                        }));
+                    }
                 });
                 for e in &s.parse_errors {
                     ui.colored_label(ui.visuals().error_fg_color, format!("Parse error {e}"));

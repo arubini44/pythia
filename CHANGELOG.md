@@ -33,6 +33,22 @@ All notable changes to Pythia are documented here. The format follows
   snippet's text.
 
 ### Added
+- AI assistant (#1). Settings → AI configures several models at once, one
+  of them the default, with a Test button: the Anthropic Messages API,
+  OpenAI-compatible chat completions, local model servers (Ollama,
+  llama.cpp, LM Studio; no key) and command line tools (prompt on stdin,
+  answer on stdout). API keys are kept in the OS keychain. A side panel
+  (View → AI Assistant) holds the conversation; questions take the focused
+  window's connection and statement along. From editors (AI menu, context
+  menu, palette): generate SQL from a description with the schema's real
+  tables, columns and foreign keys; explain, fix (with the errors) or
+  rewrite the statement under the cursor or the selection, then replace it
+  or insert the answer's code; analyze the execution plan. "Analyze with
+  AI" / "Fix with AI" buttons on plans, run statistics, errors, compile
+  errors, top SQL, session details, AWR/ASH reports and traces. Requests
+  carry table definitions, keys, indexes, statistics, plans and source;
+  result rows and bind values only when allowed in Settings → AI, and each
+  answer shows what was sent and what was held back.
 - Editors: a context menu. On a database object it offers what the object
   browser offers (query, edit, test, describe, edit table, grants, generate,
   compile, favorites, copy name) and Show in object browser; on a local

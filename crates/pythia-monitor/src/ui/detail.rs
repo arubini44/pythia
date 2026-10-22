@@ -5,7 +5,7 @@ use egui_extras::{Column, TableBuilder};
 use pythia_db::DbError;
 
 use super::style::{self, Palette, duration, section};
-use super::{Want, Wants};
+use super::{Analysis, Want, Wants};
 use crate::queries::{Capabilities, SessionDetail, explain_error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -117,6 +117,15 @@ impl SessionDetailView {
                 }
                 if self.loading {
                     ui.spinner();
+                }
+                if wants.analyze
+                    && let Some(d) = self.detail.as_ref().filter(|d| d.session.is_some())
+                    && ui
+                        .button("Analyze with AI")
+                        .on_hover_text("Have the AI assistant explain what the session waits for and why its SQL is slow")
+                        .clicked()
+                {
+                    wants.push(Want::Analyze(analysis(self.sid, self.serial, d)));
                 }
             });
         });
@@ -377,4 +386,82 @@ fn table(
             add(&mut row, i);
         })
     });
+}
+
+/// A session's state, SQL, plan, waits, busiest statistics and locks, for
+/// the assistant.
+fn analysis(sid: i64, serial: i64, d: &SessionDetail) -> Analysis {
+    let mut details = String::new();
+    if let Some(s) = &d.session {
+        details.push_str(&format!(
+            "Session {sid},{serial}: user {}, program {}, module {}, status {}, \
+             last call {} s ago\n",
+            s.username.as_deref().unwrap_or("-"),
+            s.program.as_deref().unwrap_or("-"),
+            s.module.as_deref().unwrap_or("-"),
+            s.status,
+            s.last_call_et
+        ));
+        match &s.event {
+            Some(event) => details.push_str(&format!(
+                "Current wait: {event} ({}) for {:.1} s{}{}\n",
+                s.wait_class.as_deref().unwrap_or("-"),
+                s.wait_secs,
+                s.blocking_session
+                    .map(|b| format!(", blocked by session {b}"))
+                    .unwrap_or_default(),
+                s.wait_object
+                    .as_ref()
+                    .map(|o| format!(", on object {o}"))
+                    .unwrap_or_default(),
+            )),
+            None => details.push_str("On CPU\n"),
+        }
+        if let Some(prev) = s.prev_sql_id.as_ref().filter(|_| d.sql_text.is_none()) {
+            details.push_str(&format!("No current SQL; previous SQL_ID {prev}\n"));
+        }
+    }
+    if !d.plan.is_empty() {
+        details.push_str(&format!(
+            "\nPlan of the current SQL:\n{}\n",
+            d.plan.join("\n")
+        ));
+    }
+    if !d.waits.is_empty() {
+        details.push_str("\nRecent waits (newest first):\n");
+        for w in &d.waits {
+            details.push_str(&format!("{} {:.2} ms {}\n", w.event, w.wait_ms, w.params));
+        }
+    }
+    let mut stats: Vec<&(String, f64)> = d.stats.iter().filter(|(_, v)| *v != 0.0).collect();
+    stats.sort_by(|a, b| b.1.total_cmp(&a.1));
+    if !stats.is_empty() {
+        details.push_str("\nSession statistics (largest 40):\n");
+        for (name, value) in stats.into_iter().take(40) {
+            details.push_str(&format!("{name}: {value}\n"));
+        }
+    }
+    if !d.locks.is_empty() {
+        details.push_str("\nLocks:\n");
+        for l in &d.locks {
+            details.push_str(&format!(
+                "{} on {} held {} requested {} for {} s{}\n",
+                l.lock_type,
+                l.object.clone().unwrap_or_else(|| l.id1.to_string()),
+                l.mode_held,
+                l.mode_requested,
+                l.seconds,
+                if l.blocking { ", blocking others" } else { "" }
+            ));
+        }
+    }
+    let sql_id = d.session.as_ref().and_then(|s| s.sql_id.clone());
+    Analysis {
+        title: format!("session {sid},{serial}"),
+        sql: d.sql_text.clone().or_else(|| d.prev_sql_text.clone()),
+        // The detail has the plan already.
+        sql_id: sql_id.filter(|_| d.plan.is_empty()),
+        details,
+        binds: Vec::new(),
+    }
 }

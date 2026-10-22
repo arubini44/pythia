@@ -8,9 +8,9 @@ use egui_plot::{HLine, Legend, Line, Plot, PlotPoints};
 use pythia_db::DbError;
 
 use super::style::{self, Kpi, Palette, bytes, compact, duration, section};
-use super::{Want, Wants, refresh_selector};
+use super::{Analysis, Want, Wants, refresh_selector};
 use crate::insights::{Insight, Severity, Target, insights};
-use crate::queries::{Counters, DashboardSnapshot, Rates, explain_error};
+use crate::queries::{Counters, DashboardSnapshot, Rates, TopSql, explain_error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Refresh {
@@ -215,7 +215,7 @@ impl DashboardView {
                 ui.add_space(8.0);
                 tablespaces(ui, snap);
                 ui.add_space(8.0);
-                top_sql(ui, snap);
+                top_sql(ui, snap, wants);
                 if !snap.long_ops.is_empty() {
                     ui.add_space(8.0);
                     long_ops(ui, snap);
@@ -511,14 +511,15 @@ fn tablespaces(ui: &mut Ui, snap: &DashboardSnapshot) {
     });
 }
 
-fn top_sql(ui: &mut Ui, snap: &DashboardSnapshot) {
+fn top_sql(ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
     section(ui, "Top SQL by elapsed time (since load)", |ui| {
         if snap.top_sql.is_empty() {
             ui.weak("—");
             return;
         }
+        let analyze = wants.analyze;
         let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
-        TableBuilder::new(ui)
+        let mut table = TableBuilder::new(ui)
             .id_salt("top-sql")
             .striped(true)
             .vscroll(false)
@@ -528,18 +529,26 @@ fn top_sql(ui: &mut Ui, snap: &DashboardSnapshot) {
             .column(Column::exact(80.0))
             .column(Column::exact(80.0))
             .column(Column::exact(90.0))
-            .column(Column::exact(80.0))
+            .column(Column::exact(80.0));
+        if analyze {
+            table = table.column(Column::exact(70.0));
+        }
+        table
             .column(Column::remainder().clip(true))
             .header(h, |mut r| {
-                for t in [
+                let mut titles = vec![
                     "SQL_ID",
                     "Execs",
                     "Elapsed",
                     "CPU",
                     "Buffer gets",
                     "Disk reads",
-                    "SQL text",
-                ] {
+                ];
+                if analyze {
+                    titles.push("");
+                }
+                titles.push("SQL text");
+                for t in titles {
                     r.col(|ui| {
                         ui.strong(t);
                     });
@@ -570,6 +579,17 @@ fn top_sql(ui: &mut Ui, snap: &DashboardSnapshot) {
                     row.col(|ui| right(ui, duration(s.cpu_s)));
                     row.col(|ui| right(ui, compact(s.buffer_gets as f64)));
                     row.col(|ui| right(ui, compact(s.disk_reads as f64)));
+                    if analyze {
+                        row.col(|ui| {
+                            if ui
+                                .small_button("Analyze")
+                                .on_hover_text("Have the AI assistant explain why it is expensive")
+                                .clicked()
+                            {
+                                wants.push(Want::Analyze(top_sql_analysis(s)));
+                            }
+                        });
+                    }
                     row.col(|ui| {
                         ui.add(
                             egui::Label::new(RichText::new(s.text.replace('\n', " ")).monospace())
@@ -580,6 +600,36 @@ fn top_sql(ui: &mut Ui, snap: &DashboardSnapshot) {
                 });
             });
     });
+}
+
+/// A top SQL statement and its cursor statistics, for the assistant.
+fn top_sql_analysis(s: &TopSql) -> Analysis {
+    let execs = s.executions.max(1) as f64;
+    Analysis {
+        title: format!("top SQL {}", s.sql_id),
+        sql: Some(s.text.clone()),
+        sql_id: Some(s.sql_id.clone()),
+        details: format!(
+            "Cursor statistics since it was loaded (V$SQL):\n\
+             executions: {}\n\
+             elapsed: {:.3} s ({:.4} s per execution)\n\
+             CPU: {:.3} s\n\
+             buffer gets: {} ({:.0} per execution)\n\
+             disk reads: {} ({:.1} per execution)\n\
+             rows processed: {} ({:.1} per execution)",
+            s.executions,
+            s.elapsed_s,
+            s.elapsed_s / execs,
+            s.cpu_s,
+            s.buffer_gets,
+            s.buffer_gets as f64 / execs,
+            s.disk_reads,
+            s.disk_reads as f64 / execs,
+            s.rows,
+            s.rows as f64 / execs,
+        ),
+        binds: Vec::new(),
+    }
 }
 
 fn long_ops(ui: &mut Ui, snap: &DashboardSnapshot) {

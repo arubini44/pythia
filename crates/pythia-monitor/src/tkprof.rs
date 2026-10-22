@@ -114,6 +114,65 @@ impl Statement {
         self.waits.iter().map(|(_, w)| w.total).sum()
     }
 
+    /// The statement's section of the tkprof text (bind values aren't part
+    /// of it).
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        if let Some(id) = &self.sql_id {
+            let _ = writeln!(out, "\nSQL ID: {id}\n");
+        }
+        let _ = writeln!(out, "{}\n", self.text);
+        call_table(&mut out, &self.calls);
+        let _ = writeln!(
+            out,
+            "\nMisses in library cache during parse: {}",
+            self.call(CallKind::Parse).misses
+        );
+        if self.call(CallKind::Execute).misses > 0 {
+            let _ = writeln!(
+                out,
+                "Misses in library cache during execute: {}",
+                self.call(CallKind::Execute).misses
+            );
+        }
+        if let Some(og) = &self.optimizer_goal {
+            let _ = writeln!(out, "Optimizer mode: {og}");
+        }
+        if let Some(uid) = self.user_id {
+            let _ = writeln!(
+                out,
+                "Parsing user id: {uid}{}",
+                if self.is_recursive() {
+                    format!("     (recursive depth: {})", self.depth)
+                } else {
+                    String::new()
+                }
+            );
+        }
+        for e in &self.parse_errors {
+            let _ = writeln!(out, "Parse error: {e}");
+        }
+        if !self.row_source.is_empty() {
+            let _ = writeln!(out, "\n      Rows  Row Source Operation");
+            let _ = writeln!(
+                out,
+                "----------  ---------------------------------------------------"
+            );
+            for r in &self.row_source {
+                let _ = writeln!(
+                    out,
+                    "{:>10}  {}{}",
+                    r.rows,
+                    " ".repeat(r.depth),
+                    r.operation
+                );
+            }
+        }
+        wait_table(&mut out, &self.waits);
+        out.push('\n');
+        out
+    }
+
     fn wait(&mut self, event: &str, ela: u64) {
         let w = match self.waits.iter_mut().find(|(n, _)| n == event) {
             Some((_, w)) => w,
@@ -702,60 +761,8 @@ impl Report {
             "rows     = number of rows processed by the fetch or execute call"
         );
         for i in self.sorted(sort) {
-            let s = &self.statements[i];
             let _ = writeln!(out, "{}", "*".repeat(80));
-            if let Some(id) = &s.sql_id {
-                let _ = writeln!(out, "\nSQL ID: {id}\n");
-            }
-            let _ = writeln!(out, "{}\n", s.text);
-            call_table(&mut out, &s.calls);
-            let _ = writeln!(
-                out,
-                "\nMisses in library cache during parse: {}",
-                s.call(CallKind::Parse).misses
-            );
-            if s.call(CallKind::Execute).misses > 0 {
-                let _ = writeln!(
-                    out,
-                    "Misses in library cache during execute: {}",
-                    s.call(CallKind::Execute).misses
-                );
-            }
-            if let Some(og) = &s.optimizer_goal {
-                let _ = writeln!(out, "Optimizer mode: {og}");
-            }
-            if let Some(uid) = s.user_id {
-                let _ = writeln!(
-                    out,
-                    "Parsing user id: {uid}{}",
-                    if s.is_recursive() {
-                        format!("     (recursive depth: {})", s.depth)
-                    } else {
-                        String::new()
-                    }
-                );
-            }
-            for e in &s.parse_errors {
-                let _ = writeln!(out, "Parse error: {e}");
-            }
-            if !s.row_source.is_empty() {
-                let _ = writeln!(out, "\n      Rows  Row Source Operation");
-                let _ = writeln!(
-                    out,
-                    "----------  ---------------------------------------------------"
-                );
-                for r in &s.row_source {
-                    let _ = writeln!(
-                        out,
-                        "{:>10}  {}{}",
-                        r.rows,
-                        " ".repeat(r.depth),
-                        r.operation
-                    );
-                }
-            }
-            wait_table(&mut out, &s.waits);
-            out.push('\n');
+            out.push_str(&self.statements[i].to_text());
         }
         for (title, t) in [
             (

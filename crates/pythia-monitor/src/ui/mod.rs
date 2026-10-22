@@ -53,6 +53,23 @@ pub enum MonitorAction {
     OpenPath(PathBuf),
     /// Put text on the clipboard (the monitor also copies it itself via egui).
     CopyText(String),
+    /// Have the host's AI assistant analyze slow SQL or a report.
+    Analyze(Analysis),
+}
+
+/// Slow SQL or a report to have analyzed, with what the monitor knows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Analysis {
+    /// What it is, e.g. "top SQL 7h35uxf5uhmm1".
+    pub title: String,
+    /// The statement, if it is about one.
+    pub sql: Option<String>,
+    /// Its SQL_ID, for the plan in the cursor cache.
+    pub sql_id: Option<String>,
+    /// Statistics, waits, plans or report text: metadata.
+    pub details: String,
+    /// Captured bind values: data, sent only if the user allows it.
+    pub binds: Vec<String>,
 }
 
 #[derive(Default)]
@@ -129,6 +146,8 @@ pub(crate) enum Want {
         sid: i64,
         serial: i64,
     },
+    /// Hand to the host's assistant (no task).
+    Analyze(Analysis),
 }
 
 /// Result routing for a token.
@@ -148,11 +167,15 @@ enum Job {
 
 /// Collected by views while drawing.
 #[derive(Default)]
-pub(crate) struct Wants(pub Vec<Want>);
+pub(crate) struct Wants {
+    list: Vec<Want>,
+    /// Views offer "Analyze with AI".
+    pub analyze: bool,
+}
 
 impl Wants {
     pub fn push(&mut self, w: Want) {
-        self.0.push(w);
+        self.list.push(w);
     }
 }
 
@@ -171,6 +194,8 @@ pub struct Monitor {
     toast: Option<(String, bool, f64)>,
     /// Follow-up requests produced while handling results.
     deferred: Vec<Want>,
+    /// The host has an AI assistant: views offer to analyze with it.
+    analyze: bool,
 }
 
 impl Default for Monitor {
@@ -195,7 +220,14 @@ impl Monitor {
             next_token: 1,
             toast: None,
             deferred: Vec::new(),
+            analyze: false,
         }
+    }
+
+    /// Offers "Analyze with AI" on slow SQL, sessions, reports and traces;
+    /// chosen ones come back as [`MonitorAction::Analyze`].
+    pub fn set_analyze(&mut self, on: bool) {
+        self.analyze = on;
     }
 
     /// Hide the tab bar to host a single view as its own document.
@@ -239,7 +271,10 @@ impl Monitor {
 
     pub fn ui(&mut self, ui: &mut Ui) -> MonitorOutput {
         let now = ui.input(|i| i.time);
-        let mut wants = Wants(std::mem::take(&mut self.deferred));
+        let mut wants = Wants {
+            list: std::mem::take(&mut self.deferred),
+            analyze: self.analyze,
+        };
         let mut out = MonitorOutput::default();
 
         if self.caps.is_none() && !self.caps_pending {
@@ -305,7 +340,11 @@ impl Monitor {
             },
         }
 
-        for want in wants.0 {
+        for want in wants.list {
+            if let Want::Analyze(analysis) = want {
+                out.actions.push(MonitorAction::Analyze(analysis));
+                continue;
+            }
             if let Want::ShowSessions = want {
                 self.tab = MonitorTab::Sessions;
                 continue;
@@ -441,7 +480,10 @@ impl Monitor {
                 Job::SessionTraceFile,
                 Box::new(move |c| boxed(queries::session_trace_file(c, sid))),
             ),
-            Want::OpenDetail { .. } | Want::ShowBlocking | Want::ShowSessions => return None,
+            Want::OpenDetail { .. }
+            | Want::ShowBlocking
+            | Want::ShowSessions
+            | Want::Analyze(_) => return None,
         };
         Some(MonitorRequest {
             token: self.token(job),

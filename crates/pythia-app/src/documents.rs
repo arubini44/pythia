@@ -94,6 +94,8 @@ pub struct Effects {
     pub jumped_from: Option<(usize, usize)>,
     /// References found in the document, to list.
     pub references: Option<Vec<Reference>>,
+    /// Requests for the AI assistant (e.g. slow SQL in the monitor).
+    pub ai: Vec<crate::ai::AiRequest>,
 }
 
 /// A found reference in a document.
@@ -154,6 +156,7 @@ impl Effects {
         self.recompile = other.recompile.or(self.recompile.take());
         self.invalid_changed |= other.invalid_changed;
         self.references = other.references.or(self.references.take());
+        self.ai.extend(other.ai);
     }
 }
 

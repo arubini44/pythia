@@ -6,7 +6,7 @@ use egui::{RichText, Ui};
 use pythia_db::DbError;
 
 use super::style::{self, section};
-use super::{MonitorAction, Want, Wants};
+use super::{Analysis, MonitorAction, Want, Wants};
 use crate::queries::{AwrSnapshot, Capabilities, explain_error};
 
 struct Report {
@@ -272,6 +272,18 @@ impl AwrView {
                         Err(e) => self.message = Some((true, e.to_string())),
                     }
                 }
+                if wants.analyze
+                    && ui
+                        .small_button("Analyze with AI")
+                        .on_hover_text("Have the AI assistant find the bottlenecks in the report")
+                        .clicked()
+                {
+                    wants.push(Want::Analyze(Analysis {
+                        title: report_title(&report.title),
+                        details: report.text.clone(),
+                        ..Default::default()
+                    }));
+                }
             });
             egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                 ui.add(
@@ -279,6 +291,20 @@ impl AwrView {
                 );
             });
         }
+    }
+}
+
+/// What a report is, from its file title (`awr_10_12`, `ash_last_30m`).
+fn report_title(title: &str) -> String {
+    if let Some((begin, end)) = title.strip_prefix("awr_").and_then(|r| r.split_once('_')) {
+        format!("the AWR report for snapshots {begin} to {end}")
+    } else if let Some(minutes) = title
+        .strip_prefix("ash_last_")
+        .and_then(|r| r.strip_suffix('m'))
+    {
+        format!("the ASH report of the last {minutes} minutes")
+    } else {
+        title.to_owned()
     }
 }
 

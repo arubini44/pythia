@@ -43,6 +43,7 @@ pub enum Tab {
     Log,
     Debugger,
     Doc(DocId),
+    Assistant,
 }
 
 /// Layout and documents, restored on the next start.
@@ -91,6 +92,7 @@ pub struct PythiaApp {
     debug_run: Option<(DocId, u64)>,
     /// Commands asked for by documents, run with the next frame's commands.
     queued_commands: Vec<Command>,
+    assistant: crate::ai::Assistant,
     /// Dictionary caches for code assistance, by connection.
     catalogs: HashMap<String, pythia_lsp_core::CatalogCache>,
     catalog_revision: u64,
@@ -173,6 +175,7 @@ impl PythiaApp {
             debug: Default::default(),
             debug_run: None,
             queued_commands: Vec::new(),
+            assistant: Default::default(),
             catalogs: HashMap::new(),
             catalog_revision: 0,
             catalog_inflight: HashMap::new(),
@@ -675,6 +678,13 @@ impl PythiaApp {
             self.dock[path.surface].split_below(path.node, 0.62, vec![tab]);
             return;
         }
+        // The assistant sits right of the documents it works with.
+        if tab == Tab::Assistant
+            && let Some(path) = self.dock.find_tab_from(|t| matches!(t, Tab::Doc(_)))
+        {
+            self.dock[path.surface].split_right(path.node, 0.66, vec![tab]);
+            return;
+        }
         // The project sits next to the object browser.
         if tab == Tab::Project
             && let Some(path) = self.dock.find_tab(&Tab::Browser)
@@ -835,6 +845,13 @@ impl PythiaApp {
         self.queued_commands.extend(effects.commands);
         if let (Some(block), Some(id)) = (effects.debug, doc) {
             self.start_debug(id, block);
+        }
+        for request in effects.ai {
+            let source = doc
+                .and_then(|id| self.docs.get(&id))
+                .map(Document::title)
+                .unwrap_or_default();
+            self.ai_start(request, None, source, connection.clone());
         }
         for request in effects.open {
             self.open(request);
@@ -1016,6 +1033,196 @@ impl PythiaApp {
         let ctx = self.notify.0.clone();
         let effects = self.browser.perform(action, &ctx);
         self.apply_browser(effects);
+    }
+
+    // ----- AI assistant ---------------------------------------------------
+
+    /// Asks the assistant about the focused window.
+    fn ai_ask(&mut self, task: pythia_ai::Task) {
+        use pythia_ai::Task;
+        let doc = self
+            .focused
+            .and_then(|id| self.docs.get(&id).map(|d| (id, d)));
+        let snapshot = match doc.map(|(id, d)| (id, &d.kind)) {
+            Some((id, DocKind::Sql(w))) => crate::ai::context::sql_window(w, id, &task),
+            Some((id, DocKind::Program(w))) => crate::ai::context::program_window(w, id, &task),
+            _ => Default::default(),
+        };
+        let connection = doc.and_then(|(_, d)| d.connection.clone());
+        let needs_code = matches!(
+            task,
+            Task::Explain | Task::Fix | Task::Rewrite | Task::AnalyzePlan
+        );
+        let problem = if needs_code && !snapshot.has_code() {
+            Some("Put the cursor on a statement in a SQL or program window, or select code, first")
+        } else if task == Task::AnalyzePlan && snapshot.lookup.explain.is_none() {
+            Some(
+                "Plans are analyzed for SQL statements: put the cursor on one in a SQL window, or select one",
+            )
+        } else if task == Task::AnalyzePlan
+            && !connection
+                .as_deref()
+                .and_then(|c| self.conns.get(c))
+                .is_some_and(|c| c.is_connected())
+        {
+            Some("Connect first: the plan comes from the database")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            self.open_tab(Tab::Assistant);
+            self.assistant.notice(problem);
+            return;
+        }
+        let request = crate::ai::AiRequest {
+            task,
+            parts: snapshot.parts,
+            lookup: snapshot.lookup,
+        };
+        self.ai_start(request, snapshot.origin, snapshot.source, connection);
+    }
+
+    /// Starts an assistant request: dictionary lookups on the connection
+    /// first if there are any, then the model.
+    fn ai_start(
+        &mut self,
+        request: crate::ai::AiRequest,
+        origin: Option<crate::ai::Origin>,
+        source: String,
+        connection: Option<String>,
+    ) {
+        self.open_tab(Tab::Assistant);
+        let Some(backend) = self.assistant.backend(&self.settings.ai).cloned() else {
+            // The panel says how to set one up.
+            return;
+        };
+        if self.assistant.is_busy() {
+            self.assistant
+                .notice("Still answering the last request: wait for it or stop it first");
+            return;
+        }
+        let conn = connection
+            .as_deref()
+            .and_then(|c| self.conns.get(c))
+            .filter(|c| c.is_connected());
+        let mut parts = Vec::new();
+        if let Some(server) = conn.and_then(|c| c.server()) {
+            parts.push(crate::ai::context::connection_part(server));
+        }
+        parts.extend(request.parts);
+        let entry = self
+            .assistant
+            .add(request.task, parts, origin, source, &backend);
+        match connection.filter(|_| conn.is_some()) {
+            Some(name) if !request.lookup.is_empty() => {
+                let id = request_id();
+                self.assistant.look_up(entry, id);
+                let task = crate::ai::lookup::task(request.lookup);
+                self.conns.send_main(&name, DbRequest::Task { id, task });
+            }
+            _ => self
+                .assistant
+                .ask(entry, &self.settings.ai, self.notify.callback()),
+        }
+    }
+
+    fn assistant_actions(&mut self, actions: Vec<crate::ai::PanelAction>) {
+        use crate::ai::PanelAction;
+        for action in actions {
+            match action {
+                PanelAction::Submit(task) => self.ai_ask(task),
+                PanelAction::Retry(entry) => {
+                    self.assistant
+                        .ask(entry, &self.settings.ai, self.notify.callback())
+                }
+                PanelAction::Insert { origin, text } => self.ai_insert(origin, &text),
+                PanelAction::Replace {
+                    entry,
+                    origin,
+                    text,
+                } => self.ai_replace(entry, origin, &text),
+                PanelAction::NewSqlWindow(text) => match self.current_connection() {
+                    Some(connection) => self.open(OpenRequest::Sql {
+                        connection,
+                        text,
+                        run: false,
+                    }),
+                    None => {
+                        let title = self.new_sql_title();
+                        self.add_doc(None, DocKind::Sql(SqlWindow::new(title, text)));
+                    }
+                },
+                PanelAction::OpenSettings => {
+                    self.settings_dialog.open = true;
+                    self.settings_dialog.show_ai();
+                }
+            }
+        }
+    }
+
+    /// The editor of a SQL window, or part `part` of a program window
+    /// (made the active one).
+    fn editor_mut(&mut self, doc: DocId, part: usize) -> Option<&mut crate::editor::Editor> {
+        match &mut self.docs.get_mut(&doc)?.kind {
+            DocKind::Sql(w) => Some(&mut w.editor),
+            DocKind::Program(w) if part < w.parts.len() => {
+                w.active = part;
+                Some(&mut w.parts[part].editor)
+            }
+            _ => None,
+        }
+    }
+
+    /// Inserts code from an answer at the cursor of the editor the request
+    /// came from (or the focused one, or a new SQL window).
+    fn ai_insert(&mut self, origin: Option<crate::ai::Origin>, text: &str) {
+        let target = origin
+            .map(|o| (o.doc, o.part))
+            .filter(|(doc, _)| self.docs.contains_key(doc))
+            .or_else(|| {
+                let id = self.focused?;
+                match &self.docs.get(&id)?.kind {
+                    DocKind::Program(w) => Some((id, w.active)),
+                    DocKind::Sql(_) => Some((id, 0)),
+                    _ => None,
+                }
+            });
+        match target {
+            Some((doc, part)) if self.editor_mut(doc, part).is_some() => {
+                if let Some(editor) = self.editor_mut(doc, part) {
+                    editor.insert(text);
+                }
+                self.open_tab(Tab::Doc(doc));
+            }
+            _ => {
+                self.assistant_actions(vec![crate::ai::PanelAction::NewSqlWindow(text.to_owned())])
+            }
+        }
+    }
+
+    /// Replaces the statement or selection a request was about with code
+    /// from its answer, if it is still unchanged.
+    fn ai_replace(&mut self, entry: usize, origin: crate::ai::Origin, text: &str) {
+        let Some((range, original)) = origin.target else {
+            return;
+        };
+        let Some(editor) = self.editor_mut(origin.doc, origin.part) else {
+            self.assistant
+                .notice("Its window is closed: use Copy or New SQL window instead");
+            return;
+        };
+        if editor.text().get(range.clone()) != Some(original.as_str()) {
+            self.assistant
+                .notice("The code changed since it was asked about: use Insert or Copy instead");
+            return;
+        }
+        let text = crate::ai::fit_terminator(&original, text);
+        let line = editor.text()[..range.start].matches('\n').count() + 1;
+        editor.replace(range.clone(), &text, line);
+        let replaced = range.start..range.start + text.len();
+        editor.select(replaced.clone());
+        self.assistant.replaced(entry, replaced, text);
+        self.open_tab(Tab::Doc(origin.doc));
     }
 
     /// Starts a debug run of `block` on the document's session.
@@ -1648,6 +1855,19 @@ impl PythiaApp {
                     self.connect_dialog.show(self.last_profile.as_ref());
                 }
             }
+            Command::ShowAssistant | Command::AiAsk | Command::AiGenerateSql => {
+                let mode = match command {
+                    Command::AiAsk => crate::ai::Mode::Ask,
+                    Command::AiGenerateSql => crate::ai::Mode::Generate,
+                    _ => self.assistant.mode,
+                };
+                self.assistant.focus(mode);
+                self.open_tab(Tab::Assistant);
+            }
+            Command::AiExplain => self.ai_ask(pythia_ai::Task::Explain),
+            Command::AiFix => self.ai_ask(pythia_ai::Task::Fix),
+            Command::AiRewrite => self.ai_ask(pythia_ai::Task::Rewrite),
+            Command::AiAnalyzePlan => self.ai_ask(pythia_ai::Task::AnalyzePlan),
             Command::ShowPalette => self.palette.toggle(),
             Command::ShowBrowser => self.open_tab(Tab::Browser),
             Command::ShowProject => self.open_tab(Tab::Project),
@@ -2037,6 +2257,15 @@ impl PythiaApp {
                     Err(e) => warn!("catalog lookup failed: {e}"),
                 }
             }
+            DbEvent::TaskDone { id, result } if self.assistant.is_lookup(id) => {
+                let parts = result.map_err(|e| e.to_string()).and_then(|any| {
+                    any.downcast::<Vec<pythia_ai::Part>>()
+                        .map(|parts| *parts)
+                        .map_err(|_| "unexpected lookup result".to_owned())
+                });
+                self.assistant
+                    .on_lookup(parts, &self.settings.ai, self.notify.callback());
+            }
             DbEvent::Meta { id, result } if self.finder.pending == Some(id) => match result {
                 Ok(MetaResult::Objects(objects)) => self.finder.results(id, objects),
                 Ok(_) => {}
@@ -2133,6 +2362,17 @@ impl PythiaApp {
                 item(ui, Command::CompareSchemas);
                 item(ui, Command::CompareData);
             });
+            bar_menu(ui, "AI", |ui| {
+                item(ui, Command::AiAsk);
+                item(ui, Command::AiGenerateSql);
+                ui.separator();
+                item(ui, Command::AiExplain);
+                item(ui, Command::AiFix);
+                item(ui, Command::AiRewrite);
+                item(ui, Command::AiAnalyzePlan);
+                ui.separator();
+                item(ui, Command::ShowAssistant);
+            });
             bar_menu(ui, "Debug", |ui| {
                 item(ui, Command::DebugStart);
                 item(ui, Command::ToggleBreakpoint);
@@ -2202,6 +2442,7 @@ impl PythiaApp {
                 item(ui, Command::ShowPalette);
                 item(ui, Command::ShowBrowser);
                 item(ui, Command::ShowLog);
+                item(ui, Command::ShowAssistant);
                 ui.separator();
                 item(ui, Command::ThemeSystem);
                 item(ui, Command::ThemeDark);
@@ -2507,6 +2748,13 @@ impl PythiaApp {
             ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 commands.extend(button(ui, Icon::Palette, "", Command::ShowPalette, Ok(())));
+                commands.extend(button(
+                    ui,
+                    Icon::Sparkle,
+                    "",
+                    Command::ShowAssistant,
+                    Ok(()),
+                ));
             });
         });
         rebind
@@ -2908,7 +3156,8 @@ impl eframe::App for PythiaApp {
             || self.finder.open
             || self.history_dialog.open
             || self.settings_dialog.is_recording()
-            || self.save_report.is_some();
+            || self.save_report.is_some()
+            || self.assistant.typing(&ctx);
         if self.debug.is_active() && !modal_open {
             self.debug.handle_keys(&ctx);
         }
@@ -2979,6 +3228,11 @@ impl eframe::App for PythiaApp {
             .iter()
             .map(|(n, c)| (n.clone(), c.profile.privilege))
             .collect();
+        self.assistant.poll();
+        let focused_title = self
+            .focused
+            .and_then(|id| self.docs.get(&id))
+            .map(Document::title);
         let mut viewer = Viewer {
             docs: &mut self.docs,
             browser: &mut self.browser,
@@ -2994,6 +3248,9 @@ impl eframe::App for PythiaApp {
             catalog_revision: self.catalog_revision,
             debug: &mut self.debug,
             debug_actions: Vec::new(),
+            assistant: &mut self.assistant,
+            assistant_actions: Vec::new(),
+            focused_title,
             effects: Vec::new(),
             browser_effects: Effects::default(),
             closed: Vec::new(),
@@ -3014,6 +3271,7 @@ impl eframe::App for PythiaApp {
             closed,
             rebind,
             debug_actions,
+            assistant_actions,
             ..
         } = viewer;
         // From the debugger panel, e.g. a call stack frame's source.
@@ -3029,6 +3287,7 @@ impl eframe::App for PythiaApp {
         }
         self.apply_browser(browser_effects);
         self.project_actions(project_actions);
+        self.assistant_actions(assistant_actions);
 
         self.popups(&ctx, &mut commands);
         commands.append(&mut self.queued_commands);
@@ -3422,6 +3681,33 @@ impl PythiaApp {
     pub fn test_browser_loading(&self) -> bool {
         self.browser.is_loading()
     }
+
+    /// Sets up one AI backend whose answers come from `responder`.
+    pub fn test_ai(&mut self, responder: crate::ai::Responder) {
+        self.settings.ai.backends = vec![pythia_config::AiBackend {
+            name: "Fake model".into(),
+            command: "fake".into(),
+            ..pythia_config::AiBackend::new(pythia_config::AiKind::Cli, "fake".into())
+        }];
+        self.assistant.responder = Some(responder);
+    }
+
+    pub fn test_assistant(&mut self) -> &mut crate::ai::Assistant {
+        &mut self.assistant
+    }
+
+    pub fn test_ai_answers(&self) -> usize {
+        self.assistant.answers()
+    }
+
+    pub fn test_connect_dialog_open(&self) -> bool {
+        self.connect_dialog.open
+    }
+
+    pub fn test_settings_ai(&mut self) {
+        self.settings_dialog.open = true;
+        self.settings_dialog.show_ai();
+    }
 }
 
 struct Viewer<'a> {
@@ -3439,6 +3725,10 @@ struct Viewer<'a> {
     catalog_revision: u64,
     debug: &'a mut pythia_debugger::ui::DebugSession,
     debug_actions: Vec<pythia_debugger::ui::DebugAction>,
+    assistant: &'a mut crate::ai::Assistant,
+    assistant_actions: Vec<crate::ai::PanelAction>,
+    /// Title of the focused document, which assistant questions are about.
+    focused_title: Option<String>,
     effects: Vec<(DocId, Effects)>,
     browser_effects: Effects,
     closed: Vec<DocId>,
@@ -3459,6 +3749,7 @@ impl TabViewer for Viewer<'_> {
             Tab::Project => "Project".into(),
             Tab::Log => "Log".into(),
             Tab::Debugger => "Debugger".into(),
+            Tab::Assistant => "Assistant".into(),
             Tab::Doc(id) => match self.docs.get(id) {
                 Some(doc) => {
                     let color = doc
@@ -3491,6 +3782,14 @@ impl TabViewer for Viewer<'_> {
             Tab::Debugger => {
                 let actions = self.debug.ui(ui);
                 self.debug_actions.extend(actions);
+            }
+            Tab::Assistant => {
+                let cx = crate::ai::PanelContext {
+                    ai: &self.settings.ai,
+                    focused: self.focused_title.clone(),
+                };
+                let actions = self.assistant.ui(ui, &cx);
+                self.assistant_actions.extend(actions);
             }
             Tab::Log => {
                 egui::ScrollArea::vertical()

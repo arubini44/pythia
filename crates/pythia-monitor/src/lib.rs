@@ -11,4 +11,4 @@ pub mod queries;
 pub mod tkprof;
 pub mod ui;
 
-pub use ui::{Monitor, MonitorAction, MonitorOutput, MonitorRequest, MonitorTab, Token};
+pub use ui::{Analysis, Monitor, MonitorAction, MonitorOutput, MonitorRequest, MonitorTab, Token};

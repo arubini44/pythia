@@ -9,6 +9,7 @@ pub struct SettingsDialog {
     section: Section,
     keys: KeysState,
     format: FormatState,
+    ai: AiState,
 }
 
 /// Where formatter settings are learned from.
@@ -115,6 +116,22 @@ impl FormatState {
 }
 
 #[derive(Default)]
+struct AiState {
+    /// Index of the backend shown.
+    selected: usize,
+    /// API key typed for the shown backend, not stored yet.
+    key: String,
+    /// Whether a key is stored, by backend id (read from the keychain once).
+    has_key: std::collections::HashMap<String, bool>,
+    /// Test request running: (backend id, job).
+    test: Option<(String, crate::ai::Job)>,
+    /// Outcome of the last test: (backend id, answer or error).
+    tested: Option<(String, Result<String, String>)>,
+    /// A keychain problem to show.
+    problem: Option<String>,
+}
+
+#[derive(Default)]
 struct KeysState {
     filter: String,
     /// Waiting for the new shortcut of this command.
@@ -134,10 +151,11 @@ enum Section {
     Keyboard,
     Debugger,
     InvalidObjects,
+    Ai,
 }
 
 impl Section {
-    const ALL: [Section; 8] = [
+    const ALL: [Section; 9] = [
         Section::Appearance,
         Section::Editor,
         Section::CodeAssist,
@@ -146,6 +164,7 @@ impl Section {
         Section::Keyboard,
         Section::Debugger,
         Section::InvalidObjects,
+        Section::Ai,
     ];
 
     fn label(self) -> &'static str {
@@ -158,6 +177,7 @@ impl Section {
             Section::Keyboard => "Keyboard",
             Section::Debugger => "Debugger",
             Section::InvalidObjects => "Invalid objects",
+            Section::Ai => "AI",
         }
     }
 }
@@ -183,6 +203,10 @@ impl SettingsDialog {
     #[cfg(test)]
     pub fn show_keyboard(&mut self) {
         self.section = Section::Keyboard;
+    }
+
+    pub fn show_ai(&mut self) {
+        self.section = Section::Ai;
     }
 
     #[cfg(test)]
@@ -240,6 +264,7 @@ impl SettingsDialog {
                             Section::Keyboard => keyboard(ui, settings, &mut self.keys),
                             Section::Debugger => debugger(ui, settings),
                             Section::InvalidObjects => invalid_objects(ui, settings),
+                            Section::Ai => ai(ui, settings, &mut self.ai),
                         }
                     });
                 });
@@ -464,6 +489,314 @@ fn debugger(ui: &mut Ui, s: &mut Settings) {
             ui.checkbox(&mut s.compile_debug_info, "");
         },
     );
+}
+
+fn ai(ui: &mut Ui, s: &mut Settings, st: &mut AiState) {
+    use pythia_config::{AiBackend, AiKind};
+    let ai = &mut s.ai;
+    if let Some((id, job)) = &st.test
+        && let Some(result) = job.poll()
+    {
+        st.tested = Some((id.clone(), result));
+        st.test = None;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Models").strong());
+        ui.add_space(8.0);
+        let default = ai.default_backend().map(|b| b.id.clone());
+        for (i, b) in ai.backends.iter().enumerate() {
+            let label = if default.as_ref() == Some(&b.id) {
+                format!("{} (default)", b.name)
+            } else {
+                b.name.clone()
+            };
+            if ui
+                .selectable_label(st.selected == i, label)
+                .on_hover_text(b.kind.label())
+                .clicked()
+            {
+                st.selected = i;
+                st.key.clear();
+            }
+        }
+        ui.menu_button("Add…", |ui| {
+            for kind in AiKind::ALL {
+                if ui.button(kind.label()).clicked() {
+                    let mut backend = AiBackend::new(kind, AiBackend::new_id());
+                    let base = backend.name.clone();
+                    let mut n = 2;
+                    while ai.backends.iter().any(|b| b.name == backend.name) {
+                        backend.name = format!("{base} {n}");
+                        n += 1;
+                    }
+                    ai.backends.push(backend);
+                    st.selected = ai.backends.len() - 1;
+                    st.key.clear();
+                    ui.close();
+                }
+            }
+        });
+    });
+    ui.add_space(6.0);
+    egui::ScrollArea::vertical()
+        .id_salt("ai-backend")
+        .max_height(360.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| selected_backend(ui, ai, st));
+    ui.add_space(12.0);
+    ui.label(RichText::new("What is sent").strong());
+    ui.label(
+        RichText::new(
+            "Table and column definitions, keys, indexes, statistics, execution plans, source \
+             code and errors go with requests. Data only if allowed here:",
+        )
+        .small()
+        .weak(),
+    );
+    ui.add_space(4.0);
+    row(
+        ui,
+        "Query results",
+        "The first rows of a result shown for the statement",
+        |ui| {
+            ui.checkbox(&mut ai.send_result_data, "Send");
+        },
+    );
+    row(
+        ui,
+        "Bind variable values",
+        "Values entered for :binds, and binds captured in traces",
+        |ui| {
+            ui.checkbox(&mut ai.send_bind_values, "Send");
+        },
+    );
+    row(ui, "Wait for answers", "", |ui| {
+        ui.add(
+            egui::DragValue::new(&mut ai.timeout_secs)
+                .range(10..=3600)
+                .suffix(" s"),
+        );
+    });
+}
+
+/// The fields and buttons of the backend picked in Settings → AI.
+fn selected_backend(ui: &mut Ui, ai: &mut pythia_config::AiSettings, st: &mut AiState) {
+    let default_id = ai.default_backend().map(|b| b.id.clone());
+    let Some(b) = ai.backends.get_mut(st.selected) else {
+        ui.add(
+            egui::Label::new(
+                "Add the model the assistant uses: a cloud API (Anthropic, or any API \
+                     compatible with OpenAI's chat completions), a model server on this \
+                     machine or network (Ollama, llama.cpp, LM Studio), or a command line \
+                     tool.",
+            )
+            .wrap(),
+        );
+        return;
+    };
+    let mut action = None;
+    backend_ui(ui, b, st);
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let testing = st.test.as_ref().is_some_and(|(id, _)| *id == b.id);
+        if ui
+            .add_enabled(!testing, egui::Button::new("Test"))
+            .on_hover_text("Send a short request and show the answer")
+            .clicked()
+        {
+            action = Some("test");
+        }
+        if default_id.as_ref() != Some(&b.id) && ui.button("Make default").clicked() {
+            action = Some("default");
+        }
+        if ui.button("Remove").clicked() {
+            action = Some("remove");
+        }
+    });
+    match action {
+        Some("test") => {
+            if !st.key.trim().is_empty() {
+                save_key(b, st);
+            }
+            let request = pythia_ai::ChatRequest {
+                system: String::new(),
+                messages: vec![pythia_ai::Message {
+                    role: pythia_ai::Role::User,
+                    content: "This is a connection test. Reply with the single word OK.".into(),
+                }],
+            };
+            let ctx = ui.ctx().clone();
+            let job = crate::ai::spawn(
+                b.clone(),
+                request,
+                std::time::Duration::from_secs(ai.timeout_secs.max(5)),
+                move || ctx.request_repaint(),
+                None,
+            );
+            st.test = Some((b.id.clone(), job));
+            st.tested = None;
+        }
+        Some("default") => ai.default_backend = b.id.clone(),
+        Some("remove") => {
+            crate::secrets::forget_api_key(&b.id);
+            ai.backends.remove(st.selected);
+            st.selected = st.selected.saturating_sub(1);
+            st.key.clear();
+            return;
+        }
+        _ => {}
+    }
+    if let Some((id, job)) = &st.test
+        && *id == b.id
+    {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(format!(
+                "Testing… {:.0} s",
+                job.started.elapsed().as_secs_f64()
+            ));
+        });
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    if let Some((id, result)) = &st.tested
+        && *id == b.id
+    {
+        let (color, text) = match result {
+            Ok(answer) => (
+                crate::theme::SUCCESS,
+                format!("Works. The answer: {}", answer.trim()),
+            ),
+            Err(e) => (ui.visuals().error_fg_color, e.clone()),
+        };
+        ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
+    }
+}
+
+/// The fields of one backend.
+fn backend_ui(ui: &mut Ui, b: &mut pythia_config::AiBackend, st: &mut AiState) {
+    use pythia_config::AiKind;
+    row(ui, "Name", b.kind.label(), |ui| {
+        ui.add(egui::TextEdit::singleline(&mut b.name).desired_width(260.0));
+    });
+    if b.kind == AiKind::Cli {
+        row(
+            ui,
+            "Command",
+            "The request goes to its standard input, the answer comes from its standard output",
+            |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut b.command)
+                        .hint_text("e.g. claude -p  or  ollama run llama3.1")
+                        .desired_width(320.0),
+                );
+            },
+        );
+    } else {
+        let hint = match b.kind {
+            AiKind::Anthropic => "The Messages API, or a gateway that speaks it",
+            AiKind::LocalServer => "llama.cpp's server: http://localhost:8080/v1/chat/completions",
+            _ => "The chat completions URL",
+        };
+        row(ui, "Endpoint", hint, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut b.endpoint).desired_width(320.0));
+        });
+        let model_hint = match b.kind {
+            AiKind::LocalServer => "e.g. llama3.1 (ollama list shows the installed ones)",
+            AiKind::OpenAi => "The provider's model name",
+            _ => "",
+        };
+        row(ui, "Model", "", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut b.model)
+                    .hint_text(model_hint)
+                    .desired_width(260.0),
+            );
+        });
+    }
+    if b.kind.uses_key() {
+        let stored = *st
+            .has_key
+            .entry(b.id.clone())
+            .or_insert_with(|| crate::secrets::load_api_key(&b.id).is_some());
+        let hint = if stored {
+            "Stored in the system keychain; enter a new one to replace it"
+        } else {
+            "Kept in the system keychain, never in the settings file"
+        };
+        let mut save = false;
+        let mut remove = false;
+        row(ui, "API key", hint, |ui| {
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut st.key)
+                    .password(true)
+                    .hint_text(if stored {
+                        "••••••••"
+                    } else {
+                        ""
+                    })
+                    .desired_width(260.0),
+            );
+            save = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui
+                .add_enabled(!st.key.trim().is_empty(), egui::Button::new("Save"))
+                .clicked()
+            {
+                save = true;
+            }
+            if stored && ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+        if save && !st.key.trim().is_empty() {
+            save_key(b, st);
+        }
+        if remove {
+            crate::secrets::forget_api_key(&b.id);
+            st.has_key.insert(b.id.clone(), false);
+        }
+        if let Some(problem) = &st.problem {
+            ui.colored_label(ui.visuals().error_fg_color, problem);
+        }
+    }
+    if b.kind != AiKind::Cli {
+        let hint = if b.kind == AiKind::Anthropic {
+            "Longest answer, in tokens"
+        } else {
+            "Longest answer, in tokens (0: the server's default)"
+        };
+        row(ui, "Max answer tokens", hint, |ui| {
+            ui.add(
+                egui::DragValue::new(&mut b.max_tokens)
+                    .range(0..=128_000)
+                    .speed(100),
+            );
+        });
+    }
+    row(
+        ui,
+        "Context limit",
+        "Characters of context sent at most; small local models need less",
+        |ui| {
+            ui.add(
+                egui::DragValue::new(&mut b.context_chars)
+                    .range(2_000..=4_000_000)
+                    .speed(1000)
+                    .suffix(" chars"),
+            );
+        },
+    );
+}
+
+fn save_key(b: &pythia_config::AiBackend, st: &mut AiState) {
+    match crate::secrets::store_api_key(&b.id, st.key.trim()) {
+        Ok(()) => {
+            st.has_key.insert(b.id.clone(), true);
+            st.key.clear();
+            st.problem = None;
+        }
+        Err(e) => st.problem = Some(e),
+    }
 }
 
 const FORMAT_SAMPLE: &str = "select e.employee_id, e.last_name as name, d.department_name as dept from employees e join departments d on d.department_id = e.department_id where e.salary > 1000 and e.hire_date > sysdate - 30;\n\ncreate or replace procedure raise(p_id in number, p_pct in number default 5) is\n  l_old number; l_new_salary number;\nbegin\n  select salary into l_old from employees where employee_id = p_id;\n  l_new_salary := l_old * (1 + p_pct / 100);\n  if l_new_salary > 10000 then raise_application_error(-20001, 'too much'); end if;\nend;\n/\n";

@@ -8,6 +8,8 @@ pub const WARN: Color32 = Color32::from_rgb(0xe0, 0x9b, 0x2d);
 /// Production connections, destructive actions.
 pub const DANGER: Color32 = Color32::from_rgb(0xe5, 0x48, 0x4d);
 pub const ACCENT: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
+/// Something checked out fine (e.g. a connection test).
+pub const SUCCESS: Color32 = Color32::from_rgb(0x36, 0xa8, 0x5f);
 
 struct Palette {
     /// Window background behind panels (darkest in dark mode).

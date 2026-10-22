@@ -85,6 +85,23 @@ for Linux, Windows and macOS.
 
 ![Monitoring dashboard](docs/screenshots/monitor-dashboard.png)
 
+**AI assistant**
+- Bring your own model: the Anthropic API, any OpenAI-compatible API, a
+  local model server (Ollama, llama.cpp, LM Studio) or a command line tool
+  (prompt on stdin, answer on stdout). Several can be set up, one is the
+  default; API keys live in the OS keychain.
+- Generate SQL from a description, using the real tables, columns and
+  foreign keys of the connected schema; explain, fix (with the compile or
+  run errors) or rewrite the statement under the cursor or the selection,
+  then replace it or insert the answer's code with one click.
+- Plain-language plan analysis (EXPLAIN PLAN, or the actual plan of a run
+  with statistics) with likely problems and concrete fixes; "Analyze with
+  AI" on top SQL, session details, AWR/ASH reports and traces.
+- A side panel for open-ended questions about the focused window. Table
+  definitions, statistics, plans and source go with requests; result rows
+  and bind values only if you allow it in Settings → AI, and each answer
+  shows what was sent.
+
 **Data and schema tools**
 - Schema compare with structural table diffs and safe, ordered sync
   scripts; data compare by key with sync DML.
@@ -225,6 +242,7 @@ once with `PYTHIA_SCREENSHOT_DIR` set. The reports test needs
 | `pythia-debugger` | JDWP debugger and panel |
 | `pythia-monitor` | dashboard, sessions, AWR/ASH, trace analyzer |
 | `pythia-compare` | schema and data compare |
+| `pythia-ai` | AI backends (HTTP, command line), prompts and the data policy |
 | `pythia-config` | settings and saved connections |
 
 See [CONCEPT.md](CONCEPT.md) for the full plan and status.

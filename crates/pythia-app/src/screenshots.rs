@@ -2475,3 +2475,178 @@ fn toolbar_follows_the_transaction() {
         app.test_transaction_state() == Err("No transaction")
     });
 }
+
+/// The assistant panel with a fake model: a statement is explained, its
+/// bind values stay back until allowed in the settings, and code from the
+/// answer replaces the statement.
+#[test]
+fn ai_assistant_panel() {
+    use std::sync::{Arc, Mutex};
+    let mut h = if out_dir().is_some() {
+        harness(true)
+    } else {
+        headless_harness()
+    };
+    let requests: Arc<Mutex<Vec<String>>> = Default::default();
+    let seen = requests.clone();
+    h.state_mut()
+        .test_ai(Arc::new(move |request: &pythia_ai::ChatRequest| {
+            let mut seen = seen.lock().unwrap();
+            let sent: Vec<&str> = request.messages.iter().map(|m| m.content.as_str()).collect();
+            seen.push(format!("{}\n{}", request.system, sent.join("\n")));
+            Ok(if seen.len() == 1 {
+                "It reads the name of one employee by number.\n\n```sql\nselect ename\n  from emp\n where empno = 7839;\n```\n\
+                 - The **primary key** makes this a `UNIQUE SCAN`.\n- A literal shows the plan for one value."
+                    .into()
+            } else {
+                "With :id = 7839 it returns one row.".into()
+            })
+        }));
+    let text = "-- names\nselect ename from emp where empno = :id;\n";
+    let w = h.state_mut().test_sql_window();
+    w.editor.set_text(text);
+    let at = text.find("select").unwrap();
+    w.editor.select(at..at);
+    w.bind_values.insert("id".into(), Some("7839".into()));
+    h.run_steps(2);
+
+    h.state_mut()
+        .test_command(crate::commands::Command::AiExplain);
+    wait_until(&mut h, "the answer", |app| app.test_ai_answers() == 1);
+    assert!(
+        h.query_all_by_label_contains("where empno = 7839")
+            .next()
+            .is_some()
+    );
+    assert!(
+        h.query_by_label_contains("Not sent: Bind variable values")
+            .is_some()
+    );
+    {
+        let seen = requests.lock().unwrap();
+        assert!(seen[0].contains("select ename from emp where empno = :id"));
+        assert!(!seen[0].contains("7839"), "bind value sent: {}", seen[0]);
+    }
+    save(&mut h, "18-ai-assistant-dark");
+
+    // Allowed now: the follow-up's request carries the value. Ctrl+Enter in
+    // the input sends it rather than executing the statement.
+    h.state_mut().test_settings_mut().ai.send_bind_values = true;
+    h.state_mut().test_assistant().focus(crate::ai::Mode::Ask);
+    h.run_steps(2);
+    h.event(egui::Event::Text("Which row does it return?".into()));
+    h.run_steps(1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    wait_until(&mut h, "the second answer", |app| {
+        app.test_ai_answers() == 2
+    });
+    assert!(!h.state().test_connect_dialog_open(), "the statement ran");
+    let follow_up = requests.lock().unwrap()[1].clone();
+    assert!(
+        follow_up.ends_with("Which row does it return?"),
+        "{follow_up}"
+    );
+    assert!(follow_up.contains(":id = '7839'"), "{follow_up}");
+
+    // Code from the first answer replaces the statement; the editor keeps
+    // its terminator.
+    h.get_by_label("Replace").click();
+    h.run_steps(2);
+    assert_eq!(
+        h.state_mut().test_sql_window().editor.text(),
+        "-- names\nselect ename\n  from emp\n where empno = 7839;\n"
+    );
+}
+
+/// With a connection, requests carry the definitions of the tables used, a
+/// plan, and tables found for a description.
+#[test]
+fn ai_with_database() {
+    use std::sync::{Arc, Mutex};
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let spec = std::env::var("PYTHIA_TEST_DB").unwrap();
+    let (cred, db) = spec.rsplit_once('@').unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let conn = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+    let _ = conn.execute("drop table pythia_ai_invoices purge", &[]);
+    conn.execute(
+        "create table pythia_ai_invoices (invoice_id number primary key, amount number(12,2), issued date)",
+        &[],
+    )
+    .unwrap();
+    let mut h = headless_harness();
+    let requests: Arc<Mutex<Vec<String>>> = Default::default();
+    let seen = requests.clone();
+    h.state_mut()
+        .test_ai(Arc::new(move |request: &pythia_ai::ChatRequest| {
+            let last = request.messages.last().unwrap().content.clone();
+            seen.lock().unwrap().push(last);
+            Ok("```sql\nselect 1 from dual\n```".into())
+        }));
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "select * from pythia_ai_invoices where amount > 100;\n".into(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::AiAnalyzePlan);
+    wait_until(&mut h, "the plan analysis", |app| {
+        app.test_ai_answers() == 1
+    });
+    {
+        let sent = &requests.lock().unwrap()[0];
+        assert!(sent.contains("## Database\nOracle"), "{sent}");
+        assert!(
+            sent.contains("## TABLE PYTHIA.PYTHIA_AI_INVOICES\n"),
+            "{sent}"
+        );
+        assert!(sent.contains("Primary key (INVOICE_ID)"), "{sent}");
+        assert!(sent.contains("## Execution plan (EXPLAIN PLAN)"), "{sent}");
+        assert!(sent.contains("TABLE ACCESS FULL"), "{sent}");
+    }
+
+    h.state_mut().test_assistant().mode = crate::ai::Mode::Generate;
+    h.state_mut().test_assistant().input = "invoices above 1000 from last month".into();
+    h.run_steps(1);
+    h.get_by_label("Send").click();
+    wait_until(&mut h, "the generated query", |app| {
+        app.test_ai_answers() == 2
+    });
+    {
+        let sent = &requests.lock().unwrap()[1];
+        assert!(sent.contains("PYTHIA_AI_INVOICES"), "{sent}");
+        assert!(
+            sent.contains("invoices above 1000 from last month"),
+            "{sent}"
+        );
+    }
+    conn.execute("drop table pythia_ai_invoices purge", &[])
+        .unwrap();
+}
+
+/// Settings → AI with a configured backend.
+#[test]
+fn settings_ai() {
+    if out_dir().is_none() {
+        return;
+    }
+    let mut h = harness(true);
+    h.state_mut()
+        .test_ai(std::sync::Arc::new(|_: &pythia_ai::ChatRequest| {
+            Ok("OK".into())
+        }));
+    let claude = pythia_config::AiBackend::new(pythia_config::AiKind::Anthropic, "shot".into());
+    h.state_mut()
+        .test_settings_mut()
+        .ai
+        .backends
+        .insert(0, claude);
+    h.state_mut().test_settings_ai();
+    h.run_steps(3);
+    save(&mut h, "settings-ai");
+}

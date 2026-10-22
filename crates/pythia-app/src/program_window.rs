@@ -665,6 +665,16 @@ impl ProgramWindow {
                 .resizable(true)
                 .default_size(110.0)
                 .show(ui, |ui| {
+                    if part.errors.iter().any(|e| !e.warning)
+                        && crate::ai::button(
+                            ui,
+                            &cx.settings.ai,
+                            "Fix with AI",
+                            "Find the cause of the compile errors and suggest corrected code",
+                        )
+                    {
+                        effects.commands.push(crate::commands::Command::AiFix);
+                    }
                     egui::ScrollArea::vertical()
                         .auto_shrink(false)
                         .show(ui, |ui| {

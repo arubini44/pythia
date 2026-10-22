@@ -89,6 +89,9 @@ impl MonitorWindow {
         }
         let state = self.state();
         state.now = ui.input(|i| i.time);
+        state
+            .monitor
+            .set_analyze(!cx.settings.ai.backends.is_empty());
         let out = state.monitor.ui(ui);
         for request in out.requests {
             let id = request_id();
@@ -105,6 +108,7 @@ impl MonitorWindow {
             match action {
                 MonitorAction::OpenPath(path) => open_path(&path, &mut effects),
                 MonitorAction::CopyText(text) => ui.ctx().copy_text(text),
+                MonitorAction::Analyze(analysis) => effects.ai.push(ai_request(analysis)),
             }
         }
         effects
@@ -117,5 +121,66 @@ fn open_path(path: &std::path::Path, effects: &mut Effects) {
         effects
             .log
             .push(format!("Could not open {}: {e}", path.display()));
+    }
+}
+
+/// An assistant request for something the monitor shows. Captured binds
+/// are labeled as bind values, so the data policy applies to them.
+fn ai_request(analysis: pythia_monitor::Analysis) -> crate::ai::AiRequest {
+    use pythia_ai::{Part, Task};
+    let mut parts = Vec::new();
+    let mut lookup = crate::ai::Lookup {
+        sql_id: analysis.sql_id,
+        ..Default::default()
+    };
+    if let Some(sql) = &analysis.sql {
+        parts.push(Part::code("Statement", sql));
+        lookup.tables = crate::ai::context::table_refs(sql);
+    }
+    if !analysis.details.is_empty() {
+        parts.push(Part::text("Statistics and details", analysis.details));
+    }
+    if !analysis.binds.is_empty() {
+        parts.push(Part::bind_values(
+            "Captured bind values",
+            analysis.binds.join("\n"),
+        ));
+    }
+    crate::ai::AiRequest {
+        task: Task::AnalyzeSlow(analysis.title),
+        parts,
+        lookup,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pythia_ai::Sensitivity;
+
+    use super::*;
+
+    #[test]
+    fn trace_binds_are_bind_values() {
+        let request = ai_request(pythia_monitor::Analysis {
+            title: "statement 1 from the trace file x.trc".into(),
+            sql: Some("select * from emp where empno = :1".into()),
+            sql_id: None,
+            details: "parse 1 0.00".into(),
+            binds: vec!["abc: 7839".into()],
+        });
+        let kinds: Vec<Sensitivity> = request.parts.iter().map(|p| p.sensitivity).collect();
+        assert_eq!(
+            kinds,
+            [
+                Sensitivity::Metadata,
+                Sensitivity::Metadata,
+                Sensitivity::BindValues
+            ]
+        );
+        assert_eq!(request.lookup.tables, [(None, "EMP".to_owned())]);
+        assert_eq!(
+            request.task.title(),
+            "Analyze statement 1 from the trace file x.trc"
+        );
     }
 }

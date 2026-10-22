@@ -1610,6 +1610,18 @@ impl SqlWindow {
                     view,
                     ..
                 }) => {
+                    if !rows.is_empty()
+                        && crate::ai::button(
+                            ui,
+                            &cx.settings.ai,
+                            "Analyze with AI",
+                            "Explain the plan of the current statement and point out problems",
+                        )
+                    {
+                        effects
+                            .commands
+                            .push(crate::commands::Command::AiAnalyzePlan);
+                    }
                     view.ui(ui, rows, egui::Id::new(("plan", cx.id)));
                 }
                 Some(Plan {
@@ -1645,7 +1657,19 @@ impl SqlWindow {
                 }
             },
             BottomTab::Statistics => match &state.statistics {
-                Some((_, Some(Ok(report)))) => statistics_ui(ui, report),
+                Some((_, Some(Ok(report)))) => {
+                    if crate::ai::button(
+                        ui,
+                        &cx.settings.ai,
+                        "Analyze with AI",
+                        "Explain where the time goes, from the actual plan and statistics",
+                    ) {
+                        effects
+                            .commands
+                            .push(crate::commands::Command::AiAnalyzePlan);
+                    }
+                    statistics_ui(ui, report)
+                }
                 Some((_, Some(Err(e)))) => {
                     ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                 }
@@ -1658,6 +1682,17 @@ impl SqlWindow {
             },
             BottomTab::Result(_) | BottomTab::Messages => {
                 let mut jump = None;
+                if state.messages.iter().any(|m| m.level == Level::Error)
+                    && state.running.is_none()
+                    && crate::ai::button(
+                        ui,
+                        &cx.settings.ai,
+                        "Fix with AI",
+                        "Find the cause of the error and suggest a corrected statement",
+                    )
+                {
+                    effects.commands.push(crate::commands::Command::AiFix);
+                }
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .stick_to_bottom(true)
