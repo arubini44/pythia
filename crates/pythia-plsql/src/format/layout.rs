@@ -7,7 +7,7 @@
 //! original text if not.
 
 use super::doc::{Doc, Row, cat, group, if_break, nest, rows, text};
-use super::{Case, CommaStyle, FormatOptions};
+use super::{Case, CommaStyle, FormatOptions, Wrap};
 use crate::lexer::TokenKind;
 
 #[derive(Debug, Clone, Copy)]
@@ -549,16 +549,28 @@ impl<'a, 's> Layout<'a, 's> {
         cat(out)
     }
 
-    fn comma(&mut self) -> Doc {
+    /// A list comma with the break after (or before) it; `Always` breaks.
+    fn comma_wrapped(&mut self, wrap: Wrap) -> Doc {
         let c = self.take();
+        let always = wrap == Wrap::Always;
         match self.o.comma {
-            CommaStyle::Trailing => cat(vec![c, Doc::Line]),
-            CommaStyle::Leading => cat(vec![Doc::SoftLine, c, Doc::Space]),
+            CommaStyle::Trailing => cat(vec![c, if always { Doc::HardLine } else { Doc::Line }]),
+            CommaStyle::Leading => cat(vec![
+                if always { Doc::HardLine } else { Doc::SoftLine },
+                c,
+                Doc::Space,
+            ]),
         }
     }
 
     /// A parenthesized group: a subquery or a comma-separated list.
     fn paren(&mut self, space: Option<bool>) -> Doc {
+        self.paren_wrapped(space, Wrap::Fit)
+    }
+
+    /// [`Layout::paren`] whose list is laid out as `wrap` says (subqueries
+    /// follow the subquery option).
+    fn paren_wrapped(&mut self, space: Option<bool>, wrap: Wrap) -> Doc {
         let space = match space {
             Some(s) => s,
             None => self.peek().is_some_and(|t| self.needs_space(&t)),
@@ -581,10 +593,11 @@ impl<'a, 's> Layout<'a, 's> {
             let q = self.query();
             self.ctx = saved;
             let close = self.close();
+            let line = self.line_for(self.o.subqueries);
             group(cat(vec![
                 open,
-                nest(self.o.indent, cat(vec![Doc::SoftLine, q])),
-                Doc::SoftLine,
+                nest(self.o.indent, cat(vec![line.clone(), q])),
+                line,
                 close,
             ]))
         } else {
@@ -592,21 +605,31 @@ impl<'a, 's> Layout<'a, 's> {
             loop {
                 items.push(self.cond(&|s| s.text_is(",")));
                 if self.text_is(",") {
-                    items.push(self.comma());
+                    items.push(self.comma_wrapped(wrap));
                 } else {
                     break;
                 }
             }
             let close = self.close();
+            let line = self.line_for(wrap);
             group(cat(vec![
                 open,
-                nest(self.o.indent, cat(vec![Doc::SoftLine, cat(items)])),
-                Doc::SoftLine,
+                nest(self.o.indent, cat(vec![line.clone(), cat(items)])),
+                line,
                 close,
             ]))
         };
         self.leave();
         doc
+    }
+
+    /// The line break before a broken group's items: soft when it may stay
+    /// on one line, hard when it always breaks.
+    fn line_for(&self, wrap: Wrap) -> Doc {
+        match wrap {
+            Wrap::Fit => Doc::SoftLine,
+            Wrap::Always => Doc::HardLine,
+        }
     }
 
     fn case_expr(&mut self) -> Doc {
@@ -627,15 +650,15 @@ impl<'a, 's> Layout<'a, 's> {
                 Doc::Nil
             };
             let value = self.expr(&arm_end);
-            arms.push(cat(vec![Doc::Line, when, c, then, value]));
+            arms.push(cat(vec![self.arm_line(), when, c, then, value]));
         }
         if self.is("ELSE") {
             let e = self.take();
             let value = self.expr(&arm_end);
-            arms.push(cat(vec![Doc::Line, e, value]));
+            arms.push(cat(vec![self.arm_line(), e, value]));
         }
         let end = if self.is("END") {
-            cat(vec![Doc::Line, self.take()])
+            cat(vec![self.arm_line(), self.take()])
         } else {
             Doc::Nil
         };
@@ -646,6 +669,22 @@ impl<'a, 's> Layout<'a, 's> {
             nest(self.o.indent, cat(arms)),
             end,
         ]))
+    }
+
+    fn arm_line(&self) -> Doc {
+        match self.o.case_arms {
+            Wrap::Fit => Doc::Line,
+            Wrap::Always => Doc::HardLine,
+        }
+    }
+
+    /// The break before `THEN` / `LOOP` of a block header.
+    fn header_line(&self) -> Doc {
+        if self.o.then_on_new_line {
+            Doc::HardLine
+        } else {
+            Doc::Line
+        }
     }
 
     // ----- statements ------------------------------------------------------
@@ -1023,13 +1062,17 @@ impl<'a, 's> Layout<'a, 's> {
                 || s.clause_kind().is_some()
         }));
         if self.text_is("(") && !(self.word_at(1, "SELECT") || self.word_at(1, "WITH")) {
-            head.push(self.paren(Some(true)));
+            head.push(self.paren_wrapped(Some(true), self.o.insert_lists));
         }
         let mut clauses = vec![group(cat(head))];
         if self.is("VALUES") {
             let kw = self.next();
-            let values = self.expr(&|s| s.boundary());
-            clauses.push(cat(vec![kw, values]));
+            let mut values = Vec::new();
+            if self.text_is("(") {
+                values.push(self.paren_wrapped(Some(true), self.o.insert_lists));
+            }
+            values.push(self.expr(&|s| s.boundary()));
+            clauses.push(cat(vec![kw, cat(values)]));
         } else if self.is("SELECT") || self.is("WITH") || self.text_is("(") {
             self.ctx = Ctx::Query;
             clauses.push(self.query());
@@ -1523,7 +1566,7 @@ impl<'a, 's> Layout<'a, 's> {
             let kw = self.take();
             let c = self.cond(&|s| s.is("THEN") || s.text_is(";"));
             let then = if self.is("THEN") {
-                cat(vec![Doc::Line, self.take()])
+                cat(vec![self.header_line(), self.take()])
             } else {
                 Doc::Nil
             };
@@ -1555,17 +1598,19 @@ impl<'a, 's> Layout<'a, 's> {
             // `for x in (subquery) loop`: the subquery indents itself.
             let kw = self.take();
             let header = self.expr(&|s| s.is("LOOP") || s.text_is(";"));
-            let lp = if self.is("LOOP") {
-                self.next()
-            } else {
+            let lp = if !self.is("LOOP") {
                 Doc::Nil
+            } else if self.o.then_on_new_line {
+                cat(vec![Doc::HardLine, self.take()])
+            } else {
+                self.next()
             };
             parts.push(group(cat(vec![kw, header, lp])));
         } else if !self.is("LOOP") {
             let kw = self.take();
             let header = self.cond(&|s| s.is("LOOP") || s.text_is(";"));
             let lp = if self.is("LOOP") {
-                cat(vec![Doc::Line, self.take()])
+                cat(vec![self.header_line(), self.take()])
             } else {
                 Doc::Nil
             };
@@ -1787,7 +1832,10 @@ impl<'a, 's> Layout<'a, 's> {
             ),
             Doc::HardLine,
         ]);
-        group(cat(vec![open, if_break(broken, cat(flat)), close]))
+        match self.o.parameters {
+            Wrap::Fit => group(cat(vec![open, if_break(broken, cat(flat)), close])),
+            Wrap::Always => cat(vec![open, broken, close]),
+        }
     }
 
     fn cursor(&mut self) -> Doc {

@@ -42,6 +42,16 @@ fn variants() -> Vec<FormatOptions> {
             on_new_line: true,
             blank_lines: 0,
             max_width: 40,
+            ..d.clone()
+        },
+        // Every construct broken, leading commas.
+        FormatOptions {
+            case_arms: Wrap::Always,
+            subqueries: Wrap::Always,
+            parameters: Wrap::Always,
+            insert_lists: Wrap::Always,
+            then_on_new_line: true,
+            comma: CommaStyle::Leading,
             ..d
         },
     ]
@@ -388,5 +398,111 @@ fn show() {
             "===== {name}\n{}",
             format(&src, &FormatOptions::default()).text
         );
+    }
+}
+
+// ----- finer-grained rules ---------------------------------------------------
+
+fn with(o: impl FnOnce(&mut FormatOptions)) -> FormatOptions {
+    let mut options = FormatOptions::default();
+    o(&mut options);
+    options
+}
+
+fn fmt_with(src: &str, o: &FormatOptions) -> String {
+    check(src, o, src)
+}
+
+#[test]
+fn case_arms_on_their_own_lines() {
+    let src = "select case when a = 1 then 'x' else 'y' end v from t;";
+    assert_eq!(
+        fmt_with(src, &FormatOptions::default()),
+        "select case when a = 1 then 'x' else 'y' end v from t;"
+    );
+    assert_eq!(
+        fmt_with(src, &with(|o| o.case_arms = Wrap::Always)),
+        "select case\n  when a = 1 then 'x'\n  else 'y'\nend v\nfrom t;"
+    );
+}
+
+#[test]
+fn subqueries_on_their_own_lines() {
+    let src = "select * from (select a from t) x;";
+    assert_eq!(
+        fmt_with(src, &FormatOptions::default()),
+        "select * from (select a from t) x;"
+    );
+    assert_eq!(
+        fmt_with(src, &with(|o| o.subqueries = Wrap::Always)),
+        "select *\nfrom (\n  select a from t\n) x;"
+    );
+}
+
+#[test]
+fn parameters_one_per_line() {
+    let src = "create or replace procedure p(a number, b varchar2) is begin null; end;";
+    assert!(
+        fmt_with(src, &FormatOptions::default())
+            .starts_with("create or replace procedure p(a number, b varchar2) is")
+    );
+    let out = fmt_with(src, &with(|o| o.parameters = Wrap::Always));
+    assert!(
+        out.starts_with("create or replace procedure p(\n  a number,\n  b varchar2\n) is"),
+        "{out}"
+    );
+}
+
+#[test]
+fn insert_lists_one_per_line() {
+    let src = "insert into t (a, b) values (1, nvl(x, 2));";
+    assert_eq!(fmt_with(src, &FormatOptions::default()), src);
+    assert_eq!(
+        fmt_with(src, &with(|o| o.insert_lists = Wrap::Always)),
+        "insert into t (\n  a,\n  b\n)\nvalues (\n  1,\n  nvl(x, 2)\n);"
+    );
+}
+
+#[test]
+fn then_and_loop_on_their_own_line() {
+    let src = "begin if x > 1 then null; end if; while x > 0 loop x := x - 1; end loop; for i in 1 .. 3 loop null; end loop; end;";
+    let out = fmt_with(src, &with(|o| o.then_on_new_line = true));
+    assert!(out.contains("if x > 1\n  then\n"), "{out}");
+    assert!(out.contains("while x > 0\n  loop\n"), "{out}");
+    assert!(out.contains("for i in 1..3\n  loop\n"), "{out}");
+    let out = fmt_with(src, &FormatOptions::default());
+    assert!(out.contains("if x > 1 then\n"), "{out}");
+}
+
+/// Formatting the corpus in a style and learning the style from the result
+/// gives the style back.
+#[test]
+fn learned_style_round_trips() {
+    let src: String = corpus()
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for style in [
+        FormatOptions {
+            keyword_case: Case::Upper,
+            indent: 4,
+            comma: CommaStyle::Leading,
+            ..FormatOptions::default()
+        },
+        FormatOptions {
+            keyword_case: Case::Lower,
+            indent: 2,
+            comma: CommaStyle::Trailing,
+            parameters: Wrap::Always,
+            ..FormatOptions::default()
+        },
+    ] {
+        let formatted = format(&src, &style).text;
+        let learned = super::infer(&formatted, &FormatOptions::default());
+        assert_eq!(learned.keyword_case, style.keyword_case);
+        assert_eq!(learned.indent, style.indent);
+        assert_eq!(learned.comma, style.comma);
+        assert_eq!(learned.parameters, style.parameters);
     }
 }

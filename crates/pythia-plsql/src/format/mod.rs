@@ -14,6 +14,7 @@
 //! - **Never panics**, whatever the input.
 
 mod doc;
+mod infer;
 mod layout;
 #[cfg(test)]
 mod tests;
@@ -24,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lexer::{TokenKind, tokenize};
 use crate::splitter::{StatementKind, split_statements};
+pub use infer::infer;
 use layout::{Layout, Tok};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +43,17 @@ pub enum CommaStyle {
     Trailing,
     /// `, b` at the start of the next line.
     Leading,
+}
+
+/// When a construct is laid out on several lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Wrap {
+    /// On one line if it fits, else one item per line.
+    #[default]
+    Fit,
+    /// Always one item per line.
+    Always,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +77,17 @@ pub struct FormatOptions {
     pub on_new_line: bool,
     /// Blank lines kept where the source had them (0 or 1).
     pub blank_lines: usize,
+    /// `WHEN` / `ELSE` arms of `CASE` expressions.
+    pub case_arms: Wrap,
+    /// Subqueries, inline views and `WITH` queries in parentheses.
+    pub subqueries: Wrap,
+    /// Parameters of procedures, functions and cursors.
+    pub parameters: Wrap,
+    /// The column and `VALUES` lists of `INSERT`.
+    pub insert_lists: Wrap,
+    /// `THEN` and `LOOP` on their own line under `IF` / `ELSIF`, `WHILE` and
+    /// `FOR`.
+    pub then_on_new_line: bool,
 }
 
 impl Default for FormatOptions {
@@ -79,6 +103,11 @@ impl Default for FormatOptions {
             align_declarations: true,
             on_new_line: false,
             blank_lines: 1,
+            case_arms: Wrap::Fit,
+            subqueries: Wrap::Fit,
+            parameters: Wrap::Fit,
+            insert_lists: Wrap::Fit,
+            then_on_new_line: false,
         }
     }
 }

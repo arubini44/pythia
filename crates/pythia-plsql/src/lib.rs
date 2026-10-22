@@ -9,7 +9,9 @@ mod lexer;
 mod parser;
 mod splitter;
 
-pub use format::{Case, CommaStyle, FormatOptions, Formatted, format, format_range};
+pub use format::{
+    Case, CommaStyle, FormatOptions, Formatted, Wrap, format, format_range, infer as infer_format,
+};
 pub use header::{UnitHeader, unit_header};
 pub use keywords::is_keyword;
 pub use lexer::{Token, TokenKind, tokenize};
