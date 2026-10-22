@@ -54,6 +54,11 @@ impl Connection {
         }
     }
 
+    /// How sessions of this connection log in (for worker sessions).
+    pub fn params(&self) -> &pythia_db::ConnectParams {
+        &self.params
+    }
+
     /// Schema the browser starts in.
     pub fn current_schema(&self) -> String {
         self.server()

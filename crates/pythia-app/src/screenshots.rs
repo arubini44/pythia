@@ -401,6 +401,7 @@ fn data_editing() {
             connections: &[],
             debug: None,
             marks: None,
+            privilege: None,
         };
         let effects = app.test_sql_window().start_editing(0, &cx);
         app.test_apply(effects);
@@ -452,6 +453,7 @@ fn data_editing() {
             connections: &[],
             debug: None,
             marks: None,
+            privilege: None,
         };
         let effects = app.test_sql_window().apply_changes(0, &cx);
         app.test_apply(effects);
@@ -2019,6 +2021,114 @@ fn navigation_across_spec_and_body() {
     h.run_steps(3);
     assert!(!h.state().test_reference_rows());
     assert_eq!(state(&mut h), (1, use_at..use_at), "back where it started");
+}
+
+/// The status bar counts invalid objects; its indicator opens the invalid
+/// objects window, which recompiles them over two sessions.
+#[test]
+fn invalid_objects_indicator_and_recompile() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let spec = std::env::var("PYTHIA_TEST_DB").unwrap();
+    let (cred, db) = spec.rsplit_once('@').unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let conn = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+    let drops = [
+        "drop package inv_bad",
+        "drop package inv_p",
+        "drop view inv_v2",
+        "drop view inv_v1",
+        "drop table inv_t purge",
+    ];
+    for sql in drops {
+        let _ = conn.execute(sql, &[]);
+    }
+    for sql in [
+        "create table inv_t (a number, b number)",
+        "create or replace view inv_v1 as select a, b from inv_t",
+        "create or replace view inv_v2 as select a from inv_v1",
+        "create or replace package inv_p as function n return number; end;",
+        "create or replace package body inv_p as function n return number is l number; \
+         begin select count(*) into l from inv_v2; return l; end; end;",
+        "create or replace package inv_bad as procedure p; end;",
+        "create or replace package body inv_bad as procedure p is l number; \
+         begin select b into l from inv_v2; end; end;",
+        "drop table inv_t purge",
+        "create table inv_t (a number, b number)",
+    ] {
+        let _ = conn.execute(sql, &[]);
+    }
+    let invalid_now = || -> u32 {
+        conn.query_row_as::<u32>(
+            "select count(*) from user_objects where status = 'INVALID' and object_name like 'INV\\_%' escape '\\'",
+            &[],
+        )
+        .unwrap()
+    };
+    assert!(invalid_now() >= 4, "set up invalid objects");
+    // Other tests' leftovers count too; ours make a difference of at least 4.
+    let mut h = harness(true);
+    h.state_mut().test_settings_mut().invalid.parallelism = 2;
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    wait_until(&mut h, "invalid count", |app| {
+        app.test_invalid_total("pythia@FREEPDB1").is_some()
+    });
+    let total = h.state().test_invalid_total("pythia@FREEPDB1").unwrap();
+    assert!(total >= 4, "{total}");
+    h.run_steps(2);
+    h.get_by_label_contains(&format!("{total} invalid")).click();
+    wait_until(&mut h, "invalid objects window", |app| {
+        app.test_invalid_window()
+            .is_some_and(|w| !w.is_busy() && !w.objects().is_empty())
+    });
+    let listed = h.state().test_invalid_window().unwrap().objects().len();
+    assert_eq!(listed as u32, total);
+    let bad = h
+        .state()
+        .test_invalid_window()
+        .unwrap()
+        .objects()
+        .iter()
+        .find(|o| o.id.name == "INV_BAD" && o.id.object_type == "PACKAGE BODY")
+        .cloned()
+        .expect("listed");
+    assert!(bad.compilable);
+    h.run_steps(2);
+    save(&mut h, "18-invalid-objects-dark");
+    h.get_by_label_contains("Recompile all").click();
+    wait_until(&mut h, "recompiled", |app| {
+        app.test_invalid_window()
+            .is_some_and(|w| !w.is_busy() && w.result().is_some_and(|r| r.contains("valid now")))
+    });
+    let result = h
+        .state()
+        .test_invalid_window()
+        .unwrap()
+        .result()
+        .unwrap()
+        .to_owned();
+    eprintln!("{result}");
+    assert_eq!(invalid_now(), 1, "only inv_bad's body is left: {result}");
+    let left: Vec<String> = h
+        .state()
+        .test_invalid_window()
+        .unwrap()
+        .objects()
+        .iter()
+        .map(|o| o.id.name.clone())
+        .collect();
+    assert!(left.contains(&"INV_BAD".to_owned()), "{left:?}");
+    assert!(!left.contains(&"INV_P".to_owned()), "{left:?}");
+    // The status bar follows.
+    wait_until(&mut h, "count refreshed", |app| {
+        app.test_invalid_total("pythia@FREEPDB1")
+            .is_some_and(|n| n as usize == left.len())
+    });
+    for sql in drops {
+        conn.execute(sql, &[]).unwrap();
+    }
 }
 
 /// Commit and Rollback follow the focused window's transaction, and never

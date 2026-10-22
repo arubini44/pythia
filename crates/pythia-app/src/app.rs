@@ -96,6 +96,10 @@ pub struct PythiaApp {
     catalog_revision: u64,
     /// Catalog task request id → connection.
     catalog_inflight: HashMap<u64, String>,
+    /// Invalid objects per connection, for the status bar.
+    invalid: HashMap<String, InvalidCount>,
+    /// Count requests in flight: request id → connection.
+    invalid_inflight: HashMap<u64, String>,
     /// Requests already sent (or answered) per connection, to avoid repeats.
     catalog_requested: std::collections::HashSet<(String, pythia_lsp_core::CatalogRequest)>,
     log: Vec<String>,
@@ -170,6 +174,8 @@ impl PythiaApp {
             catalogs: HashMap::new(),
             catalog_revision: 0,
             catalog_inflight: HashMap::new(),
+            invalid: HashMap::new(),
+            invalid_inflight: HashMap::new(),
             catalog_requested: std::collections::HashSet::new(),
             log: Vec::new(),
             connect_dialog: ConnectDialog::default(),
@@ -408,6 +414,7 @@ impl PythiaApp {
             connections: &[],
             debug: Some(&self.debug),
             marks: None,
+            privilege: None,
         }
     }
 
@@ -463,6 +470,42 @@ impl PythiaApp {
                         Some(connection),
                         DocKind::Program(ProgramWindow::new(object)),
                     );
+                }
+            }
+            OpenRequest::InvalidObjects {
+                connection,
+                schema,
+                recompile,
+            } => {
+                let existing = self.docs.iter_mut().find_map(|(id, d)| match &mut d.kind {
+                    DocKind::Invalid(w)
+                        if d.connection.as_deref() == Some(connection.as_str())
+                            && w.schema == schema =>
+                    {
+                        w.recompile_on_load |= recompile;
+                        Some(*id)
+                    }
+                    _ => None,
+                });
+                match existing {
+                    Some(id) => {
+                        self.open_tab(Tab::Doc(id));
+                        if recompile && let Some(d) = self.docs.get_mut(&id) {
+                            let effects = match &mut d.kind {
+                                DocKind::Invalid(w) => w.refresh(),
+                                _ => Effects::default(),
+                            };
+                            self.apply(Some(id), effects);
+                        }
+                    }
+                    None => {
+                        self.add_doc(
+                            Some(connection),
+                            DocKind::Invalid(crate::invalid_window::InvalidObjectsWindow::new(
+                                schema, recompile,
+                            )),
+                        );
+                    }
                 }
             }
             OpenRequest::ProgramMember {
@@ -732,6 +775,7 @@ impl PythiaApp {
             }
             if ddl {
                 self.invalidate_catalog(name);
+                self.refresh_invalid(name);
             }
         }
         for line in effects.log {
@@ -745,6 +789,21 @@ impl PythiaApp {
         }
         for (connection, action) in effects.object_actions {
             self.object_action(connection, action);
+        }
+        if let (Some(request), Some(id), Some(name)) = (effects.recompile, doc, &connection)
+            && let Some(conn) = self.conns.get_mut(name)
+        {
+            let params = conn.params().clone();
+            let task_id = request.id;
+            let task = crate::invalid_window::recompile_task(request, params);
+            conn.doc_session(id, &self.notify)
+                .session
+                .send(DbRequest::Task { id: task_id, task });
+        }
+        if effects.invalid_changed
+            && let Some(name) = &connection
+        {
+            self.refresh_invalid(name);
         }
         if let (Some(id), Some((part, offset))) = (doc, effects.jumped_from) {
             self.nav.record(Position {
@@ -767,6 +826,58 @@ impl PythiaApp {
         for request in effects.open {
             self.open(request);
         }
+    }
+
+    /// Counts the connection's invalid objects in the background (on the main
+    /// session: a cheap query), for the status bar.
+    fn refresh_invalid(&mut self, connection: &str) {
+        let Some(conn) = self.conns.get(connection).filter(|c| c.is_connected()) else {
+            return;
+        };
+        if self.invalid_inflight.values().any(|c| c == connection) {
+            return;
+        }
+        let scope = match self.settings.invalid.scope {
+            pythia_config::InvalidScope::CurrentSchema => {
+                pythia_db::recompile::InvalidScope::Schema(conn.current_schema())
+            }
+            pythia_config::InvalidScope::UserSchemas => {
+                pythia_db::recompile::InvalidScope::UserSchemas
+            }
+        };
+        let id = request_id();
+        self.invalid_inflight.insert(id, connection.to_owned());
+        let task: pythia_db::TaskFn = Box::new(move |c: &pythia_db::oracle::Connection| {
+            Ok(Box::new(pythia_db::recompile::invalid_counts(c, &scope)?)
+                as Box<dyn std::any::Any + Send>)
+        });
+        self.conns
+            .send_main(connection, DbRequest::Task { id, task });
+    }
+
+    /// Refreshes the counts on the interval from the settings.
+    fn refresh_invalid_periodically(&mut self, ctx: &egui::Context) {
+        let minutes = self.settings.invalid.refresh_minutes;
+        if minutes == 0 {
+            return;
+        }
+        let every = std::time::Duration::from_secs(u64::from(minutes) * 60);
+        let due: Vec<String> = self
+            .conns
+            .open
+            .iter()
+            .filter(|(_, c)| c.is_connected())
+            .map(|(name, _)| name.clone())
+            .filter(|name| {
+                self.invalid
+                    .get(name)
+                    .is_none_or(|c| c.at.elapsed() >= every)
+            })
+            .collect();
+        for name in due {
+            self.refresh_invalid(&name);
+        }
+        ctx.request_repaint_after(every);
     }
 
     /// Remembers the focused editor's place before a jump.
@@ -1023,6 +1134,7 @@ impl PythiaApp {
             requests,
             open,
             log,
+            invalid_changed,
             ..
         } = effects;
         if let Some(name) = connection {
@@ -1035,6 +1147,9 @@ impl PythiaApp {
         }
         for request in open {
             self.open(request);
+        }
+        if invalid_changed && let Some(name) = self.browser.connection.clone() {
+            self.refresh_invalid(&name);
         }
     }
 
@@ -1061,6 +1176,7 @@ impl PythiaApp {
             connections: &[],
             debug: Some(&self.debug),
             marks: None,
+            privilege: None,
         };
         let effects = doc.on_event(event, &cx);
         self.apply(Some(id), effects);
@@ -1308,6 +1424,23 @@ impl PythiaApp {
                     });
                 }
             }
+            Command::InvalidObjects => {
+                if let Some(connection) = self.current_connection() {
+                    let schema = match self.settings.invalid.scope {
+                        pythia_config::InvalidScope::CurrentSchema => {
+                            self.conns.get(&connection).map(|c| c.current_schema())
+                        }
+                        pythia_config::InvalidScope::UserSchemas => None,
+                    };
+                    self.open(OpenRequest::InvalidObjects {
+                        connection,
+                        schema,
+                        recompile: false,
+                    });
+                } else {
+                    self.connect_dialog.show(self.last_profile.as_ref());
+                }
+            }
             Command::NavigateBack => self.navigate_history(true),
             Command::NavigateForward => self.navigate_history(false),
             Command::RenameSymbol => {
@@ -1524,6 +1657,7 @@ impl PythiaApp {
             connections: &[],
             debug: Some(&self.debug),
             marks: None,
+            privilege: None,
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
@@ -1714,6 +1848,7 @@ impl PythiaApp {
                     conn.status = crate::connections::Status::Connected(server);
                 }
                 self.log(line);
+                self.refresh_invalid(name);
                 if self.connecting.as_deref() == Some(name) {
                     self.connecting = None;
                     self.connect_dialog.connected();
@@ -1754,6 +1889,22 @@ impl PythiaApp {
                     ));
                 } else {
                     self.log(format!("{name}: {e}"));
+                }
+            }
+            DbEvent::TaskDone { id, result } if self.invalid_inflight.contains_key(&id) => {
+                let connection = self.invalid_inflight.remove(&id).unwrap_or_default();
+                match result.map(|any| any.downcast::<Vec<(String, u32)>>()) {
+                    Ok(Ok(per_schema)) => {
+                        self.invalid.insert(
+                            connection,
+                            InvalidCount {
+                                per_schema: *per_schema,
+                                at: std::time::Instant::now(),
+                            },
+                        );
+                    }
+                    Ok(Err(_)) => {}
+                    Err(e) => warn!("counting invalid objects on {connection}: {e}"),
                 }
             }
             DbEvent::TaskDone { id, result } if self.catalog_inflight.contains_key(&id) => {
@@ -1857,6 +2008,7 @@ impl PythiaApp {
                 item(ui, Command::SearchData);
                 ui.separator();
                 item(ui, Command::SchedulerJobs);
+                item(ui, Command::InvalidObjects);
                 ui.separator();
                 item(ui, Command::ImportData);
                 item(ui, Command::ExportTables);
@@ -2243,7 +2395,7 @@ impl PythiaApp {
         rebind
     }
 
-    fn status_bar(&self, ui: &mut Ui) {
+    fn status_bar(&self, ui: &mut Ui, commands: &mut Vec<Command>) {
         ui.horizontal(|ui| {
             let focused = self.focused.and_then(|id| self.docs.get(&id).map(|d| (id, d)));
             let connection = self.current_connection();
@@ -2284,6 +2436,30 @@ impl PythiaApp {
                     if conn.profile.read_only {
                         ui.separator();
                         icon_label(ui, Icon::Lock, "Read-only");
+                    }
+                    if let Some(count) = connection.as_ref().and_then(|c| self.invalid.get(c))
+                        && count.total() > 0
+                    {
+                        ui.separator();
+                        let tip = count
+                            .per_schema
+                            .iter()
+                            .map(|(schema, n)| format!("{schema}: {n}"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let r = ui
+                            .add(
+                                egui::Button::image_and_text(
+                                    Icon::Warning.image(ui),
+                                    RichText::new(format!("{} invalid", count.total()))
+                                        .color(theme::WARN),
+                                )
+                                .frame_when_inactive(false),
+                            )
+                            .on_hover_text(format!("{tip}\nClick to see and recompile them"));
+                        if r.clicked() {
+                            commands.push(Command::InvalidObjects);
+                        }
                     }
                 }
             }
@@ -2595,6 +2771,7 @@ impl eframe::App for PythiaApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.pump_events();
+        self.refresh_invalid_periodically(&ctx);
         self.handle_dropped_files(&ctx);
         self.poll_file_dialog();
         self.handle_close_request(&ctx);
@@ -2655,7 +2832,7 @@ impl eframe::App for PythiaApp {
             .inner;
         egui::Panel::bottom("status")
             .frame(theme::status_frame(ui.style()))
-            .show(ui, |ui| self.status_bar(ui));
+            .show(ui, |ui| self.status_bar(ui, &mut commands));
 
         if let Some((_, Tab::Doc(id))) = self.dock.find_active_focused() {
             self.focused = Some(*id);
@@ -2673,6 +2850,12 @@ impl eframe::App for PythiaApp {
             .iter()
             .map(|(n, c)| (n.clone(), c.is_connected()))
             .collect();
+        let privileges: HashMap<String, pythia_config::Privilege> = self
+            .conns
+            .open
+            .iter()
+            .map(|(n, c)| (n.clone(), c.profile.privilege))
+            .collect();
         let mut viewer = Viewer {
             docs: &mut self.docs,
             browser: &mut self.browser,
@@ -2682,6 +2865,7 @@ impl eframe::App for PythiaApp {
             settings: &self.settings,
             connections: &connections,
             colors: &colors,
+            privileges: &privileges,
             connected: &connected,
             catalogs: &self.catalogs,
             catalog_revision: self.catalog_revision,
@@ -2860,6 +3044,7 @@ impl PythiaApp {
             connections: &[],
             debug: None,
             marks: None,
+            privilege: None,
         };
         let Some(DocKind::DataSearch(s)) = self.docs.get_mut(&id).map(|d| &mut d.kind) else {
             panic!("not a data search");
@@ -2946,6 +3131,22 @@ impl PythiaApp {
             Some(DocKind::Program(w)) => w.active_editor(),
             _ => None,
         }
+    }
+
+    pub fn test_invalid_window(&self) -> Option<&crate::invalid_window::InvalidObjectsWindow> {
+        match &self.docs.get(&self.focused?)?.kind {
+            DocKind::Invalid(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    /// Invalid objects counted for the status bar, if counted.
+    pub fn test_invalid_total(&self, connection: &str) -> Option<u32> {
+        self.invalid.get(connection).map(InvalidCount::total)
+    }
+
+    pub fn test_settings_mut(&mut self) -> &mut Settings {
+        &mut self.settings
     }
 
     pub fn test_browser_selected(&self) -> Option<ObjectRef> {
@@ -3087,6 +3288,7 @@ struct Viewer<'a> {
     settings: &'a Settings,
     connections: &'a [String],
     colors: &'a HashMap<String, Color32>,
+    privileges: &'a HashMap<String, pythia_config::Privilege>,
     connected: &'a HashMap<String, bool>,
     catalogs: &'a HashMap<String, pythia_lsp_core::CatalogCache>,
     catalog_revision: u64,
@@ -3194,6 +3396,11 @@ impl TabViewer for Viewer<'_> {
                     connections: self.connections,
                     debug: Some(&*self.debug),
                     marks: Some(&self.browser.marks),
+                    privilege: doc
+                        .connection
+                        .as_ref()
+                        .and_then(|c| self.privileges.get(c))
+                        .copied(),
                 };
                 let effects = doc.ui(ui, &cx);
                 self.effects.push((*id, effects));
@@ -3299,6 +3506,18 @@ fn load_or_default<T: serde::de::DeserializeOwned + Default>(path: &std::path::P
         error!("{e:#}");
         T::default()
     })
+}
+
+/// Invalid objects of a connection per schema, and when they were counted.
+struct InvalidCount {
+    per_schema: Vec<(String, u32)>,
+    at: std::time::Instant,
+}
+
+impl InvalidCount {
+    fn total(&self) -> u32 {
+        self.per_schema.iter().map(|(_, n)| n).sum()
+    }
 }
 
 /// A place in an editor: the document, its part and a byte offset.

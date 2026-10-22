@@ -24,6 +24,7 @@ mod git;
 mod history;
 mod icons_ext;
 mod import_window;
+mod invalid_window;
 mod jobs_window;
 mod monitor_window;
 mod object_editor;

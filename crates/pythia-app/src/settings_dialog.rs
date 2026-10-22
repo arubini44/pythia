@@ -29,10 +29,11 @@ enum Section {
     Formatter,
     Keyboard,
     Debugger,
+    InvalidObjects,
 }
 
 impl Section {
-    const ALL: [Section; 7] = [
+    const ALL: [Section; 8] = [
         Section::Appearance,
         Section::Editor,
         Section::CodeAssist,
@@ -40,6 +41,7 @@ impl Section {
         Section::Formatter,
         Section::Keyboard,
         Section::Debugger,
+        Section::InvalidObjects,
     ];
 
     fn label(self) -> &'static str {
@@ -51,6 +53,7 @@ impl Section {
             Section::Formatter => "Formatter",
             Section::Keyboard => "Keyboard",
             Section::Debugger => "Debugger",
+            Section::InvalidObjects => "Invalid objects",
         }
     }
 }
@@ -113,6 +116,7 @@ impl SettingsDialog {
                             Section::Formatter => formatter(ui, settings),
                             Section::Keyboard => keyboard(ui, settings, &mut self.keys),
                             Section::Debugger => debugger(ui, settings),
+                            Section::InvalidObjects => invalid_objects(ui, settings),
                         }
                     });
                 });
@@ -253,6 +257,51 @@ fn query(ui: &mut Ui, s: &mut Settings) {
                     .range(10..=100_000)
                     .speed(10),
             );
+        },
+    );
+}
+
+fn invalid_objects(ui: &mut Ui, s: &mut Settings) {
+    use pythia_config::InvalidScope;
+    let invalid = &mut s.invalid;
+    row(
+        ui,
+        "Count in",
+        "Which schemas the status bar's invalid objects indicator counts",
+        |ui| {
+            ui.selectable_value(
+                &mut invalid.scope,
+                InvalidScope::CurrentSchema,
+                "Current schema",
+            );
+            ui.selectable_value(
+                &mut invalid.scope,
+                InvalidScope::UserSchemas,
+                "All user schemas",
+            );
+        },
+    );
+    row(
+        ui,
+        "Refresh every",
+        "The count is also refreshed on connect and after compiles and DDL",
+        |ui| {
+            ui.add(
+                egui::DragValue::new(&mut invalid.refresh_minutes)
+                    .range(0..=240)
+                    .suffix(" min"),
+            );
+            if invalid.refresh_minutes == 0 {
+                ui.weak("off");
+            }
+        },
+    );
+    row(
+        ui,
+        "Sessions when recompiling",
+        "Objects compiled at the same time, in dependency order (1: one after the other)",
+        |ui| {
+            ui.add(egui::DragValue::new(&mut invalid.parallelism).range(1..=16));
         },
     );
 }

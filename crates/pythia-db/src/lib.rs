@@ -7,6 +7,7 @@
 //! worker while it is busy.
 
 mod meta;
+pub mod recompile;
 mod session;
 mod types;
 
@@ -14,7 +15,7 @@ pub use meta::{
     CompileError, DbObject, Detail, Member, MetaQuery, MetaResult, ObjectType, TableColumn,
     like_pattern, object_ddl, object_source,
 };
-pub use session::{Session, stream_query};
+pub use session::{Session, open_connection, stream_query};
 pub use types::{
     Cell, Column, Compiled, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
     TaskFn, TaskResult,

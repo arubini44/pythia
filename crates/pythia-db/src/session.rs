@@ -368,6 +368,19 @@ impl Worker {
     }
 }
 
+/// A connection of its own (not behind a [`Session`]), e.g. for a task that
+/// works in parallel. Runs the login statements; their errors don't fail it.
+pub fn open_connection(params: &ConnectParams) -> Result<Connection, DbError> {
+    let conn = connect(params)?;
+    conn.set_module("pythia")?;
+    for sql in &params.init_sql {
+        if let Err(e) = conn.execute(sql, &[]) {
+            warn!("login script on a worker session: {e}");
+        }
+    }
+    Ok(conn)
+}
+
 fn connect(params: &ConnectParams) -> oracle::Result<Connection> {
     let mut connector = Connector::new(&params.username, &params.password, &params.connect_string);
     let privilege = match params.privilege {

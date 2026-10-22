@@ -82,6 +82,11 @@ pub struct Effects {
     pub object_actions: Vec<(String, crate::browser::ObjectAction)>,
     /// App commands to run (e.g. Format from an editor's context menu).
     pub commands: Vec<crate::commands::Command>,
+    /// Recompile invalid objects on the document's session.
+    pub recompile: Option<crate::invalid_window::RecompileRequest>,
+    /// Objects were compiled or dropped: the invalid objects count is out
+    /// of date.
+    pub invalid_changed: bool,
     /// The editor jumped (go to definition, …) from this place: (part,
     /// byte offset), for going back.
     pub jumped_from: Option<(usize, usize)>,
@@ -144,6 +149,8 @@ impl Effects {
         self.object_actions.extend(other.object_actions);
         self.commands.extend(other.commands);
         self.jumped_from = other.jumped_from.or(self.jumped_from.take());
+        self.recompile = other.recompile.or(self.recompile.take());
+        self.invalid_changed |= other.invalid_changed;
         self.references = other.references.or(self.references.take());
     }
 }
@@ -194,6 +201,13 @@ pub enum OpenRequest {
         /// Select this parameter of the member (named notation).
         parameter: Option<String>,
     },
+    /// The invalid objects window of a schema (or all user schemas),
+    /// recompiling everything right away if asked.
+    InvalidObjects {
+        connection: String,
+        schema: Option<String>,
+        recompile: bool,
+    },
     /// Insert text at the cursor of the focused SQL window (or a new one).
     InsertText { text: String },
     /// Open the connection manager.
@@ -226,6 +240,7 @@ pub enum DocKind {
     Diff(crate::text_diff::TextDiff),
     ExportTables(crate::export_tables::ExportTables),
     ObjectEditor(crate::object_editor::ObjectEditor),
+    Invalid(crate::invalid_window::InvalidObjectsWindow),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,6 +268,8 @@ pub struct DocContext<'a> {
     pub debug: Option<&'a pythia_debugger::ui::DebugSession>,
     /// Favorites and recent objects, for the editors' context menu.
     pub marks: Option<&'a crate::browser::Marks>,
+    /// How the document's connection is logged in (SYSDBA, …).
+    pub privilege: Option<pythia_config::Privilege>,
 }
 
 impl Document {
@@ -271,6 +288,7 @@ impl Document {
             DocKind::Diff(d) => d.title(),
             DocKind::ExportTables(e) => e.title(),
             DocKind::ObjectEditor(e) => e.title(),
+            DocKind::Invalid(i) => i.title(),
         }
     }
 
@@ -299,6 +317,7 @@ impl Document {
             DocKind::Diff(_) => false,
             DocKind::ExportTables(e) => e.is_busy(),
             DocKind::ObjectEditor(e) => e.is_busy(),
+            DocKind::Invalid(i) => i.is_busy(),
         }
     }
 
@@ -371,6 +390,7 @@ impl Document {
             DocKind::Diff(_) => Effects::default(),
             DocKind::ExportTables(e) => e.on_event(event),
             DocKind::ObjectEditor(e) => e.on_event(event),
+            DocKind::Invalid(i) => i.on_event(event),
         }
     }
 
@@ -389,6 +409,7 @@ impl Document {
             DocKind::Diff(d) => d.ui(ui, cx),
             DocKind::ExportTables(e) => e.ui(ui, cx),
             DocKind::ObjectEditor(e) => e.ui(ui, cx),
+            DocKind::Invalid(i) => i.ui(ui, cx),
         }
     }
 

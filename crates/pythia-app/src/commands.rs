@@ -75,6 +75,7 @@ commands! {
     FindInSource => "Tools: Find in Database Source…",
     SearchData => "Tools: Search Data in Tables…",
     SchedulerJobs => "Tools: Scheduler Jobs",
+    InvalidObjects => "Tools: Invalid Objects",
     ImportData => "Tools: Import Data (CSV, Excel)…",
     ExportTables => "Tools: Export Tables…",
     CompareSchemas => "Tools: Compare Schemas…",

@@ -135,7 +135,6 @@ enum Pending {
         object: ObjectRef,
         kind: Template,
     },
-    RecompileSchema(String),
     /// Parameters of `member` (or the standalone unit) for a test script.
     Test {
         object: ObjectRef,
@@ -523,13 +522,7 @@ impl Browser {
                 let ty = object.object_type.dictionary_name().to_lowercase();
                 log.push(format!("{ty} {} {verb}", object.qualified()));
                 self.refresh(&mut effects);
-            }
-            (Pending::RecompileSchema(owner), Ok(_)) => {
-                log.push(format!("Recompiled invalid objects in {owner}"));
-                self.refresh(&mut effects);
-            }
-            (Pending::RecompileSchema(owner), Err(e)) => {
-                log.push(format!("Recompiling {owner} failed: {e}"));
+                effects.invalid_changed = true;
             }
             (Pending::Action { object, verb }, Err(e)) => {
                 log.push(format!("{} {} failed: {e}", verb, object.qualified()));
@@ -627,21 +620,12 @@ impl Browser {
             .clicked()
                 && let Some(owner) = self.schema.clone()
             {
-                let id = request_id();
-                let sql = format!(
-                    "begin dbms_utility.compile_schema(schema => '{}', compile_all => false); end;",
-                    owner.replace('\'', "''")
-                );
-                self.pending.insert(id, Pending::RecompileSchema(owner));
-                effects.request(
-                    Target::Main,
-                    DbRequest::Execute {
-                        id,
-                        sql,
-                        max_rows: 1,
-                        binds: Vec::new(),
-                    },
-                );
+                // In the invalid objects window: dependency order, progress.
+                effects.open.push(OpenRequest::InvalidObjects {
+                    connection: connection.clone(),
+                    schema: Some(owner),
+                    recompile: true,
+                });
             }
         });
         ui.horizontal(|ui| {

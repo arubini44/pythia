@@ -22,6 +22,14 @@ All notable changes to Pythia are documented here. The format follows
   name, go to declaration and find references; plus cut, copy, paste,
   select all, toggle comment and format. On a package member (`pkg.proc`)
   Edit and Ctrl+click open the package at that subprogram.
+- Invalid objects: the status bar shows how many there are (current schema
+  or all user schemas, refreshed on connect, after compiles and DDL and on
+  an interval). Clicking it opens a window listing them with their first
+  error; it recompiles selected or all objects in dependency order over
+  several sessions (Settings → Invalid objects), with progress, cancel and
+  what is still invalid afterwards, and marks objects you may not compile.
+  SYSDBA connections can use UTL_RECOMP. The browser's recompile button
+  uses it too.
 - Navigation in packages: in a program window the body knows the spec's
   declarations and the other way round (go to definition, hover,
   completion, references), Ctrl+click on a call picks the overload its

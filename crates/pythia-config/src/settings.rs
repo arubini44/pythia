@@ -35,6 +35,40 @@ pub struct Settings {
     /// Shortcut overrides on top of the preset: command id → shortcut text
     /// like `Ctrl+Shift+F` (empty: no shortcut).
     pub keybindings: std::collections::BTreeMap<String, String>,
+    /// The invalid objects indicator and recompiling.
+    pub invalid: InvalidObjectSettings,
+}
+
+/// Which schemas the invalid objects indicator counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InvalidScope {
+    /// The connection's current schema.
+    #[default]
+    CurrentSchema,
+    /// Every schema that isn't maintained by Oracle.
+    UserSchemas,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InvalidObjectSettings {
+    pub scope: InvalidScope,
+    /// How often the count is refreshed in the background (0: only on
+    /// connect and after compiles and DDL).
+    pub refresh_minutes: u32,
+    /// Sessions compiling at the same time when recompiling.
+    pub parallelism: usize,
+}
+
+impl Default for InvalidObjectSettings {
+    fn default() -> Self {
+        Self {
+            scope: InvalidScope::default(),
+            refresh_minutes: 5,
+            parallelism: 1,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -48,6 +82,7 @@ impl Default for Settings {
             debug_host: String::new(),
             format: pythia_plsql::FormatOptions::default(),
             keybindings: Default::default(),
+            invalid: InvalidObjectSettings::default(),
         }
     }
 }
