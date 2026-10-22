@@ -2557,6 +2557,50 @@ fn toolbar_follows_the_transaction() {
     });
 }
 
+/// The toolbar's Debug button is enabled only with the cursor in an
+/// anonymous block of a connected SQL window.
+#[test]
+fn toolbar_debug_follows_the_cursor() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let text = "select 1 from dual;\n\nbegin\n  dbms_output.put_line('hi');\nend;\n/\n";
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: text.into(),
+        run: false,
+    });
+    let cursor_at = |h: &mut Ui, needle: &str| {
+        let i = text.find(needle).unwrap();
+        h.state_mut().test_sql_window().editor.select(i..i);
+        h.run_steps(2);
+        h.state().test_debug_state()
+    };
+    assert_eq!(
+        cursor_at(&mut h, "dual"),
+        Err("Debugging runs an anonymous block (BEGIN … END;): put the cursor in one")
+    );
+    assert_eq!(cursor_at(&mut h, "put_line"), Ok(()));
+    h.state_mut().test_program_with(
+        ObjectRef {
+            owner: "PYTHIA".into(),
+            name: "P".into(),
+            object_type: pythia_db::ObjectType::Procedure,
+        },
+        "create or replace procedure p as begin null; end;",
+        "",
+    );
+    h.run_steps(2);
+    assert!(
+        h.state()
+            .test_debug_state()
+            .is_err_and(|r| r.starts_with("Debugging starts from a SQL window"))
+    );
+}
+
 /// The assistant panel with a fake model: a statement is explained, its
 /// bind values stay back until allowed in the settings, and code from the
 /// answer replaces the statement.

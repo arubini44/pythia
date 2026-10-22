@@ -6,6 +6,12 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Toolbar: a Debug button next to Execute (Ctrl+F9). It is enabled only
+  with the cursor in an anonymous block of a connected SQL window, and when
+  disabled says why; in a program window it points to Test… for a block
+  that calls the unit.
+
 ### Fixed
 - Oracle 11.2 to 21c (#16, tested against 11.2 XE, 18c XE, 21c XE and
   23ai Free). Queries no longer use `FETCH FIRST` or dictionary columns

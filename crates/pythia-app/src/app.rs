@@ -2189,6 +2189,36 @@ impl PythiaApp {
         }
     }
 
+    /// Whether Debug can start in the focused window, or why not.
+    fn debug_state(&self) -> Result<(), &'static str> {
+        let doc = self.focused.and_then(|id| self.docs.get(&id));
+        let window = match doc.map(|d| &d.kind) {
+            Some(DocKind::Sql(w)) => w,
+            Some(DocKind::Program(_)) => {
+                return Err(
+                    "Debugging starts from a SQL window: Test… on a procedure or function opens one with a block that calls it",
+                );
+            }
+            _ => return Err("Only in SQL windows"),
+        };
+        // The block runs on the window's own connection.
+        let connected = doc
+            .and_then(|d| d.connection.as_deref())
+            .and_then(|c| self.conns.get(c))
+            .is_some_and(|c| c.is_connected());
+        if self.debug.is_active() {
+            Err("Already debugging: continue or stop in the debugger panel")
+        } else if doc.is_some_and(Document::is_busy) {
+            Err("Running")
+        } else if !connected {
+            Err("Not connected")
+        } else if !window.debuggable() {
+            Err("Debugging runs an anonymous block (BEGIN … END;): put the cursor in one")
+        } else {
+            Ok(())
+        }
+    }
+
     /// Commits or rolls back the focused window's session. A window without
     /// a session of its own has nothing to end; none is opened for it.
     fn end_transaction(&mut self, commit: bool) {
@@ -2835,6 +2865,13 @@ impl PythiaApp {
                 } else {
                     need_connection()
                 }),
+            ));
+            commands.extend(button(
+                ui,
+                Icon::Bug,
+                "",
+                Command::DebugStart,
+                self.debug_state(),
             ));
             commands.extend(button(
                 ui,
@@ -3735,6 +3772,10 @@ impl PythiaApp {
 
     pub fn test_transaction_state(&self) -> Result<(), &'static str> {
         self.transaction_state()
+    }
+
+    pub fn test_debug_state(&self) -> Result<(), &'static str> {
+        self.debug_state()
     }
 
     pub fn test_has_doc_session(&self) -> bool {

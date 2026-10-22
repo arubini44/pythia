@@ -47,6 +47,9 @@ fn yes() -> bool {
     true
 }
 
+/// Text revision, cursor and selection of the editor.
+type EditorPosition = (u64, usize, Option<Range<usize>>);
+
 /// Everything that is not persisted with the layout.
 #[derive(Default)]
 pub struct RunState {
@@ -85,6 +88,9 @@ pub struct RunState {
     /// Editor line where the debugged block starts, while this window's
     /// block is the one being debugged.
     pub debug_start: Option<usize>,
+    /// Whether Debug has a block to run, and the editor position that was
+    /// worked out for.
+    debuggable: Option<(EditorPosition, bool)>,
     /// Result of a running export (file dialog + write on a helper thread).
     pub export: Option<std::sync::mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>>,
     pub selection_summary: Option<String>,
@@ -258,6 +264,35 @@ impl SqlWindow {
                 .is_some_and(|(_, r)| r.is_none())
     }
 
+    /// Whether Debug has an anonymous block to run (the selection's first
+    /// statement or the one under the cursor), as of the last frame.
+    pub fn debuggable(&self) -> bool {
+        self.state.debuggable.as_ref().is_some_and(|(_, ok)| *ok)
+    }
+
+    /// Works out [`Self::debuggable`] again once the text, cursor or
+    /// selection changed; splitting the script every frame would be slow.
+    /// Returns true if the answer changed.
+    fn refresh_debuggable(&mut self) -> bool {
+        let key = (
+            self.editor.revision(),
+            self.editor.cursor(),
+            self.editor.selection(),
+        );
+        if self
+            .state
+            .debuggable
+            .as_ref()
+            .is_some_and(|(k, _)| *k == key)
+        {
+            return false;
+        }
+        let ok = self.statements(true).first().is_some_and(is_debuggable);
+        let changed = ok != self.debuggable();
+        self.state.debuggable = Some((key, ok));
+        changed
+    }
+
     pub fn statements(&self, current_only: bool) -> Vec<PendingStatement> {
         let text = self.editor.text();
         let selection = self.editor.selection();
@@ -334,7 +369,7 @@ impl SqlWindow {
         let Some(stmt) = self.statements(true).into_iter().next() else {
             return effects;
         };
-        if stmt.kind != StatementKind::PlSql || pythia_plsql::unit_header(&stmt.sql).is_some() {
+        if !is_debuggable(&stmt) {
             self.warn(
                 "Debugging runs an anonymous block (BEGIN … END;). Use Test… on a procedure or function to create one.",
             );
@@ -1334,6 +1369,10 @@ impl SqlWindow {
             }
             self.assist.background(&mut self.editor, ui);
             self.state.line_col = self.editor.line_col();
+            // The toolbar was drawn before this frame's edits.
+            if self.refresh_debuggable() {
+                ui.ctx().request_repaint();
+            }
         });
         effects.extend(self.prompt_ui(ui.ctx(), cx));
         effects
@@ -2015,6 +2054,11 @@ fn block_line(debug: &pythia_debugger::ui::DebugSession) -> Option<u32> {
         .then_some(frame.location.line)?
 }
 
+/// The debugger runs anonymous blocks, not SQL or stored unit DDL.
+fn is_debuggable(stmt: &PendingStatement) -> bool {
+    stmt.kind == StatementKind::PlSql && pythia_plsql::unit_header(&stmt.sql).is_none()
+}
+
 /// Replaces `:bind` references with literals (for debug runs, which execute
 /// the block as plain text).
 pub fn inline_binds(sql: &str, binds: &[(String, Option<String>)]) -> String {
@@ -2214,5 +2258,26 @@ mod tests {
             "select 2 from dual"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn debuggable_follows_cursor_and_selection() {
+        let text = "select 1 from dual;\nbegin\n  null;\nend;\n/\ncreate procedure p as begin null; end;\n/\n";
+        let mut w = SqlWindow::new("SQL 1".into(), text.into());
+        let mut at = |range: Range<usize>| {
+            w.editor.select(range);
+            let changed = w.refresh_debuggable();
+            (w.debuggable(), changed)
+        };
+        let pos = |needle: &str| text.find(needle).unwrap();
+        // Not debuggable until worked out, so this isn't a change.
+        assert_eq!(at(pos("select")..pos("select")), (false, false));
+        assert_eq!(at(pos("null")..pos("null")), (true, true));
+        // Another place in the same block: same answer.
+        assert_eq!(at(pos("end;")..pos("end;")), (true, false));
+        assert_eq!(at(pos("create")..pos("create")), (false, true));
+        // A selection is debugged from its first statement.
+        assert_eq!(at(pos("begin")..text.len()), (true, true));
+        assert_eq!(at(0..text.len()), (false, true));
     }
 }
