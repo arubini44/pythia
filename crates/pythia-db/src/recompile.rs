@@ -176,19 +176,24 @@ fn compile_privilege(object_type: &str) -> Option<&'static str> {
     })
 }
 
-/// The statement that recompiles an object, if its type can be.
+/// The statement that recompiles an object, if its type can be. PL/SQL
+/// units keep their compiler settings (`REUSE SETTINGS`), debug information
+/// included; a plain `COMPILE` would take the session's instead.
 pub fn compile_sql(id: &ObjectId) -> Option<String> {
     let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     let name = format!("{}.{}", quote(&id.owner), quote(&id.name));
     Some(match id.object_type.as_str() {
-        "PACKAGE BODY" => format!("alter package {name} compile body"),
-        "TYPE BODY" => format!("alter type {name} compile body"),
+        "PACKAGE BODY" => format!("alter package {name} compile body reuse settings"),
+        "TYPE BODY" => format!("alter type {name} compile body reuse settings"),
         "SYNONYM" if id.owner == "PUBLIC" => {
             format!("alter public synonym {} compile", quote(&id.name))
         }
         "JAVA CLASS" => format!("alter java class {name} resolve"),
-        t @ ("PACKAGE" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "TYPE" | "VIEW"
-        | "MATERIALIZED VIEW" | "SYNONYM" | "JAVA SOURCE" | "DIMENSION" | "LIBRARY") => {
+        t @ ("PACKAGE" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "TYPE") => {
+            format!("alter {} {name} compile reuse settings", t.to_lowercase())
+        }
+        t
+        @ ("VIEW" | "MATERIALIZED VIEW" | "SYNONYM" | "JAVA SOURCE" | "DIMENSION" | "LIBRARY") => {
             format!("alter {} {name} compile", t.to_lowercase())
         }
         _ => return None,
@@ -449,7 +454,11 @@ mod tests {
     fn compile_statements() {
         assert_eq!(
             compile_sql(&id("P", "PACKAGE BODY")).unwrap(),
-            "alter package \"HR\".\"P\" compile body"
+            "alter package \"HR\".\"P\" compile body reuse settings"
+        );
+        assert_eq!(
+            compile_sql(&id("P", "PACKAGE")).unwrap(),
+            "alter package \"HR\".\"P\" compile reuse settings"
         );
         assert_eq!(
             compile_sql(&id("V", "MATERIALIZED VIEW")).unwrap(),

@@ -1259,21 +1259,19 @@ impl Browser {
                 object: o,
             }),
             ObjectAction::Compile(o) => {
-                let sql = match o.object_type {
-                    ObjectType::PackageBody => {
-                        format!("alter package {} compile body", o.qualified())
-                    }
-                    ObjectType::TypeBody => format!("alter type {} compile body", o.qualified()),
-                    ObjectType::JavaSource => {
-                        format!("alter java source {} compile", o.qualified())
-                    }
-                    t => format!(
-                        "alter {} {} compile",
-                        t.dictionary_name().to_lowercase(),
-                        o.qualified()
-                    ),
-                };
-                self.run(effects, &o, "compiled", sql);
+                // As the invalid objects window does: keeping each unit's
+                // compiler settings, debug information included.
+                let id = pythia_db::recompile::ObjectId::new(
+                    &o.owner,
+                    &o.name,
+                    o.object_type.dictionary_name(),
+                );
+                match pythia_db::recompile::compile_sql(&id) {
+                    Some(sql) => self.run(effects, &o, "compiled", sql),
+                    None => effects
+                        .log
+                        .push(format!("{} can't be compiled", o.qualified())),
+                }
             }
             ObjectAction::CopyName(o) => ctx.copy_text(o.name.clone()),
             ObjectAction::CopyQualified(o) => ctx.copy_text(o.qualified()),

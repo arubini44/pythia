@@ -106,6 +106,8 @@ pub struct PythiaApp {
     invalid: HashMap<String, InvalidCount>,
     /// Count requests in flight: request id → connection.
     invalid_inflight: HashMap<u64, String>,
+    /// Lookups of why debugger variables are opaque: request id → unit.
+    opaque_inflight: HashMap<u64, pythia_debugger::Unit>,
     /// Requests already sent (or answered) per connection, to avoid repeats.
     catalog_requested: std::collections::HashSet<(String, pythia_lsp_core::CatalogRequest)>,
     log: Vec<String>,
@@ -185,6 +187,7 @@ impl PythiaApp {
             ai_format: None,
             invalid: HashMap::new(),
             invalid_inflight: HashMap::new(),
+            opaque_inflight: HashMap::new(),
             catalog_requested: std::collections::HashSet::new(),
             log: Vec::new(),
             connect_dialog: ConnectDialog::default(),
@@ -1497,6 +1500,37 @@ impl PythiaApp {
                         });
                     }
                 }
+                DebugAction::ExplainOpaque {
+                    unit,
+                    line,
+                    names,
+                    source,
+                } => {
+                    let Some(connection) = self
+                        .debug_run
+                        .and_then(|(doc, _)| self.docs.get(&doc))
+                        .and_then(|d| d.connection.clone())
+                    else {
+                        continue;
+                    };
+                    let Some(conn) = self.conns.get_mut(&connection) else {
+                        continue;
+                    };
+                    let id = request_id();
+                    self.opaque_inflight.insert(id, unit.clone());
+                    let task: pythia_db::TaskFn =
+                        Box::new(move |c: &pythia_db::oracle::Connection| {
+                            let reasons = pythia_debugger::target::opaque_reasons(
+                                c,
+                                &unit,
+                                line,
+                                &names,
+                                source.as_deref(),
+                            )?;
+                            Ok(Box::new(reasons) as Box<dyn std::any::Any + Send>)
+                        });
+                    conn.send_meta(id, DbRequest::Task { id, task }, &self.notify);
+                }
                 DebugAction::Finished => self.log("Debug session ended"),
             }
         }
@@ -2499,6 +2533,14 @@ impl PythiaApp {
                         self.log(format!("Reading the schema's source: {e}"));
                         self.settings_dialog.learned("the schema".into(), None);
                     }
+                }
+            }
+            DbEvent::TaskDone { id, result } if self.opaque_inflight.contains_key(&id) => {
+                let unit = self.opaque_inflight.remove(&id).expect("checked");
+                match result.map(|any| any.downcast::<Vec<(String, String)>>()) {
+                    Ok(Ok(reasons)) => self.debug.set_opaque_reasons(&unit, *reasons),
+                    Ok(Err(_)) => {}
+                    Err(e) => warn!("explaining opaque variables of {unit}: {e}"),
                 }
             }
             DbEvent::TaskDone { id, result } if self.invalid_inflight.contains_key(&id) => {

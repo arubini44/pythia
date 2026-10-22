@@ -879,3 +879,90 @@ fn globals_of_a_package_not_instantiated_yet() {
     h.until_terminated();
     target.join().unwrap().expect("target ran to completion");
 }
+
+/// A record whose type is declared in a package spec compiled without debug
+/// information comes through as an opaque object: Oracle's agent can't
+/// describe it. `opaque_reasons` names the package from the declaration.
+#[test]
+fn records_of_a_spec_without_debug_information() {
+    let Some((_lock, conn, s)) = setup() else {
+        return;
+    };
+    let types = Unit::new(OWNER, "DBGX_TYPES", UnitType::Package);
+    let api = Unit::new(OWNER, "DBGX_ORDERS_API", UnitType::PackageBody);
+    conn.execute("alter package dbgx_types compile specification", &[])
+        .unwrap();
+    assert!(!target::has_debug_info(&conn, &types).unwrap());
+    assert!(target::has_debug_info(&conn, &api).unwrap(), "still");
+
+    let h = Harness::new();
+    let call = s.at("process_line");
+    h.send(DebugCommand::SetBreakpoint(call.clone()));
+    let run = run_target(h.debugger.port(), RUN);
+    let (stop, _) = h.stop_full();
+    assert_eq!(stop.line, Some(call.line));
+    let order = var(&stop.variables, "L_ORDER");
+    assert_eq!(order.type_name, "OPAQUE");
+    assert!(order.children.is_empty());
+    assert_eq!(val(&stop.variables, "L_TOTAL"), Some("0"));
+    let names = ["L_ORDER".to_string(), "L_TOTAL".to_string()];
+    assert_eq!(
+        target::opaque_reasons(&conn, &api, stop.line, &names, None).unwrap(),
+        [(
+            "L_ORDER".to_string(),
+            "T_ORDER is declared in DBGX_TYPES, compiled without debug information".to_string()
+        )]
+    );
+    h.send(DebugCommand::ClearBreakpoint(call.clone()));
+    h.send(DebugCommand::Resume);
+    h.until_terminated();
+    run.join().unwrap().expect("target ran to completion");
+
+    // With debug information there is nothing to explain (and the record
+    // has its fields again, see order_processing_walkthrough).
+    target::compile_debug(&conn, &types).unwrap();
+    assert!(
+        target::opaque_reasons(&conn, &api, Some(call.line), &names, None)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Recompiling, as the object browser's Compile and the invalid objects
+/// window do, keeps debug information: valid units and invalid ones.
+#[test]
+fn recompiling_keeps_debug_information() {
+    let Some((_lock, conn, _s)) = setup() else {
+        return;
+    };
+    let compile = |unit: &Unit| {
+        let id = pythia_db::recompile::ObjectId::new(
+            &unit.owner,
+            &unit.name,
+            unit.unit_type.dictionary_name(),
+        );
+        let sql = pythia_db::recompile::compile_sql(&id).unwrap();
+        conn.execute(&sql, &[])
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    };
+    for unit in Scenario::units() {
+        compile(&unit);
+        assert!(target::has_debug_info(&conn, &unit).unwrap(), "{unit}");
+    }
+    let status = |unit: &Unit| -> String {
+        conn.query_row_as(
+            "select status from user_objects where object_name = :1 and object_type = :2",
+            &[&unit.name, &unit.unit_type.dictionary_name()],
+        )
+        .unwrap()
+    };
+    let api = Unit::new(OWNER, "DBGX_ORDERS_API", UnitType::PackageBody);
+    conn.execute("alter table dbgx_order_lines add (pythia_tmp number)", &[])
+        .unwrap();
+    conn.execute("alter table dbgx_order_lines drop (pythia_tmp)", &[])
+        .unwrap();
+    assert_eq!(status(&api), "INVALID");
+    compile(&api);
+    assert_eq!(status(&api), "VALID");
+    assert!(target::has_debug_info(&conn, &api).unwrap());
+}

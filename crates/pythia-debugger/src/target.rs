@@ -159,6 +159,104 @@ pub fn has_debug_info(conn: &Connection, unit: &Unit) -> Result<bool, DbError> {
     Ok(flag.as_deref() == Some("TRUE"))
 }
 
+/// Why variables of `unit` stopped at `line` come without contents, for
+/// those of `names` with a reason Pythia can name: their type is declared
+/// in a package compiled without debug information, so Oracle's agent
+/// hands the value over as an opaque object. `source` is the unit's text
+/// if the database doesn't store it (an anonymous block). Returns
+/// (variable name, reason).
+pub fn opaque_reasons(
+    conn: &Connection,
+    unit: &Unit,
+    line: Option<u32>,
+    names: &[String],
+    source: Option<&str>,
+) -> Result<Vec<(String, String)>, DbError> {
+    let source = match source {
+        Some(s) => s.to_owned(),
+        None => stored_source(conn, unit)?,
+    };
+    let mut reasons = Vec::new();
+    for (name, path) in declared_types(&source, line, names) {
+        // `pkg.type` or `owner.pkg.type`; one part is a local or SQL type.
+        let (owner, package, type_name) = match path.as_slice() {
+            [package, type_name] => (unit.owner.as_str(), package, type_name),
+            [owner, package, type_name] => (owner.as_str(), package, type_name),
+            _ => continue,
+        };
+        let without_debug_info: i64 = conn.query_row_as(
+            "select count(*) from all_plsql_object_settings where owner = :1 and name = :2 \
+             and type = 'PACKAGE' and nvl(plsql_debug, 'FALSE') <> 'TRUE'",
+            &[&owner, package],
+        )?;
+        if without_debug_info > 0 {
+            let package = if owner == unit.owner {
+                package.clone()
+            } else {
+                format!("{owner}.{package}")
+            };
+            reasons.push((
+                name,
+                format!("{type_name} is declared in {package}, compiled without debug information"),
+            ));
+        }
+    }
+    Ok(reasons)
+}
+
+/// A stored unit's source as a `CREATE` statement, with the dictionary's
+/// line numbers.
+fn stored_source(conn: &Connection, unit: &Unit) -> Result<String, DbError> {
+    let lines = conn.query_as::<Option<String>>(
+        "select text from all_source where owner = :1 and name = :2 and type = :3 order by line",
+        &[&unit.owner, &unit.name, &unit.unit_type.dictionary_name()],
+    )?;
+    let mut source = String::from("create or replace ");
+    for line in lines {
+        source.push_str(line?.as_deref().unwrap_or("\n"));
+    }
+    Ok(source)
+}
+
+/// The declared types (dotted, as Oracle stores names) of the variables,
+/// constants and parameters `names` in scope at `line` of `source`.
+/// `%TYPE` and `%ROWTYPE` declarations are left out.
+fn declared_types(source: &str, line: Option<u32>, names: &[String]) -> Vec<(String, Vec<String>)> {
+    use pythia_plsql::ast::{SymbolKind, TypeAttr};
+    let ast = pythia_plsql::parse(source);
+    // The first non-blank character of the line, to be inside its scope.
+    let offset = line.map_or(0, |line| {
+        let start: usize = source
+            .split_inclusive('\n')
+            .take(line.saturating_sub(1) as usize)
+            .map(str::len)
+            .sum();
+        let indent = source[start..].len() - source[start..].trim_start().len();
+        start + indent
+    });
+    let scope = ast.scope_at(offset);
+    names
+        .iter()
+        .filter_map(|name| {
+            let symbol = ast
+                .ancestors(scope)
+                .flat_map(|s| ast.scope(s).symbols.iter())
+                .find(|s| {
+                    s.name.is(name)
+                        && matches!(
+                            s.kind,
+                            SymbolKind::Variable | SymbolKind::Constant | SymbolKind::Parameter(_)
+                        )
+                })?;
+            let ty = symbol.ty.as_ref().filter(|t| t.attr == TypeAttr::None)?;
+            Some((
+                name.clone(),
+                ty.path.iter().map(|i| i.name.clone()).collect(),
+            ))
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MissingPrivilege {
     /// `DEBUG CONNECT SESSION` (required).
@@ -283,6 +381,42 @@ mod tests {
             "alter package \"HR\".\"PKG\" compile debug body"
         );
         assert!(compile_debug_sql(&Unit::new("HR", "x", UnitType::Block)).is_none());
+    }
+
+    #[test]
+    fn declared_types_in_scope() {
+        let source = "create or replace package body api as
+  procedure process(p_order in out nocopy types.t_order, p_id number) is
+    l_order hr.types.t_order;
+    l_count pls_integer;
+    l_row orders%rowtype;
+  begin
+    null;
+  end;
+  procedure other is
+    l_order local_t;
+  begin
+    null;
+  end;
+end;";
+        let names: Vec<String> = ["P_ORDER", "P_ID", "L_ORDER", "L_COUNT", "L_ROW", "MISSING"]
+            .map(String::from)
+            .into();
+        let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            declared_types(source, Some(7), &names),
+            [
+                ("P_ORDER".to_string(), path(&["TYPES", "T_ORDER"])),
+                ("P_ID".to_string(), path(&["NUMBER"])),
+                ("L_ORDER".to_string(), path(&["HR", "TYPES", "T_ORDER"])),
+                ("L_COUNT".to_string(), path(&["PLS_INTEGER"])),
+            ]
+        );
+        // The other procedure's own L_ORDER.
+        assert_eq!(
+            declared_types(source, Some(12), &names[2..3]),
+            [("L_ORDER".to_string(), path(&["LOCAL_T"]))]
+        );
     }
 
     #[test]

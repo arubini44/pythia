@@ -982,6 +982,15 @@ fn debugger_steps_into_unit_compiled_in_program_window() {
         let debug = app.test_debug();
         debug.frame == 1 && debug.variables.iter().any(|v| v.name == "L_TOTAL")
     });
+    // DBGX_TYPES has no debug information: its record comes without
+    // contents, and the variables view says why.
+    wait_until(&mut h, "why l_order has no contents", |app| {
+        app.test_debug().opaque_reason(&api, "L_ORDER").is_some()
+    });
+    assert_eq!(
+        h.state().test_debug().opaque_reason(&api, "L_ORDER"),
+        Some("T_ORDER is declared in DBGX_TYPES, compiled without debug information")
+    );
     let (title, _, cursor) = h.state().test_execution_marker();
     assert_eq!(
         (title.as_str(), cursor),

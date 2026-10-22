@@ -11,6 +11,10 @@ All notable changes to Pythia are documented here. The format follows
   with the cursor in an anonymous block of a connected SQL window, and when
   disabled says why; in a program window it points to Test… for a block
   that calls the unit.
+- Debugger: a record whose type is declared in a package compiled without
+  debug information comes without contents (Oracle's agent hands it over
+  as an opaque value). The variables view (and the value on hover) now
+  says which package it is and how to get the contents.
 
 ### Changed
 - Auto-commit is a setting (Settings → Query, off by default) instead of a
@@ -28,8 +32,12 @@ All notable changes to Pythia are documented here. The format follows
   pending transaction, dropping the window's session without asking. Like
   the toolbar's menu, it now offers other connections only after a commit
   or rollback.
-
-### Fixed
+- The object browser's Compile and the invalid objects window's recompile
+  ran a plain `ALTER … COMPILE`, which takes the session's compiler
+  settings and so dropped debug information. They keep each unit's settings
+  now (`REUSE SETTINGS`), like `UTL_RECOMP` and automatic recompilation
+  already did. The browser's Compile also uses the right statement for
+  public synonyms and Java classes.
 - Oracle 11.2 to 21c (#16, tested against 11.2 XE, 18c XE, 21c XE and
   23ai Free). Queries no longer use `FETCH FIRST` or dictionary columns
   that came with 12.1, so find object, completion and go to definition,

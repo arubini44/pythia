@@ -45,6 +45,16 @@ pub enum DebugAction {
     },
     /// Execution stopped here: open the unit and mark the line.
     ShowLocation(Location),
+    /// Find out why these variables of `unit` (stopped at `line`) have no
+    /// contents: `target::opaque_reasons`, then
+    /// [`DebugSession::set_opaque_reasons`]. `source` is the block's text
+    /// for an anonymous block.
+    ExplainOpaque {
+        unit: Unit,
+        line: Option<u32>,
+        names: Vec<String>,
+        source: Option<String>,
+    },
     /// The session ended: clear execution markers.
     Finished,
 }
@@ -94,6 +104,12 @@ pub struct DebugSession {
     /// The breakpoint whose condition is being edited, with the draft
     /// condition and hit count.
     editing: Option<(Breakpoint, String, u32)>,
+    /// The block being debugged.
+    block: String,
+    /// Why opaque variables have no contents, by unit and variable name.
+    opaque_reasons: BTreeMap<(Unit, String), String>,
+    /// Opaque variables asked about in this session (each once).
+    opaque_asked: BTreeSet<(Unit, String)>,
 }
 
 impl DebugSession {
@@ -125,6 +141,10 @@ impl DebugSession {
         self.bound.clear();
         self.hits.clear();
         self.log.clear();
+        // Units may have been compiled with debug information since.
+        self.opaque_reasons.clear();
+        self.opaque_asked.clear();
+        self.block = block.clone();
         match Debugger::listen("0.0.0.0:0", notify) {
             Ok(debugger) => {
                 for bp in self.breakpoints.difference(&self.disabled) {
@@ -327,7 +347,54 @@ impl DebugSession {
         let title = format!("{} {}", expression.trim(), var.type_name)
             .trim()
             .to_owned();
-        Some((title, describe(var)))
+        let mut text = describe(var);
+        if let Some(reason) = self
+            .opaque_reasons
+            .get(&(selected.clone(), var.name.clone()))
+        {
+            text = format!("{text}\n{reason}");
+        }
+        Some((title, text))
+    }
+
+    /// Why a variable of `unit` has no contents, if known.
+    pub fn opaque_reason(&self, unit: &Unit, name: &str) -> Option<&str> {
+        self.opaque_reasons
+            .get(&(unit.clone(), name.to_owned()))
+            .map(String::as_str)
+    }
+
+    /// Answers [`DebugAction::ExplainOpaque`].
+    pub fn set_opaque_reasons(&mut self, unit: &Unit, reasons: Vec<(String, String)>) {
+        for (name, reason) in reasons {
+            self.opaque_reasons.insert((unit.clone(), name), reason);
+        }
+    }
+
+    /// Asks why the selected frame's opaque variables have no contents,
+    /// once per variable and session.
+    fn explain_opaque(&mut self, actions: &mut Vec<DebugAction>) {
+        let Some(frame) = self.stack.get(self.frame) else {
+            return;
+        };
+        let unit = frame.location.unit.clone();
+        let names: Vec<String> = self
+            .variables
+            .iter()
+            .filter(|v| v.type_name == "OPAQUE")
+            .map(|v| v.name.clone())
+            .filter(|name| self.opaque_asked.insert((unit.clone(), name.clone())))
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let source = (unit.unit_type == UnitType::Block).then(|| self.block.clone());
+        actions.push(DebugAction::ExplainOpaque {
+            unit,
+            line: frame.location.line,
+            names,
+            source,
+        });
     }
 
     /// Drains debugger events; call every frame.
@@ -393,6 +460,7 @@ impl DebugSession {
                 self.exception = exception;
                 let shown = self.current_frame().map(|f| f.location.clone());
                 actions.push(DebugAction::ShowLocation(shown.unwrap_or(location)));
+                self.explain_opaque(actions);
             }
             DebugEvent::Watches(values) => self.watch_values = values,
             // Only the latest selection (a click may still be on its way).
@@ -403,6 +471,7 @@ impl DebugSession {
             } if frame == self.frame => {
                 self.variables = variables;
                 self.watch_values = watches;
+                self.explain_opaque(actions);
             }
             DebugEvent::FrameSelected { .. } => {}
             DebugEvent::SteppedOver(units) => {
@@ -502,11 +571,13 @@ impl DebugSession {
                 }
             });
             let mut watch = None;
+            let unit = self.stack.get(self.frame).map(|f| &f.location.unit);
             egui::ScrollArea::vertical()
                 .id_salt("dbg-vars")
                 .show(&mut cols[1], |ui| {
                     for (i, var) in self.variables.iter().enumerate() {
-                        variable_ui(ui, var, "", i, &mut watch);
+                        let reason = unit.and_then(|u| self.opaque_reason(u, &var.name));
+                        variable_ui(ui, var, "", i, &mut watch, reason);
                     }
                     if self.variables.is_empty() {
                         ui.weak("—");
@@ -619,7 +690,7 @@ impl DebugSession {
                                 named.name = expression.clone();
                                 ui.vertical(|ui| {
                                     let mut ignore = None;
-                                    variable_ui(ui, &named, "", 1000 + i, &mut ignore);
+                                    variable_ui(ui, &named, "", 1000 + i, &mut ignore, None);
                                 });
                             }
                             Some(Err(e)) => {
@@ -856,12 +927,14 @@ fn value_text(ui: &Ui, var: &Variable, stale: bool) -> RichText {
 
 /// A variable and its fields/elements; right-click offers "Add watch" with
 /// the variable's full path (`parent` is the path of the enclosing one).
+/// `opaque` says why it has no contents, if known.
 fn variable_ui(
     ui: &mut Ui,
     var: &Variable,
     parent: &str,
     index: usize,
     watch: &mut Option<String>,
+    opaque: Option<&str>,
 ) {
     let name = var.name.to_lowercase();
     let path = if parent.is_empty() {
@@ -893,6 +966,18 @@ fn variable_ui(
             .response
             .interact(egui::Sense::click());
         response.context_menu(|ui| menu(ui, watch));
+        if let Some(reason) = opaque {
+            ui.label(
+                RichText::new(reason)
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
+            )
+            .on_hover_text(format!(
+                "{reason}, so the debugger can't read its contents. Compile that package \
+                     with debug information (open it in a program window with Settings → \
+                     Debugger → Compile with debug information) and debug again."
+            ));
+        }
     } else {
         let summary = var
             .value
@@ -904,7 +989,7 @@ fn variable_ui(
             .id_salt(("var", index, &var.name, parent))
             .show(ui, |ui| {
                 for (i, child) in var.children.iter().enumerate() {
-                    variable_ui(ui, child, &path, i, watch);
+                    variable_ui(ui, child, &path, i, watch, None);
                 }
             });
         response.header_response.context_menu(|ui| menu(ui, watch));
@@ -1085,6 +1170,63 @@ mod tests {
         assert_eq!(s.hover(&unit, "l_other"), None);
         let other = Unit::new("PYTHIA", "Q", UnitType::Procedure);
         assert_eq!(s.hover(&other, "l_total"), None, "other unit");
+    }
+
+    /// Opaque variables are explained once per session, for the frame they
+    /// belong to; the reason shows with the value.
+    #[test]
+    fn opaque_variables_are_explained() {
+        let api = Unit::new("PYTHIA", "API", UnitType::PackageBody);
+        let mut s = DebugSession::default();
+        let opaque = Variable {
+            type_name: "OPAQUE".into(),
+            ..var("L_ORDER", Some("(contents not available)"), vec![])
+        };
+        let stop = |line| DebugEvent::Suspended {
+            reason: StopReason::Breakpoint,
+            location: Location {
+                unit: api.clone(),
+                line: Some(line),
+            },
+            stack: vec![frame(&api, "PROCESS", Some(line))],
+            frame: 0,
+            variables: vec![opaque.clone(), var("L_TOTAL", Some("0"), vec![])],
+            watches: Vec::new(),
+            exception: None,
+        };
+        let mut actions = Vec::new();
+        s.on_event(stop(41), &mut actions);
+        assert_eq!(
+            actions.last(),
+            Some(&DebugAction::ExplainOpaque {
+                unit: api.clone(),
+                line: Some(41),
+                names: vec!["L_ORDER".into()],
+                source: None,
+            })
+        );
+        s.set_opaque_reasons(
+            &api,
+            vec![("L_ORDER".into(), "T_ORDER is declared in TYPES, …".into())],
+        );
+        assert_eq!(
+            s.opaque_reason(&api, "L_ORDER"),
+            Some("T_ORDER is declared in TYPES, …")
+        );
+        assert!(
+            s.hover(&api, "l_order")
+                .unwrap()
+                .1
+                .ends_with("declared in TYPES, …")
+        );
+        // The next stop doesn't ask again.
+        let mut actions = Vec::new();
+        s.on_event(stop(42), &mut actions);
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, DebugAction::ExplainOpaque { .. }))
+        );
     }
 
     #[test]
