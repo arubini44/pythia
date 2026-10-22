@@ -27,14 +27,17 @@ pub enum InvalidScope {
 
 impl InvalidScope {
     /// A condition on `o.owner`, and its bind values.
-    fn owner_filter(&self) -> (&'static str, Vec<String>) {
-        match self {
-            InvalidScope::Schema(s) => ("o.owner = :1", vec![s.clone()]),
+    fn owner_filter(&self, conn: &Connection) -> Result<(String, Vec<String>), DbError> {
+        Ok(match self {
+            InvalidScope::Schema(s) => ("o.owner = :1".into(), vec![s.clone()]),
             InvalidScope::UserSchemas => (
-                "o.owner in (select username from all_users where oracle_maintained = 'N')",
+                format!(
+                    "o.owner in ({})",
+                    crate::compat::schemas_query(crate::compat::release(conn)?, false)
+                ),
                 Vec::new(),
             ),
-        }
+        })
     }
 }
 
@@ -86,7 +89,7 @@ pub fn invalid_counts(
     conn: &Connection,
     scope: &InvalidScope,
 ) -> Result<Vec<(String, u32)>, DbError> {
-    let (filter, binds) = scope.owner_filter();
+    let (filter, binds) = scope.owner_filter(conn)?;
     let sql = format!(
         "select o.owner, count(*) from all_objects o where o.status = 'INVALID' and {filter} \
          group by o.owner order by o.owner"
@@ -105,7 +108,7 @@ pub fn invalid_objects(
     conn: &Connection,
     scope: &InvalidScope,
 ) -> Result<Vec<InvalidObject>, DbError> {
-    let (filter, binds) = scope.owner_filter();
+    let (filter, binds) = scope.owner_filter(conn)?;
     let errors = "from all_errors e where e.owner = o.owner and e.name = o.object_name \
                   and e.type = o.object_type and e.attribute = 'ERROR'";
     let sql = format!(

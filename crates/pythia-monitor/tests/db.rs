@@ -51,14 +51,18 @@ fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
 fn capabilities_dba_and_app_user() {
     let Some(conn) = dba() else { return };
     let caps = queries::capabilities(&conn).unwrap();
-    assert!(
-        caps.missing_views().is_empty(),
-        "missing: {:?}",
-        caps.missing_views()
-    );
+    // Trace files can be read through the database from 12.2 on.
+    let traces = caps.release >= (12, 2);
+    let missing: Vec<_> = caps
+        .missing_views()
+        .into_iter()
+        .filter(|v| traces || !v.starts_with("V$DIAG_TRACE_FILE"))
+        .collect();
+    assert!(missing.is_empty(), "missing: {missing:?}");
     assert!(caps.alter_system && caps.dbms_monitor);
     assert!(caps.session_control().is_ok());
-    assert!(caps.trace_files().is_ok());
+    assert_eq!(caps.cancel_sql().is_ok(), caps.release >= (18, 0));
+    assert_eq!(caps.trace_files().is_ok(), traces);
     // Oracle Free enables the packs; the gate must allow AWR there.
     assert!(caps.pack_access.is_some());
     assert_eq!(caps.awr().is_ok(), caps.diagnostics_licensed());
@@ -251,9 +255,17 @@ fn blocking_chain_cancel_and_kill() {
         .find(|s| s.sid == c_sid)
         .unwrap()
         .serial;
-    queries::cancel_sql(&conn, c_sid, c_serial).unwrap();
-    c_done.send(()).unwrap();
-    assert_eq!(c_thread.join().unwrap(), Err(1013));
+    if pythia_db::compat::at_least(&conn, 18, 0).unwrap() {
+        queries::cancel_sql(&conn, c_sid, c_serial).unwrap();
+        c_done.send(()).unwrap();
+        assert_eq!(c_thread.join().unwrap(), Err(1013));
+    } else {
+        // Before 18c a call can't be cancelled from outside, only killed.
+        assert!(queries::cancel_sql(&conn, c_sid, c_serial).is_err());
+        queries::kill_session(&conn, c_sid, c_serial, true).unwrap();
+        c_done.send(()).unwrap();
+        assert!(c_thread.join().unwrap().is_err());
+    }
 
     // Releasing A lets B through; then B is no longer blocked.
     a.rollback().unwrap();
@@ -292,6 +304,10 @@ fn trace_round_trip() {
         let (u, p) = cred.split_once('/').unwrap();
         Connection::connect(u, p, db).unwrap()
     };
+    if !pythia_db::compat::at_least(&conn, 12, 2).unwrap() {
+        eprintln!("trace files need 12.2, skipping");
+        return;
+    }
     let traced_sid = sid(&traced);
     queries::trace_self(&traced, true).unwrap();
     for i in 0..3 {

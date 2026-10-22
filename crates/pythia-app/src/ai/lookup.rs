@@ -153,10 +153,12 @@ fn resolve(
 ) -> Option<(String, String)> {
     let exists = |owner: &str, name: &str| {
         conn.query_row_as::<String>(
-            "select object_name from all_objects \
-              where owner = :1 and object_name = :2 \
-                and object_type in ('TABLE', 'VIEW', 'MATERIALIZED VIEW') \
-              fetch first 1 row only",
+            &pythia_db::compat::first_rows(
+                "select object_name from all_objects \
+                  where owner = :1 and object_name = :2 \
+                    and object_type in ('TABLE', 'VIEW', 'MATERIALIZED VIEW')",
+                1,
+            ),
             &[&owner, &name],
         )
         .is_ok()
@@ -170,9 +172,12 @@ fn resolve(
     }
     let target = conn
         .query_row_as::<(String, String)>(
-            "select table_owner, table_name from all_synonyms \
-              where synonym_name = :1 and owner in (:2, 'PUBLIC') and db_link is null \
-              order by decode(owner, 'PUBLIC', 2, 1) fetch first 1 row only",
+            &pythia_db::compat::first_rows(
+                "select table_owner, table_name from all_synonyms \
+                  where synonym_name = :1 and owner in (:2, 'PUBLIC') and db_link is null \
+                  order by decode(owner, 'PUBLIC', 2, 1)",
+                1,
+            ),
             &[&name, &schema],
         )
         .ok()?;
@@ -185,9 +190,12 @@ fn schema_tables(
     schema: &str,
 ) -> Result<Vec<(String, Option<String>)>, DbError> {
     let rows = conn.query_as::<(String, Option<String>)>(
-        "select table_name, comments from all_tab_comments \
-          where owner = :1 and table_type in ('TABLE', 'VIEW') and table_name not like 'BIN$%' \
-          order by table_name fetch first 5000 rows only",
+        &pythia_db::compat::first_rows(
+            "select table_name, comments from all_tab_comments \
+              where owner = :1 and table_type in ('TABLE', 'VIEW') and table_name not like 'BIN$%' \
+              order by table_name",
+            5000,
+        ),
         &[&schema],
     )?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -305,15 +313,16 @@ pub struct IndexInfo {
 
 fn describe(conn: &Connection, owner: &str, name: &str) -> Result<Option<TableInfo>, DbError> {
     let head = conn.query_row_as::<(String, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<String>)>(
-        "select o.object_type, t.num_rows, t.blocks, to_char(t.last_analyzed, 'YYYY-MM-DD HH24:MI'), \
+        &pythia_db::compat::first_rows("select o.object_type, t.num_rows, t.blocks, to_char(t.last_analyzed, 'YYYY-MM-DD HH24:MI'), \
                 t.partitioned, c.comments \
            from all_objects o \
            left join all_tables t on t.owner = o.owner and t.table_name = o.object_name \
            left join all_tab_comments c on c.owner = o.owner and c.table_name = o.object_name \
           where o.owner = :1 and o.object_name = :2 \
             and o.object_type in ('TABLE', 'VIEW', 'MATERIALIZED VIEW') \
-          order by decode(o.object_type, 'MATERIALIZED VIEW', 1, 'TABLE', 2, 3) \
-          fetch first 1 row only",
+          order by decode(o.object_type, 'MATERIALIZED VIEW', 1, 'TABLE', 2, 3)",
+            1,
+        ),
         &[&owner, &name],
     );
     let (kind, num_rows, blocks, last_analyzed, partitioned, comment) = match head {
@@ -399,14 +408,21 @@ fn describe(conn: &Connection, owner: &str, name: &str) -> Result<Option<TableIn
         });
     }
     if info.kind == "VIEW" {
-        // TEXT_VC (12c+) holds the first 4000 characters.
+        // TEXT_VC (12c+) holds the first 4000 characters; before, there is
+        // only the LONG TEXT.
+        let column = if pythia_db::compat::at_least(conn, 12, 1)? {
+            "text_vc"
+        } else {
+            "text"
+        };
         info.query = conn
             .query_row_as::<Option<String>>(
-                "select text_vc from all_views where owner = :1 and view_name = :2",
+                &format!("select {column} from all_views where owner = :1 and view_name = :2"),
                 &[&owner, &name],
             )
             .ok()
-            .flatten();
+            .flatten()
+            .map(|q| q.chars().take(4000).collect());
     }
     Ok(Some(info))
 }

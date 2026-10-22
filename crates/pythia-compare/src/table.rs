@@ -515,19 +515,25 @@ pub fn load(
     }
 
     let mut backing_indexes: Vec<(String, String)> = Vec::new();
+    // Before 12.1 the condition is only the LONG SEARCH_CONDITION.
+    let condition = if pythia_db::compat::at_least(conn, 12, 1)? {
+        "k.search_condition_vc"
+    } else {
+        "k.search_condition"
+    };
     for row in conn.query(
-        "select k.table_name, k.constraint_name, k.constraint_type, k.generated, \
+        &format!("select k.table_name, k.constraint_name, k.constraint_type, k.generated, \
                 (select listagg(c.column_name, ',') within group (order by c.position) \
                    from all_cons_columns c where c.owner = k.owner and c.constraint_name = k.constraint_name), \
                 r.table_name, \
                 (select listagg(c.column_name, ',') within group (order by c.position) \
                    from all_cons_columns c where c.owner = r.owner and c.constraint_name = r.constraint_name), \
-                k.delete_rule, k.search_condition_vc, k.index_name \
+                k.delete_rule, {condition}, k.index_name \
            from all_constraints k \
            left join all_constraints r on r.owner = k.r_owner and r.constraint_name = k.r_constraint_name \
           where k.owner = :1 and k.table_name like :2 and k.constraint_type in ('P', 'U', 'R', 'C') \
             and k.table_name not like 'BIN$%' \
-          order by k.table_name, k.constraint_name",
+          order by k.table_name, k.constraint_name"),
         &[&owner, &name],
     )? {
         #[allow(clippy::type_complexity)]

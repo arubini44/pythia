@@ -24,6 +24,8 @@ pub struct SequenceDef {
     pub order: bool,
     /// Next value the sequence hands out (`LAST_NUMBER`), for information.
     pub last_number: Option<String>,
+    /// Whether the database can restart an existing sequence (18c+).
+    pub can_restart: bool,
 }
 
 impl SequenceDef {
@@ -50,6 +52,7 @@ pub fn load(conn: &Connection, owner: &str, name: &str) -> Result<SequenceDef, D
             _ => e.into(),
         })?;
     let descending = increment.starts_with('-');
+    let can_restart = pythia_db::compat::at_least(conn, 18, 0)?;
     // Oracle stores "no bound" as a huge value (or -1 as the top of a
     // descending sequence); show those as empty.
     let unbounded = |v: &str| {
@@ -70,6 +73,7 @@ pub fn load(conn: &Connection, owner: &str, name: &str) -> Result<SequenceDef, D
         cache,
         order: order == "Y",
         last_number: Some(last),
+        can_restart,
     })
 }
 
@@ -192,11 +196,13 @@ pub fn ui(ui: &mut Ui, def: &mut SequenceDef, existing: bool) {
         let start = if existing { "Restart at" } else { "Start with" };
         form_row(ui, start, |ui| {
             let hint = if existing { "keep going" } else { "minimum" };
-            ui.add(
+            ui.add_enabled(
+                !existing || def.can_restart,
                 egui::TextEdit::singleline(&mut def.start)
                     .hint_text(hint)
                     .desired_width(120.0),
-            );
+            )
+            .on_disabled_hover_text("Restarting a sequence needs Oracle 18c or later");
             if let Some(last) = &def.last_number {
                 ui.weak(format!("next value: {last}"))
                     .on_hover_text("LAST_NUMBER; cached values may already be handed out");

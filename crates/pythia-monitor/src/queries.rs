@@ -6,9 +6,9 @@
 //! missing privileges are reported per section instead of failing the whole
 //! snapshot, so the UI can degrade gracefully.
 
-use pythia_db::DbError;
 use pythia_db::oracle::sql_type::{FromSql, OracleType, ToSql};
 use pythia_db::oracle::{self, Connection};
+use pythia_db::{DbError, compat};
 
 pub type Result<T> = std::result::Result<T, DbError>;
 
@@ -70,14 +70,26 @@ pub struct InstanceInfo {
 }
 
 pub fn instance_info(conn: &Connection) -> Result<InstanceInfo> {
+    // Containers came with 12.1; from 18c VERSION is only the base release.
+    let container = if compat::at_least(conn, 12, 1)? {
+        "d.cdb, sys_context('USERENV', 'CON_NAME')"
+    } else {
+        "'NO', d.name"
+    };
+    let version = if compat::at_least(conn, 18, 0)? {
+        "i.version_full"
+    } else {
+        "i.version"
+    };
     let row = conn.query_row(
-        "select i.instance_name, i.host_name, i.version, \
-                to_char(i.startup_time, 'YYYY-MM-DD HH24:MI:SS'), \
-                round((sysdate - i.startup_time) * 86400), \
-                d.name, d.database_role, d.log_mode, d.cdb, \
-                sys_context('USERENV', 'CON_NAME'), \
-                (select value from v$osstat where stat_name = 'NUM_CPUS') \
-           from v$instance i cross join v$database d",
+        &format!(
+            "select i.instance_name, i.host_name, {version}, \
+                    to_char(i.startup_time, 'YYYY-MM-DD HH24:MI:SS'), \
+                    round((sysdate - i.startup_time) * 86400), \
+                    d.name, d.database_role, d.log_mode, {container}, \
+                    (select value from v$osstat where stat_name = 'NUM_CPUS') \
+               from v$instance i cross join v$database d"
+        ),
         &[],
     )?;
     Ok(InstanceInfo {
@@ -368,9 +380,12 @@ pub fn dashboard_snapshot(conn: &Connection) -> DashboardSnapshot {
             let group = |col: &str| {
                 query(
                     conn,
-                    &format!(
-                        "select nvl({col}, '(unknown)'), count(*) from v$session where type = 'USER' \
-                         group by {col} order by 2 desc, 1 fetch first 8 rows only"
+                    &compat::first_rows(
+                        &format!(
+                            "select nvl({col}, '(unknown)'), count(*) from v$session \
+                              where type = 'USER' group by {col} order by 2 desc, 1"
+                        ),
+                        8,
                     ),
                     &[],
                     |r| Ok((get(r, 0)?, get(r, 1)?)),
@@ -412,12 +427,15 @@ pub fn dashboard_snapshot(conn: &Connection) -> DashboardSnapshot {
                 .flatten();
             s.cursor_holders = query(
                 conn,
-                "select s.sid, s.serial#, s.username, s.program, st.value \
-                   from v$sesstat st \
-                   join v$statname n on n.statistic# = st.statistic# \
-                   join v$session s on s.sid = st.sid \
-                  where n.name = 'opened cursors current' and st.value > 0 \
-                  order by st.value desc fetch first 10 rows only",
+                &compat::first_rows(
+                    "select s.sid, s.serial#, s.username, s.program, st.value \
+                       from v$sesstat st \
+                       join v$statname n on n.statistic# = st.statistic# \
+                       join v$session s on s.sid = st.sid \
+                      where n.name = 'opened cursors current' and st.value > 0 \
+                      order by st.value desc",
+                    10,
+                ),
                 &[],
                 |r| {
                     Ok(CursorHolder {
@@ -543,10 +561,11 @@ pub fn tablespaces(conn: &Connection) -> Result<Vec<Tablespace>> {
 pub fn top_sql(conn: &Connection, limit: usize) -> Result<Vec<TopSql>> {
     query(
         conn,
-        &format!(
+        &compat::first_rows(
             "select sql_id, executions, elapsed_time / 1e6, cpu_time / 1e6, buffer_gets, disk_reads, \
                     rows_processed, substr(sql_text, 1, 300) \
-               from v$sqlstats order by elapsed_time desc fetch first {limit} rows only"
+               from v$sqlstats order by elapsed_time desc",
+            limit,
         ),
         &[],
         |r| {
@@ -567,10 +586,13 @@ pub fn top_sql(conn: &Connection, limit: usize) -> Result<Vec<TopSql>> {
 pub fn long_ops(conn: &Connection) -> Result<Vec<LongOp>> {
     query(
         conn,
-        "select sid, serial#, opname, target, sofar, totalwork, units, elapsed_seconds, time_remaining, message \
-           from v$session_longops \
-          where sofar < totalwork \
-          order by start_time desc fetch first 20 rows only",
+        &compat::first_rows(
+            "select sid, serial#, opname, target, sofar, totalwork, units, elapsed_seconds, time_remaining, message \
+               from v$session_longops \
+              where sofar < totalwork \
+              order by start_time desc",
+            20,
+        ),
         &[],
         |r| {
             Ok(LongOp {
@@ -1008,9 +1030,14 @@ fn session_handle(sid: i64, serial: i64) -> String {
 }
 
 pub fn kill_session(conn: &Connection, sid: i64, serial: i64, immediate: bool) -> Result<()> {
+    // A session busy in a call is only marked for kill (ORA-00031) and goes
+    // when the call returns. The driver takes ORA-00031 on any call for
+    // "this connection was killed" and would drop the monitor's own
+    // connection, so it is caught here.
     let sql = format!(
-        "alter system kill session {}{}",
-        session_handle(sid, serial),
+        "begin\n  execute immediate 'alter system kill session {}{}';\n\
+         exception\n  when others then\n    if sqlcode != -31 then raise; end if;\nend;",
+        session_handle(sid, serial).replace('\'', "''"),
         if immediate { " immediate" } else { "" }
     );
     conn.execute(&sql, &[])?;
@@ -1090,11 +1117,12 @@ pub fn trace_files(conn: &Connection, filter: &str, limit: usize) -> Result<Vec<
     let pattern = format!("%{}%", filter.trim());
     query(
         conn,
-        &format!(
+        &compat::first_rows(
             "select adr_home, trace_filename, to_char(change_time, 'YYYY-MM-DD HH24:MI:SS') \
                from v$diag_trace_file \
               where trace_filename like :1 and trace_filename like '%.trc' \
-              order by change_time desc fetch first {limit} rows only"
+              order by change_time desc",
+            limit,
         ),
         &[&pattern],
         |r| {
@@ -1140,16 +1168,30 @@ pub struct AwrSnapshot {
     pub end: String,
 }
 
+/// The `V$DATABASE` column with the AWR id of the current container
+/// (`CON_DBID`, 12.1+), or of the database before containers.
+fn dbid_column(conn: &Connection) -> Result<&'static str> {
+    Ok(if compat::at_least(conn, 12, 1)? {
+        "con_dbid"
+    } else {
+        "dbid"
+    })
+}
+
 pub fn awr_snapshots(conn: &Connection, limit: usize) -> Result<Vec<AwrSnapshot>> {
+    let dbid = dbid_column(conn)?;
     query(
         conn,
-        &format!(
-            "select snap_id, dbid, instance_number, \
-                    to_char(begin_interval_time, 'YYYY-MM-DD HH24:MI'), \
-                    to_char(end_interval_time, 'YYYY-MM-DD HH24:MI') \
-               from dba_hist_snapshot \
-              where dbid = (select con_dbid from v$database) \
-              order by snap_id desc fetch first {limit} rows only"
+        &compat::first_rows(
+            &format!(
+                "select snap_id, dbid, instance_number, \
+                        to_char(begin_interval_time, 'YYYY-MM-DD HH24:MI'), \
+                        to_char(end_interval_time, 'YYYY-MM-DD HH24:MI') \
+                   from dba_hist_snapshot \
+                  where dbid = (select {dbid} from v$database) \
+                  order by snap_id desc"
+            ),
+            limit,
         ),
         &[],
         |r| {
@@ -1210,11 +1252,12 @@ pub fn ash_report(conn: &Connection, minutes: i64, html: bool) -> Result<String>
     } else {
         "ash_report_text"
     };
+    let dbid = dbid_column(conn)?;
     collect_lines(
         conn,
         &format!(
             "select output from table(dbms_workload_repository.{func}( \
-               (select con_dbid from v$database), \
+               (select {dbid} from v$database), \
                (select instance_number from v$instance), \
                sysdate - :1 / 1440, sysdate))"
         ),
@@ -1234,6 +1277,8 @@ pub struct Capabilities {
     pub alter_system: bool,
     pub dbms_monitor: bool,
     pub dbms_workload_repository: bool,
+    /// The server's release, for statements newer versions have.
+    pub release: compat::Release,
 }
 
 const PROBED_VIEWS: &[&str] = &[
@@ -1325,6 +1370,16 @@ impl Capabilities {
         }
     }
 
+    /// Whether a session's current call can be cancelled, or why not.
+    pub fn cancel_sql(&self) -> std::result::Result<(), String> {
+        self.session_control()?;
+        if self.release >= (18, 0) {
+            Ok(())
+        } else {
+            Err("Cancelling the current SQL of a session needs Oracle 18c or later.".into())
+        }
+    }
+
     pub fn missing_views(&self) -> Vec<&'static str> {
         self.views
             .iter()
@@ -1373,6 +1428,7 @@ pub fn capabilities(conn: &Connection) -> Result<Capabilities> {
         alter_system,
         dbms_monitor: has_package("DBMS_MONITOR"),
         dbms_workload_repository: has_package("DBMS_WORKLOAD_REPOSITORY"),
+        release: compat::release(conn)?,
     })
 }
 

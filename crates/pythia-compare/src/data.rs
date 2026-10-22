@@ -142,11 +142,13 @@ pub fn fetch_chunk(
         }
         conditions.push(format!("({})", ors.join(" or ")));
     }
-    let sql = format!(
-        "select * from ({}) where {} order by {key_list} fetch first {} rows only",
-        source.base_sql(),
-        conditions.join(" and "),
-        limit.max(1)
+    let sql = pythia_db::compat::first_rows(
+        &format!(
+            "select * from ({}) where {} order by {key_list}",
+            source.base_sql(),
+            conditions.join(" and "),
+        ),
+        limit.max(1),
     );
     let params: Vec<&dyn pythia_db::oracle::sql_type::ToSql> = binds
         .iter()

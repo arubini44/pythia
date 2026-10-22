@@ -438,9 +438,13 @@ fn killed_session_is_reported_as_lost() {
     let (cred, db) = dba.rsplit_once('@').unwrap();
     let (user, pw) = cred.split_once('/').unwrap();
     let admin = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+    // ORA-00031 (only marked for kill) would make the driver drop `admin`.
     admin
         .execute(
-            &format!("alter system kill session '{sid_serial}' immediate"),
+            &format!(
+                "begin execute immediate 'alter system kill session ''{sid_serial}'' immediate'; \
+                 exception when others then if sqlcode != -31 then raise; end if; end;"
+            ),
             &[],
         )
         .unwrap();

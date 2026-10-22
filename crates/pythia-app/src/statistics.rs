@@ -125,9 +125,12 @@ pub fn run(conn: &Connection, sql: &str) -> Result<Report, DbError> {
 /// DISPLAY_CURSOR output for the cursor tagged with `marker`.
 fn actual_plan(conn: &Connection, marker: &str) -> Result<String, DbError> {
     let (sql_id, child): (String, i64) = conn.query_row_as(
-        "select sql_id, child_number from v$sql \
-          where sql_text like :1 and sql_text not like '%v$sql%' \
-          order by last_active_time desc fetch first 1 row only",
+        &pythia_db::compat::first_rows(
+            "select sql_id, child_number from v$sql \
+              where sql_text like :1 and sql_text not like '%v$sql%' \
+              order by last_active_time desc",
+            1,
+        ),
         &[&format!("%{marker}%")],
     )?;
     let lines = conn.query_as::<Option<String>>(

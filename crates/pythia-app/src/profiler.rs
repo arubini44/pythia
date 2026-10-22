@@ -77,6 +77,13 @@ pub fn explain(e: &DbError) -> String {
 /// Profiles a PL/SQL block. The profiler commits: DBMS_HPROF writes its
 /// trace data in the session's transaction.
 pub fn run(conn: &Connection, block: &str) -> Result<Profile, DbError> {
+    // Profiling into tables, without a directory object, came with 18c.
+    let (major, minor) = pythia_db::compat::release(conn)?;
+    if major < 18 {
+        return Err(DbError::new(format!(
+            "The profiler needs Oracle 18c or later; this database is {major}.{minor}."
+        )));
+    }
     let tables: i64 = conn.query_row_as(
         "select count(*) from user_tables where table_name = 'DBMSHP_RUNS'",
         &[],
@@ -263,8 +270,9 @@ begin
 end;",
         ) {
             Ok(p) => p,
-            // No EXECUTE on DBMS_HPROF in this database.
+            // No EXECUTE on DBMS_HPROF in this database, or before 18c.
             Err(e) if explain(&e).contains("grant execute") => return,
+            Err(e) if e.message.contains("needs Oracle 18c") => return,
             Err(e) => panic!("{e}"),
         };
         assert!(profile.error.is_none());

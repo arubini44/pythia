@@ -901,10 +901,12 @@ impl PythiaApp {
                 self.learn_inflight = Some(id);
                 let task: pythia_db::TaskFn = Box::new(move |c: &pythia_db::oracle::Connection| {
                     let rows = c.query_as::<(String, String, Option<String>)>(
-                        "select name, type, text from all_source where owner = :1 \
-                         and type in ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', \
-                         'TRIGGER', 'TYPE BODY') order by name, type, line \
-                         fetch first 50000 rows only",
+                        &pythia_db::compat::first_rows(
+                            "select name, type, text from all_source where owner = :1 \
+                             and type in ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', \
+                             'TRIGGER', 'TYPE BODY') order by name, type, line",
+                            50000,
+                        ),
                         &[&schema],
                     )?;
                     let mut src = String::new();
@@ -3361,9 +3363,14 @@ impl eframe::App for PythiaApp {
         if let Some(report) = report {
             match self.current_connection() {
                 Some(connection) => {
+                    // Built-in reports are written for 12.1+ dictionaries.
+                    let sql = match self.conns.get(&connection).and_then(|c| c.server()) {
+                        Some(server) => pythia_db::compat::for_release(&report.1, server.release),
+                        None => report.1,
+                    };
                     let id = self.add_doc(
                         Some(connection),
-                        DocKind::Sql(SqlWindow::new(report.0, report.1)),
+                        DocKind::Sql(SqlWindow::new(report.0, sql)),
                     );
                     self.execute(id, false);
                 }

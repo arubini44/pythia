@@ -198,6 +198,7 @@ impl Worker {
             .execute("begin dbms_output.enable(null); end;", &[])?;
         Ok(ServerInfo {
             version: version.to_string(),
+            release: (version.major(), version.minor()),
             banner,
             current_schema: current_schema(&self.conn)?,
         })

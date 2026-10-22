@@ -74,9 +74,10 @@ fn seconds(col: &str) -> String {
 
 pub fn load_jobs(conn: &Connection, system: bool) -> Result<Vec<Job>, DbError> {
     let owners = if system {
-        ""
+        String::new()
     } else {
-        "where j.owner not in (select username from all_users where oracle_maintained = 'Y')"
+        let oracle = pythia_db::compat::schemas_query(pythia_db::compat::release(conn)?, true);
+        format!("where j.owner not in ({oracle})")
     };
     let sql = format!(
         "select j.owner, j.job_name, j.enabled, j.state, j.job_type,
@@ -123,10 +124,10 @@ pub fn load_runs(conn: &Connection, owner: &str, name: &str) -> Result<Vec<JobRu
                 substr(additional_info, 1, 2000)
            from all_scheduler_job_run_details
           where owner = :1 and job_name = :2
-          order by actual_start_date desc nulls last, log_id desc
-          fetch first 50 rows only",
+          order by actual_start_date desc nulls last, log_id desc",
         seconds("run_duration")
     );
+    let sql = pythia_db::compat::first_rows(&sql, 50);
     let mut out = Vec::new();
     for row in conn.query(&sql, &[&owner, &name])? {
         let row = row?;
