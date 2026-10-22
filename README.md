@@ -58,12 +58,12 @@ for Linux, Windows and macOS.
   foreign keys, checks, indexes, identity columns, range, interval, list
   or hash partitioning, temporary tables, a copy of another table), and
   forms for views, materialized views, sequences, synonyms, indexes,
-  database links, scheduler jobs, users, roles and profiles, with a
-  preview of the generated DDL. Triggers, procedures, functions, packages and types start
+  database links, scheduler jobs, users, roles, profiles and directories,
+  with a preview of the generated DDL. Triggers, procedures, functions, packages and types start
   from a form that writes their first source for a program window.
 - Form editors for existing sequences, views, materialized views, synonyms,
-  indexes, database links, scheduler jobs, users, roles, profiles and
-  grants.
+  indexes, database links, scheduler jobs, users, roles, profiles,
+  directories and grants.
 - Program windows with spec and body, compile with clickable errors
   (gutter markers and squiggles), unsaved-change tracking, save to file.
 - **Test…** generates a ready-to-run block for any procedure or function

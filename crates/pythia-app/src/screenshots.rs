@@ -2471,6 +2471,28 @@ create table pythia_nof_items (id number primary key, label varchar2(40), price 
     assert_eq!(h.state().test_focused_title().as_deref(), Some("New user"));
     let role = open(&mut h, "", ObjectType::Role, None);
     assert_eq!(role, Err("Enter a name".into()));
+    let new_directory = open(&mut h, "", ObjectType::Directory, None);
+    assert_eq!(new_directory, Err("Enter a name".into()));
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d
+            .downcast_mut::<crate::object_editor::DirectoryDef>()
+            .unwrap();
+        d.name = "exports".into();
+        d.path = "/u01/app/exports".into();
+    });
+    h.run_steps(3);
+    save(&mut h, "new-directory");
+    assert_eq!(
+        h.state_mut()
+            .test_object_editor()
+            .statements_for_test()
+            .unwrap(),
+        ["create or replace directory EXPORTS as '/u01/app/exports'"]
+    );
+    assert!(
+        h.query_by_label_contains("doesn't have CREATE ANY DIRECTORY")
+            .is_some()
+    );
     let new_profile = open(&mut h, "", ObjectType::Profile, None);
     assert_eq!(new_profile, Err("Enter a name".into()));
     h.state_mut().test_object_editor().edit_for_test(|d| {
@@ -2561,6 +2583,44 @@ create table pythia_bnm_t (id number primary key);"
         run: true,
     });
     wait_until(&mut h, "setup", |app| !app.test_focused_busy());
+    // Directories show their path; Grants… is in their menu.
+    let dba = std::env::var("PYTHIA_TEST_DB_DBA").ok().map(|spec| {
+        let (cred, db) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        pythia_db::oracle::Connection::connect(user, pw, db).unwrap()
+    });
+    if let Some(dba) = &dba {
+        dba.execute(
+            "create or replace directory pythia_bnm_dir as '/tmp/pythia_bnm'",
+            &[],
+        )
+        .unwrap();
+        dba.execute("grant read on directory pythia_bnm_dir to pythia", &[])
+            .unwrap();
+        h.state_mut().test_browser().set_filter("PYTHIA_BNM_DIR");
+        h.run_steps(2);
+        wait_until(&mut h, "directories", |app| !app.test_browser_loading());
+        h.get_by_label("Directories").click();
+        h.run_steps(2);
+        wait_until(&mut h, "directories", |app| !app.test_browser_loading());
+        assert!(h.query_by_label("/tmp/pythia_bnm").is_some());
+        save(&mut h, "browser-directories");
+        h.get_by_label("pythia_bnm_dir").click_secondary();
+        h.run_steps(2);
+        assert!(h.query_by_label("Edit directory…").is_some());
+        h.get_by_label("Grants…").click();
+        h.run_steps(2);
+        wait_until(&mut h, "grants", |app| !app.test_focused_busy());
+        assert_eq!(
+            h.state().test_focused_title().as_deref(),
+            Some("pythia_bnm_dir grants")
+        );
+        assert!(
+            h.query_by_label("Grants on directory PYTHIA_BNM_DIR")
+                .is_some()
+        );
+        dba.execute("drop directory pythia_bnm_dir", &[]).unwrap();
+    }
     // Users and roles are listed below the folders.
     h.state_mut().test_browser().set_filter("PYTHIA");
     h.run_steps(2);

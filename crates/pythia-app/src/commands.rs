@@ -55,6 +55,7 @@ commands! {
     NewUser => "New: User…",
     NewRole => "New: Role…",
     NewProfile => "New: Profile…",
+    NewDirectory => "New: Directory…",
     OpenFile => "File: Open…",
     SaveFile => "File: Save",
     SaveFileAs => "File: Save As…",
@@ -157,6 +158,7 @@ impl Command {
         (Command::NewUser, pythia_db::ObjectType::User),
         (Command::NewRole, pythia_db::ObjectType::Role),
         (Command::NewProfile, pythia_db::ObjectType::Profile),
+        (Command::NewDirectory, pythia_db::ObjectType::Directory),
     ];
 
     /// Label without the category prefix, for menus.

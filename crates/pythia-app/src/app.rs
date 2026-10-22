@@ -1842,7 +1842,8 @@ impl PythiaApp {
             | Command::NewDatabaseLink
             | Command::NewUser
             | Command::NewRole
-            | Command::NewProfile => {
+            | Command::NewProfile
+            | Command::NewDirectory => {
                 if let Some((_, object_type)) =
                     Command::NEW_OBJECTS.iter().find(|(c, _)| *c == command)
                 {

@@ -8,6 +8,7 @@
 
 mod account;
 mod db_link;
+mod directory;
 mod grants;
 mod index;
 mod job;
@@ -24,6 +25,8 @@ mod view;
 pub use account::AccountDef;
 #[cfg(test)]
 pub use db_link::LinkDef;
+#[cfg(test)]
+pub use directory::DirectoryDef;
 #[cfg(test)]
 pub use job::JobDef;
 #[cfg(test)]
@@ -101,6 +104,7 @@ pub fn has_editor(t: ObjectType) -> bool {
             | ObjectType::Index
             | ObjectType::DatabaseLink
             | ObjectType::Job
+            | ObjectType::Directory
             | ObjectType::User
             | ObjectType::Role
             | ObjectType::Profile
@@ -134,6 +138,7 @@ pub fn has_grants(t: ObjectType) -> bool {
             | ObjectType::Function
             | ObjectType::Type
             | ObjectType::Library
+            | ObjectType::Directory
     )
 }
 
@@ -146,6 +151,7 @@ enum Form {
     Index(index::IndexDef),
     DatabaseLink(db_link::LinkDef),
     Job(job::JobDef),
+    Directory(directory::DirectoryDef),
     Account(account::AccountDef),
     Profile(profile::ProfileDef),
     Grants(grants::GrantsDef),
@@ -165,6 +171,7 @@ impl Form {
             Form::Index(d) => ident(&d.name),
             Form::DatabaseLink(d) => ident(&d.name),
             Form::Job(d) => ident(&d.name),
+            Form::Directory(d) => ident(&d.name),
             Form::Account(d) => ident(&d.name),
             Form::Profile(d) => ident(&d.name),
             Form::Program(d) => ident(&d.name),
@@ -175,12 +182,13 @@ impl Form {
     }
 
     /// Who owns the object: the editor's schema, except for public
-    /// synonyms and links (PUBLIC) and users, roles and profiles (nobody).
+    /// synonyms and links (PUBLIC) and users, roles, profiles and
+    /// directories (nobody).
     fn owner<'a>(&self, schema: &'a str) -> &'a str {
         match self {
             Form::Synonym(d) if d.public => "PUBLIC",
             Form::DatabaseLink(d) if d.public => "PUBLIC",
-            Form::Account(_) | Form::Profile(_) => "",
+            Form::Account(_) | Form::Profile(_) | Form::Directory(_) => "",
             _ => schema,
         }
     }
@@ -371,6 +379,7 @@ impl ObjectEditor {
             Form::Index(d) => f(d),
             Form::DatabaseLink(d) => f(d),
             Form::Job(d) => f(d),
+            Form::Directory(d) => f(d),
             Form::Account(d) => f(d),
             Form::Profile(d) => f(d),
             Form::Grants(d) => f(d),
@@ -597,6 +606,13 @@ impl ObjectEditor {
                 });
                 job::statements(owner, o, d)
             }
+            (o, Form::Directory(d)) => {
+                let o = o.and_then(|f| match f {
+                    Form::Directory(d) => Some(d),
+                    _ => None,
+                });
+                directory::statements(o, d)
+            }
             (o, Form::Account(d)) => {
                 let o = o.and_then(|f| match f {
                     Form::Account(a) => Some(a),
@@ -617,11 +633,13 @@ impl ObjectEditor {
                     Some(Form::Grants(g)) => g,
                     _ => &empty,
                 };
-                let object = self
-                    .target
-                    .object()
-                    .map(ObjectRef::qualified)
-                    .unwrap_or_default();
+                let object = match self.target.object() {
+                    Some(o) if o.object_type == ObjectType::Directory => {
+                        format!("directory {}", o.qualified())
+                    }
+                    Some(o) => o.qualified(),
+                    None => String::new(),
+                };
                 Ok(grants::statements(&object, o, d))
             }
             (_, Form::Program(d)) => program::sources(owner, d),
@@ -787,6 +805,9 @@ impl ObjectEditor {
                     format!("{kind} {}", o.name)
                 }
                 EditTarget::Edit(o) => format!("{}.{}", o.owner, o.name),
+                EditTarget::Grants(o) if o.owner.is_empty() => {
+                    format!("Grants on {kind} {}", o.name)
+                }
                 EditTarget::Grants(o) => format!("Grants on {}.{}", o.owner, o.name),
             };
             ui.label(RichText::new(heading).strong());
@@ -906,6 +927,7 @@ impl ObjectEditor {
                             Form::Index(def) => index::ui(ui, def, existing, lists),
                             Form::DatabaseLink(def) => db_link::ui(ui, def, existing, &owner),
                             Form::Job(def) => job::ui(ui, def, existing, &owner, lists),
+                            Form::Directory(def) => directory::ui(ui, def, existing, lists),
                             Form::Account(def) => {
                                 let original = original.and_then(|f| match f {
                                     Form::Account(a) => Some(a),
@@ -1020,6 +1042,7 @@ fn new_form(conn: &Connection, target: &EditTarget) -> Result<Form, DbError> {
             ..Default::default()
         }),
         ObjectType::Job => Form::Job(job::JobDef::default()),
+        ObjectType::Directory => Form::Directory(directory::DirectoryDef::default()),
         ObjectType::User => Form::Account(account::AccountDef::new_user()),
         ObjectType::Role => Form::Account(account::AccountDef::new_role()),
         ObjectType::Profile => Form::Profile(profile::new_def(conn)),
@@ -1097,6 +1120,7 @@ fn load(conn: &Connection, target: &EditTarget) -> Result<Loaded, DbError> {
         ObjectType::User | ObjectType::Role => account::lists(conn, &mut base)?,
         ObjectType::Profile => profile::lists(conn, &mut base)?,
         ObjectType::Job => job::lists(conn, owner, &mut base)?,
+        ObjectType::Directory => directory::lists(conn, &mut base)?,
         _ => {}
     }
     if let EditTarget::New { object_type, .. } = target
@@ -1127,6 +1151,7 @@ fn load(conn: &Connection, target: &EditTarget) -> Result<Loaded, DbError> {
             ObjectType::Index => Form::Index(index::load(conn, owner, &o.name)?),
             ObjectType::DatabaseLink => Form::DatabaseLink(db_link::load(conn, owner, &o.name)?),
             ObjectType::Job => Form::Job(job::load(conn, owner, &o.name)?),
+            ObjectType::Directory => Form::Directory(directory::load(conn, &o.name)?),
             ObjectType::User => Form::Account(account::load_user(conn, &o.name)?),
             ObjectType::Role => Form::Account(account::load_role(conn, &o.name)?),
             ObjectType::Profile => Form::Profile(profile::load(conn, &o.name)?),
@@ -1612,8 +1637,9 @@ mod tests {
             conn.execute(s, &[]).unwrap();
         }
     }
-    /// One test at a time creates and drops users, roles and profiles:
-    /// in parallel, that DDL deadlocks in the dictionary (ORA-00060).
+    /// One test at a time creates and drops users, roles, profiles and
+    /// directories: in parallel, that DDL deadlocks in the dictionary
+    /// (ORA-00060).
     static ACCOUNTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn connect(var: &str) -> Option<(Connection, String)> {
@@ -2082,6 +2108,98 @@ mod tests {
             account::statements(Some(&reloaded), &reloaded),
             Ok(Vec::new())
         );
+        conn.execute(cleanup, &[]).unwrap();
+    }
+
+    /// Directories through the directory form's SQL, and grants on them
+    /// through the grants editor's (needs a DBA).
+    #[test]
+    fn creates_live_directories() {
+        let Some((conn, _)) = connect("PYTHIA_TEST_DB_DBA") else {
+            return;
+        };
+        let _accounts = ACCOUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((user, _)) = connect("PYTHIA_TEST_DB") else {
+            return;
+        };
+        let grantee = user
+            .query_row_as::<String>("select user from dual", &[])
+            .unwrap();
+        let cleanup = "begin
+               for d in (select directory_name from all_directories
+                          where directory_name = 'PYTHIA_OB_DIR') loop
+                 execute immediate 'drop directory pythia_ob_dir';
+               end loop;
+             end;";
+        conn.execute(cleanup, &[]).unwrap();
+        let run = |statements: Vec<String>| {
+            apply(&conn, &statements, None).unwrap_or_else(|e| {
+                panic!("{}: {}", e.statement, e.error);
+            })
+        };
+        let mut base = BaseLists::default();
+        directory::lists(&conn, &mut base).unwrap();
+        assert!(
+            base.session_privileges
+                .iter()
+                .any(|p| p == "CREATE ANY DIRECTORY")
+        );
+        let def = directory::DirectoryDef {
+            name: "pythia_ob_dir".into(),
+            path: "/tmp/pythia_ob".into(),
+        };
+        run(directory::statements(None, &def).unwrap());
+        let loaded = directory::load(&conn, "PYTHIA_OB_DIR").unwrap();
+        assert_eq!(loaded.path, "/tmp/pythia_ob");
+        assert_eq!(
+            directory::statements(Some(&loaded), &loaded),
+            Ok(Vec::new())
+        );
+
+        // Grants: read and write to the test user, then write taken away.
+        let object = "directory PYTHIA_OB_DIR";
+        let before = grants::load(&conn, "", "PYTHIA_OB_DIR", ObjectType::Directory).unwrap();
+        assert_eq!(before.privileges, ["READ", "WRITE", "EXECUTE"]);
+        let mut after = before.clone();
+        after.rows.push(grants::GrantRow {
+            grantee: grantee.clone(),
+            granted: ["READ".to_owned(), "WRITE".to_owned()].into(),
+            grantable: BTreeSet::new(),
+        });
+        run(grants::statements(object, &before, &after));
+        let granted = grants::load(&conn, "", "PYTHIA_OB_DIR", ObjectType::Directory).unwrap();
+        let row = granted.rows.iter().find(|r| r.grantee == grantee).unwrap();
+        assert_eq!(row.granted, ["READ".to_owned(), "WRITE".to_owned()].into());
+        let readable: Vec<String> = names(
+            &user,
+            "select directory_name from all_directories where directory_name = 'PYTHIA_OB_DIR'",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(readable, ["PYTHIA_OB_DIR"]);
+
+        // A new path keeps the grants.
+        let moved = directory::DirectoryDef {
+            path: "/tmp/pythia_ob2".into(),
+            ..loaded.clone()
+        };
+        run(directory::statements(Some(&loaded), &moved).unwrap());
+        assert_eq!(
+            directory::load(&conn, "PYTHIA_OB_DIR").unwrap().path,
+            "/tmp/pythia_ob2"
+        );
+        let kept = grants::load(&conn, "", "PYTHIA_OB_DIR", ObjectType::Directory).unwrap();
+        let mut fewer = kept.clone();
+        let row = fewer
+            .rows
+            .iter_mut()
+            .find(|r| r.grantee == grantee)
+            .unwrap();
+        assert!(row.granted.remove("WRITE"));
+        run(grants::statements(object, &kept, &fewer));
+        let reloaded = grants::load(&conn, "", "PYTHIA_OB_DIR", ObjectType::Directory).unwrap();
+        let row = reloaded.rows.iter().find(|r| r.grantee == grantee).unwrap();
+        assert_eq!(row.granted, ["READ".to_owned()].into());
         conn.execute(cleanup, &[]).unwrap();
     }
 

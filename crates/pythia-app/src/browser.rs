@@ -46,18 +46,25 @@ enum Section {
     Users,
     Roles,
     Profiles,
+    Directories,
 }
 
 impl Section {
     /// Sections listing the database's own objects, in display order.
-    const DATABASE: [Section; 3] = [Section::Users, Section::Roles, Section::Profiles];
+    const DATABASE: [Section; 4] = [
+        Section::Users,
+        Section::Roles,
+        Section::Profiles,
+        Section::Directories,
+    ];
 
-    /// The users, roles or profiles a section lists.
+    /// The users, roles, profiles or directories a section lists.
     fn accounts(self) -> Option<ObjectType> {
         match self {
             Section::Users => Some(ObjectType::User),
             Section::Roles => Some(ObjectType::Role),
             Section::Profiles => Some(ObjectType::Profile),
+            Section::Directories => Some(ObjectType::Directory),
             Section::Favorites | Section::Recent => None,
         }
     }
@@ -211,8 +218,9 @@ enum Row<'a> {
     },
     /// An object listed under Favorites or Recent.
     Shortcut(&'a ObjectRef),
-    /// A user or role.
-    Account(&'a str, ObjectType),
+    /// A user, role, profile or directory: name, and what else to show
+    /// (a directory's path).
+    Account(&'a str, &'a str, ObjectType),
     Message {
         depth: usize,
         text: String,
@@ -230,8 +238,8 @@ pub struct Browser {
     changed: Changed,
     pub marks: Marks,
     folders: HashMap<(String, ObjectType), Loaded<Vec<DbObject>>>,
-    /// Users and roles, by type.
-    accounts: HashMap<ObjectType, Loaded<Vec<String>>>,
+    /// Users, roles, profiles and directories by type: name and detail.
+    accounts: HashMap<ObjectType, Loaded<Vec<(String, String)>>>,
     children: HashMap<ObjectRef, Loaded<Children>>,
     parts: HashMap<ObjectRef, TableParts>,
     expanded: HashSet<Node>,
@@ -413,7 +421,7 @@ impl Browser {
         );
     }
 
-    /// Loads the users, roles or profiles of the database.
+    /// Loads the users, roles, profiles or directories of the database.
     fn load_accounts(&mut self, effects: &mut Effects, object_type: ObjectType) {
         self.accounts.insert(object_type, Loaded::Loading);
         let id = request_id();
@@ -551,7 +559,7 @@ impl Browser {
             if let Some(Pending::Accounts(t)) = self.pending.get(&id) {
                 let t = *t;
                 self.pending.remove(&id);
-                let loaded = match result.map(|any| any.downcast::<Vec<String>>()) {
+                let loaded = match result.map(|any| any.downcast::<Vec<(String, String)>>()) {
                     Ok(Ok(names)) => Loaded::Ready(*names),
                     Ok(Err(_)) => Loaded::Failed("unexpected result".into()),
                     Err(e) => Loaded::Failed(e.to_string()),
@@ -990,10 +998,10 @@ impl Browser {
             };
             let open = self.expanded.contains(&Node::Section(section));
             let list = self.accounts.get(&object_type);
-            let matching: Vec<&String> = match list {
+            let matching: Vec<&(String, String)> = match list {
                 Some(Loaded::Ready(names)) => names
                     .iter()
-                    .filter(|n| filter.is_empty() || n.contains(&filter))
+                    .filter(|(n, _)| filter.is_empty() || n.contains(&filter))
                     .collect(),
                 _ => Vec::new(),
             };
@@ -1023,7 +1031,7 @@ impl Browser {
                 Some(Loaded::Ready(_)) => rows.extend(
                     matching
                         .into_iter()
-                        .map(|name| Row::Account(name.as_str(), object_type)),
+                        .map(|(name, detail)| Row::Account(name, detail, object_type)),
                 ),
             }
         }
@@ -1277,6 +1285,7 @@ impl Browser {
                         Section::Users => (Icon::Schema, "Users"),
                         Section::Roles => (Icon::Lock, "Roles"),
                         Section::Profiles => (Icon::Settings, "Profiles"),
+                        Section::Directories => (Icon::Folder, "Directories"),
                     };
                     ui.add(icon.sized(ui, small));
                     let r = ui
@@ -1297,7 +1306,7 @@ impl Browser {
                         ui.weak(n.to_string());
                     }
                 }
-                Row::Account(name, object_type) => {
+                Row::Account(name, detail, object_type) => {
                     ui.add_space(INDENT);
                     ui.add_space(small.points());
                     let icon =
@@ -1320,6 +1329,11 @@ impl Browser {
                         actions.push(ObjectAction::EditObject(account.clone()));
                     }
                     response.context_menu(|ui| account_menu(ui, &account, actions));
+                    if !detail.is_empty() {
+                        ui.add(
+                            egui::Label::new(RichText::new(*detail).weak().monospace()).truncate(),
+                        );
+                    }
                 }
                 Row::Shortcut(object) => {
                     ui.add_space(INDENT);
@@ -1584,6 +1598,9 @@ impl Browser {
                 ObjectType::Profile => {
                     ui.weak("Users with this profile get the DEFAULT profile.");
                 }
+                ObjectType::Directory => {
+                    ui.weak("The folder on the server stays; the grants on the directory go.");
+                }
                 _ => {}
             }
             ui.add_space(10.0);
@@ -1674,7 +1691,7 @@ fn group_menu(ui: &mut Ui, table: &ObjectRef, group: Group, actions: &mut Vec<Ob
     }
 }
 
-/// The context menu of a user, role or profile.
+/// The context menu of a user, role, profile or directory.
 fn account_menu(ui: &mut Ui, account: &ObjectRef, actions: &mut Vec<ObjectAction>) {
     let kind = account.object_type.dictionary_name().to_lowercase();
     let mut item = |ui: &mut Ui, label: &str, action: ObjectAction| {
@@ -1695,6 +1712,9 @@ fn account_menu(ui: &mut Ui, account: &ObjectRef, actions: &mut Vec<ObjectAction
             ObjectAction::ShowSchema(account.name.clone()),
         );
     }
+    if has_grants(account.object_type) {
+        item(ui, "Grants…", ObjectAction::Grants(account.clone()));
+    }
     item(
         ui,
         &format!("New {kind}…"),
@@ -1710,25 +1730,34 @@ fn account_menu(ui: &mut Ui, account: &ObjectRef, actions: &mut Vec<ObjectAction
 }
 
 /// Names of the database's users, of its roles (all of them with catalog
-/// access, else those granted to the session's user), or of its profiles
-/// (with catalog access).
+/// access, else those granted to the session's user), of its profiles
+/// (with catalog access), or of the directories the session can use (with
+/// their paths); each with what else to show.
 fn account_names(
     conn: &pythia_db::oracle::Connection,
     object_type: ObjectType,
-) -> Result<Vec<String>, pythia_db::DbError> {
-    let read = |sql: &str| -> Result<Vec<String>, pythia_db::DbError> {
+) -> Result<Vec<(String, String)>, pythia_db::DbError> {
+    let read = |sql: &str| -> Result<Vec<(String, String)>, pythia_db::DbError> {
         let mut out = Vec::new();
-        for row in conn.query_as::<String>(sql, &[])? {
-            out.push(row?);
+        for row in conn.query_as::<(String, Option<String>)>(sql, &[])? {
+            let (name, detail) = row?;
+            out.push((name, detail.unwrap_or_default()));
         }
         Ok(out)
     };
     match object_type {
-        ObjectType::User => read("select username from all_users order by username"),
-        ObjectType::Profile => read("select distinct profile from dba_profiles order by profile")
-            .map_err(|_| pythia_db::DbError::new("Listing profiles needs access to DBA_PROFILES")),
-        _ => read("select role from dba_roles order by role")
-            .or_else(|_| read("select granted_role from user_role_privs order by granted_role")),
+        ObjectType::User => read("select username, null from all_users order by username"),
+        ObjectType::Directory => read(
+            "select directory_name, directory_path from all_directories order by directory_name",
+        ),
+        ObjectType::Profile => {
+            read("select distinct profile, null from dba_profiles order by profile").map_err(|_| {
+                pythia_db::DbError::new("Listing profiles needs access to DBA_PROFILES")
+            })
+        }
+        _ => read("select role, null from dba_roles order by role").or_else(|_| {
+            read("select granted_role, null from user_role_privs order by granted_role")
+        }),
     }
 }
 

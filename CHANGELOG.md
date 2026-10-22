@@ -7,6 +7,11 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Directories (#43), listed with their paths in the object browser below
+  profiles, with New directory…, Edit directory…, Grants… (read, write and
+  execute) and Drop…. The form takes the name and the path on the server
+  (`CREATE OR REPLACE DIRECTORY`, which keeps the grants) and warns
+  without CREATE ANY DIRECTORY. New: Directory… joins File → New Object.
 - Scheduler job form (#42), from New job… on the object browser's
   Scheduler jobs folder, File → New Object, or New job… and Edit… in the
   Scheduler Jobs window. It sets what the job runs (a PL/SQL block or a

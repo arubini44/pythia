@@ -56,6 +56,8 @@ fn privileges_for(t: ObjectType) -> &'static [&'static str] {
         | ObjectType::Function
         | ObjectType::Type
         | ObjectType::Library => &["EXECUTE", "DEBUG"],
+        // EXECUTE: preprocessor programs of external tables.
+        ObjectType::Directory => &["READ", "WRITE", "EXECUTE"],
         _ => &["SELECT", "EXECUTE"],
     }
 }
@@ -66,6 +68,11 @@ pub fn load(
     name: &str,
     object_type: ObjectType,
 ) -> Result<GrantsDef, DbError> {
+    // Directories belong to SYS.
+    let owner = match object_type {
+        ObjectType::Directory => "SYS",
+        _ => owner,
+    };
     let mut def = GrantsDef {
         privileges: privileges_for(object_type)
             .iter()
