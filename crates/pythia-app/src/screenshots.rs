@@ -46,20 +46,30 @@ impl std::ops::DerefMut for Ui {
 }
 
 fn harness(dark: bool) -> Ui {
+    locked(dark, true)
+}
+
+/// A harness without a renderer, for tests that only interact with the UI:
+/// they also run where no GPU adapter is available (CI).
+fn headless_harness() -> Ui {
+    locked(false, false)
+}
+
+fn locked(dark: bool, render: bool) -> Ui {
     // A failed test poisons the lock; the next one can still run.
     let lock = UI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     Ui {
-        harness: new_harness(dark),
+        harness: new_harness(dark, render),
         _lock: lock,
     }
 }
 
-fn new_harness(dark: bool) -> Harness<'static, PythiaApp> {
-    let harness = Harness::builder()
+fn new_harness(dark: bool, render: bool) -> Harness<'static, PythiaApp> {
+    let builder = Harness::builder()
         .with_size(egui::vec2(1440.0, 900.0))
-        .with_pixels_per_point(1.5)
-        .wgpu()
-        .build_eframe(|cc| PythiaApp::new(cc, None));
+        .with_pixels_per_point(1.5);
+    let builder = if render { builder.wgpu() } else { builder };
+    let harness = builder.build_eframe(|cc| PythiaApp::new(cc, None));
     harness.ctx.set_theme(if dark {
         egui::Theme::Dark
     } else {
@@ -1280,7 +1290,7 @@ fn code_font() {
 /// menu; without an open menu, hovering a title does nothing.
 #[test]
 fn menu_bar_switches_on_hover() {
-    let mut h = harness(false);
+    let mut h = headless_harness();
     h.run_steps(2);
     h.get_by_label("Edit").hover();
     h.run_steps(2);
