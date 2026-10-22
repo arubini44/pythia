@@ -3114,8 +3114,17 @@ fn invalid_objects_indicator_and_recompile() {
         app.test_invalid_window()
             .is_some_and(|w| !w.is_busy() && !w.objects().is_empty())
     });
-    let listed = h.state().test_invalid_window().unwrap().objects().len();
-    assert_eq!(listed as u32, total);
+    // Other tests make objects invalid and valid again meanwhile: only
+    // this test's objects hold still.
+    let ours = h
+        .state()
+        .test_invalid_window()
+        .unwrap()
+        .objects()
+        .iter()
+        .filter(|o| o.id.name.starts_with("INV_"))
+        .count();
+    assert_eq!(ours as u32, invalid_now());
     let bad = h
         .state()
         .test_invalid_window()
@@ -3152,10 +3161,10 @@ fn invalid_objects_indicator_and_recompile() {
         .collect();
     assert!(left.contains(&"INV_BAD".to_owned()), "{left:?}");
     assert!(!left.contains(&"INV_P".to_owned()), "{left:?}");
-    // The status bar follows.
+    // The status bar follows (ours went from at least 4 to 1).
     wait_until(&mut h, "count refreshed", |app| {
         app.test_invalid_total("pythia@FREEPDB1")
-            .is_some_and(|n| n as usize == left.len())
+            .is_some_and(|n| n < total)
     });
     for sql in drops {
         conn.execute(sql, &[]).unwrap();
