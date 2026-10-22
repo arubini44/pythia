@@ -54,6 +54,9 @@ All notable changes to Pythia are documented here. The format follows
   says which package it is and how to get the contents.
 
 ### Changed
+- Table editor: renaming a column of an existing table renames it
+  (`ALTER TABLE … RENAME COLUMN`), so it keeps its data, keys and indexes,
+  instead of adding a new column next to the old one (#38).
 - The table editor applies its script in its window (like the other
   forms) and says which statement failed; Open in SQL window is still
   there. It can add foreign keys, and its Null column is now Not null.

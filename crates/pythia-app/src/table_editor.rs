@@ -55,6 +55,9 @@ struct State {
     original: Option<TableDef>,
     /// The form, names as typed (`EMP`, `"Mixed"`).
     edited: Option<TableDef>,
+    /// By column of the form: its name as loaded (none for a new column),
+    /// to tell a renamed column from a new one.
+    origins: Vec<Option<String>>,
     error: Option<String>,
     tab: TableTab,
     allow_drops: bool,
@@ -331,6 +334,7 @@ impl TableEditor {
         match (self.creating, loaded.table) {
             (false, Some(table)) => {
                 self.state.edited = Some(to_typed(&table));
+                self.state.origins = table.columns.iter().map(|c| Some(c.name.clone())).collect();
                 self.state.original = Some(table);
                 self.state.partitions = loaded.partitions;
             }
@@ -380,7 +384,32 @@ impl TableEditor {
         let Some(original) = &self.state.original else {
             return Ok(Default::default());
         };
-        let mut d = diff(&def, original, self.state.allow_drops);
+        // Renamed columns: renamed first, then compared under the new name.
+        let renames = renames(&def, &self.state.origins)?;
+        let mut base = original.clone();
+        apply_renames(&mut base, &renames);
+        let mut def = def;
+        for (from, to) in &renames {
+            rename_in_indexes(&mut def, from, to);
+        }
+        let t = table::ident(&original.name);
+        let mut d = diff(&def, &base, self.state.allow_drops);
+        let mut statements: Vec<SyncStatement> = renames
+            .iter()
+            .map(|(from, to)| {
+                SyncStatement::new(
+                    pythia_compare::script::Phase::Tables,
+                    original.name.clone(),
+                    format!(
+                        "alter table {t} rename column {} to {}",
+                        table::ident(from),
+                        table::ident(to)
+                    ),
+                )
+            })
+            .collect();
+        statements.append(&mut d.statements);
+        d.statements = statements;
         if let Some(existing) = &self.state.partitions {
             d.statements.extend(table_partitions::statements(
                 &original.name,
@@ -508,6 +537,12 @@ impl TableEditor {
                         .clicked()
                     {
                         self.state.edited = self.state.original.as_ref().map(to_typed);
+                        self.state.origins = self
+                            .state
+                            .original
+                            .iter()
+                            .flat_map(|o| o.columns.iter().map(|c| Some(c.name.clone())))
+                            .collect();
                         if let Some(p) = &mut self.state.partitions {
                             p.added.clear();
                             p.actions.clear();
@@ -548,11 +583,12 @@ impl TableEditor {
         });
         ui.separator();
         let creating = self.creating;
-        let original = self.state.original.as_ref();
         let lists = &mut self.state.lists;
         let table = self.state.edited.as_mut().expect("loaded");
         match self.state.tab {
-            TableTab::Columns => columns_ui(ui, table, original, creating, lists.release),
+            TableTab::Columns => {
+                columns_ui(ui, table, &mut self.state.origins, creating, lists.release)
+            }
             TableTab::Keys => keys_ui(ui, table, &mut self.state.new_constraint, lists),
             TableTab::Indexes => indexes_ui(ui, table, &mut self.state.new_index),
             TableTab::Partitions => {
@@ -1109,13 +1145,75 @@ fn set_primary(table: &mut TableDef, column: &str, on: bool) {
     }
 }
 
+/// Columns of the form whose name changed since loading: (from, to), as
+/// in the dictionary.
+fn renames(def: &TableDef, origins: &[Option<String>]) -> Result<Vec<(String, String)>, String> {
+    let renames: Vec<(String, String)> = def
+        .columns
+        .iter()
+        .zip(origins)
+        .filter_map(|(c, origin)| {
+            let origin = origin.as_ref()?;
+            (c.name != *origin).then(|| (origin.clone(), c.name.clone()))
+        })
+        .collect();
+    // One at a time: a name another column still has would clash.
+    for (from, to) in &renames {
+        if origins.iter().flatten().any(|o| o == to && o != from) {
+            return Err(format!(
+                "{to} is still another column's name: rename that one first, or go through another name"
+            ));
+        }
+    }
+    Ok(renames)
+}
+
+/// The table as loaded with columns renamed, keys and indexes along.
+fn apply_renames(table: &mut TableDef, renames: &[(String, String)]) {
+    for (from, to) in renames {
+        let rename = |name: &mut String| {
+            if name == from {
+                *name = to.clone();
+            }
+        };
+        for c in &mut table.columns {
+            rename(&mut c.name);
+        }
+        for c in &mut table.constraints {
+            c.columns.iter_mut().for_each(rename);
+            if let Some((t, cols)) = &mut c.references
+                && *t == table.name
+            {
+                cols.iter_mut().for_each(rename);
+            }
+        }
+        rename_in_indexes(table, from, to);
+    }
+}
+
 /// A column was renamed: its keys follow.
 fn rename_column(table: &mut TableDef, from: &str, to: &str) {
-    let from = ident(from);
+    let (from_name, to_name) = (ident(from), ident(to));
     for c in &mut table.constraints {
         for n in &mut c.columns {
-            if ident(n) == from {
+            if ident(n) == from_name {
                 *n = to.to_owned();
+            }
+        }
+    }
+    rename_in_indexes(table, &from_name, &to_name);
+}
+
+/// Index columns are expressions: a plain name, or `"NAME"` (maybe with
+/// ` desc`) as loaded.
+fn rename_in_indexes(table: &mut TableDef, from: &str, to: &str) {
+    let quoted = format!("\"{from}\"");
+    for i in &mut table.indexes {
+        for e in &mut i.columns {
+            if let Some(rest) = e.strip_prefix(&quoted) {
+                *e = format!("\"{to}\"{rest}");
+            } else if ident(e) == from {
+                *e = to.to_owned();
             }
         }
     }
@@ -1124,10 +1222,12 @@ fn rename_column(table: &mut TableDef, from: &str, to: &str) {
 fn columns_ui(
     ui: &mut Ui,
     table: &mut TableDef,
-    original: Option<&TableDef>,
+    origins: &mut Vec<Option<String>>,
     creating: bool,
     release: pythia_db::compat::Release,
 ) {
+    // Columns added in other ways (tests) are new ones.
+    origins.resize(table.columns.len(), None);
     ui.horizontal(|ui| {
         ui.label("Table comment");
         let mut comment = table.comment.clone().unwrap_or_default();
@@ -1141,9 +1241,6 @@ fn columns_ui(
     ui.add_space(6.0);
     let types = data_types(release);
     let identities = release >= (12, 1);
-    let existing: HashSet<String> = original
-        .map(|o| o.columns.iter().map(|c| c.name.clone()).collect())
-        .unwrap_or_default();
     let pk: Vec<String> = primary_key(table)
         .map(|k| k.columns.iter().map(|n| ident(n)).collect())
         .unwrap_or_default();
@@ -1222,7 +1319,7 @@ fn columns_ui(
                                 col.nullable = false;
                             }
                         }
-                        let new_column = creating || !existing.contains(&ident(&col.name));
+                        let new_column = creating || origins.get(i).is_none_or(Option::is_none);
                         if identities {
                             let response = ui
                                 .add_enabled(new_column, egui::Checkbox::without_text(&mut col.identity))
@@ -1282,12 +1379,15 @@ fn columns_ui(
     }
     if let Some((a, b)) = swap {
         table.columns.swap(a, b);
+        origins.swap(a, b);
     }
     if let Some(i) = remove {
         let column = table.columns.remove(i);
+        origins.remove(i);
         set_primary(table, &column.name, false);
     }
     if pythia_ui::icons::icon_text_button(ui, Icon::Plus, "Add column").clicked() {
+        origins.push(None);
         table.columns.push(ColumnDef {
             name: format!("NEW_COLUMN_{}", table.columns.len() + 1),
             data_type: "VARCHAR2(100 CHAR)".into(),
@@ -1296,9 +1396,6 @@ fn columns_ui(
             comment: None,
             identity: false,
         });
-    }
-    if !creating {
-        ui.label(RichText::new("Renaming a column is generated as drop + add; use ALTER TABLE … RENAME COLUMN for data-preserving renames.").small().weak());
     }
 }
 
@@ -1677,6 +1774,66 @@ mod tests {
     }
 
     #[test]
+    fn renames_columns() {
+        let original = TableDef {
+            name: "EMP".into(),
+            columns: vec![
+                ColumnDef {
+                    nullable: false,
+                    ..column("ID", "NUMBER(10)")
+                },
+                ColumnDef {
+                    comment: Some("Shown".into()),
+                    ..column("NAME", "VARCHAR2(30 CHAR)")
+                },
+            ],
+            comment: None,
+            constraints: vec![ConstraintDef {
+                name: "EMP_PK".into(),
+                kind: ConstraintKind::Primary,
+                columns: vec!["ID".into()],
+                references: None,
+                on_delete: None,
+                condition: None,
+                generated: false,
+            }],
+            indexes: vec![IndexDef {
+                name: "EMP_NAME_IX".into(),
+                unique: false,
+                columns: vec!["\"NAME\" desc".into()],
+                generated: false,
+            }],
+        };
+        let mut editor = TableEditor::new(ObjectRef {
+            owner: "HR".into(),
+            name: "EMP".into(),
+            object_type: ObjectType::Table,
+        });
+        loaded(&mut editor, Some(original));
+        // Renamed as in the grid (keys follow), one also changed.
+        editor.edit_for_test(|t| {
+            t.columns[0].name = "emp_id".into();
+            rename_column(t, "ID", "emp_id");
+            t.columns[1].name = "full_name".into();
+            t.columns[1].data_type = "VARCHAR2(60 CHAR)".into();
+        });
+        assert_eq!(
+            editor.statements_for_test().unwrap(),
+            [
+                "alter table emp rename column id to emp_id",
+                "alter table emp rename column name to full_name",
+                "alter table emp modify (full_name VARCHAR2(60 CHAR))",
+            ]
+        );
+        // Swapping two names directly would clash on the way.
+        editor.edit_for_test(|t| {
+            t.columns[0].name = "name".into();
+            t.columns[1].name = "id".into();
+        });
+        assert!(editor.statements_for_test().is_err());
+    }
+
+    #[test]
     fn builds_new_tables() {
         let mut editor = TableEditor::create("HR".into(), None);
         assert_eq!(editor.title(), "New table");
@@ -1943,6 +2100,51 @@ mod tests {
         });
         let sql = again.statements_for_test().unwrap();
         assert_eq!(sql.len(), 2, "{sql:?}");
+        run(&conn, &owner, &sql).unwrap_or_else(|e| panic!("{}: {}", e.statement, e.error));
+        let emp = load_table("PYTHIA_TB_EMP");
+        let mut reloaded = TableEditor::new(object.clone());
+        reloaded.loaded(lists(Some(emp.clone())));
+        assert_eq!(reloaded.statements_for_test(), Ok(Vec::new()));
+
+        // Renaming keeps the data, the unique key and the index.
+        // Before 12.1 the id isn't an identity column.
+        let insert = if release >= (12, 1) {
+            "insert into pythia_tb_emp (dept_id, hired, badge) values (null, sysdate, 'B-1')"
+        } else {
+            "insert into pythia_tb_emp (id, dept_id, hired, badge) values (1, null, sysdate, 'B-1')"
+        };
+        conn.execute(insert, &[]).unwrap();
+        conn.commit().unwrap();
+        reloaded.edit_for_test(|t| {
+            let i = t.columns.iter().position(|c| c.name == "BADGE").unwrap();
+            t.columns[i].name = "badge_no".into();
+            rename_column(t, "BADGE", "badge_no");
+        });
+        let sql = reloaded.statements_for_test().unwrap();
+        assert_eq!(
+            sql,
+            ["alter table pythia_tb_emp rename column badge to badge_no"]
+        );
+        run(&conn, &owner, &sql).unwrap_or_else(|e| panic!("{}: {}", e.statement, e.error));
+        let badge: String = conn
+            .query_row_as("select badge_no from pythia_tb_emp", &[])
+            .unwrap();
+        assert_eq!(badge, "B-1");
+        let emp = load_table("PYTHIA_TB_EMP");
+        let mut reloaded = TableEditor::new(object.clone());
+        reloaded.loaded(lists(Some(emp.clone())));
+        assert_eq!(reloaded.statements_for_test(), Ok(Vec::new()));
+        // A column with a foreign key and an index: both follow.
+        reloaded.edit_for_test(|t| {
+            let i = t.columns.iter().position(|c| c.name == "DEPT_ID").unwrap();
+            t.columns[i].name = "department_id".into();
+            rename_column(t, "DEPT_ID", "department_id");
+        });
+        let sql = reloaded.statements_for_test().unwrap();
+        assert_eq!(
+            sql,
+            ["alter table pythia_tb_emp rename column dept_id to department_id"]
+        );
         run(&conn, &owner, &sql).unwrap_or_else(|e| panic!("{}: {}", e.statement, e.error));
         let emp = load_table("PYTHIA_TB_EMP");
         let mut reloaded = TableEditor::new(object.clone());
