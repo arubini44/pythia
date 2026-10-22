@@ -18,6 +18,7 @@ mod desktop;
 mod dialogs;
 mod documents;
 mod editor;
+mod editor_menu;
 mod export_tables;
 mod git;
 mod history;

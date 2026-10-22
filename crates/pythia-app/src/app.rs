@@ -89,6 +89,8 @@ pub struct PythiaApp {
     debug: pythia_debugger::ui::DebugSession,
     /// The running debug call: (document, task request id).
     debug_run: Option<(DocId, u64)>,
+    /// Commands asked for by documents, run with the next frame's commands.
+    queued_commands: Vec<Command>,
     /// Dictionary caches for code assistance, by connection.
     catalogs: HashMap<String, pythia_lsp_core::CatalogCache>,
     catalog_revision: u64,
@@ -160,6 +162,7 @@ impl PythiaApp {
             save_report: None,
             debug: Default::default(),
             debug_run: None,
+            queued_commands: Vec::new(),
             catalogs: HashMap::new(),
             catalog_revision: 0,
             catalog_inflight: HashMap::new(),
@@ -397,6 +400,7 @@ impl PythiaApp {
             catalog_revision: self.catalog_revision,
             connections: &[],
             debug: Some(&self.debug),
+            marks: None,
         }
     }
 
@@ -452,6 +456,20 @@ impl PythiaApp {
                         Some(connection),
                         DocKind::Program(ProgramWindow::new(object)),
                     );
+                }
+            }
+            OpenRequest::ProgramMember {
+                connection,
+                object,
+                member,
+            } => {
+                self.open(OpenRequest::Program { connection, object });
+                if let Some(DocKind::Program(w)) = self
+                    .focused
+                    .and_then(|id| self.docs.get_mut(&id))
+                    .map(|d| &mut d.kind)
+                {
+                    w.goto_member(&member);
                 }
             }
             OpenRequest::Object { connection, object } => {
@@ -717,12 +735,30 @@ impl PythiaApp {
         for (unit, line) in effects.breakpoints {
             self.debug.toggle_breakpoint(unit, line);
         }
+        for (connection, action) in effects.object_actions {
+            self.object_action(connection, action);
+        }
+        self.queued_commands.extend(effects.commands);
         if let (Some(block), Some(id)) = (effects.debug, doc) {
             self.start_debug(id, block);
         }
         for request in effects.open {
             self.open(request);
         }
+    }
+
+    /// Carries out an object action chosen in an editor with the object
+    /// browser, attached to the editor's connection if it shows another.
+    fn object_action(&mut self, connection: String, action: crate::browser::ObjectAction) {
+        if self.browser.connection.as_deref() != Some(connection.as_str()) {
+            self.open(OpenRequest::Browse { connection });
+        }
+        if matches!(action, crate::browser::ObjectAction::Reveal(_)) {
+            self.open_tab(Tab::Browser);
+        }
+        let ctx = self.notify.0.clone();
+        let effects = self.browser.perform(action, &ctx);
+        self.apply_browser(effects);
     }
 
     /// Starts a debug run of `block` on the document's session.
@@ -960,6 +996,7 @@ impl PythiaApp {
             catalog_revision: self.catalog_revision,
             connections: &[],
             debug: Some(&self.debug),
+            marks: None,
         };
         let effects = doc.on_event(event, &cx);
         self.apply(Some(id), effects);
@@ -1386,6 +1423,7 @@ impl PythiaApp {
             catalog_revision: self.catalog_revision,
             connections: &[],
             debug: Some(&self.debug),
+            marks: None,
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
@@ -2544,6 +2582,7 @@ impl eframe::App for PythiaApp {
         self.project_actions(project_actions);
 
         self.popups(&ctx, &mut commands);
+        commands.append(&mut self.queued_commands);
         for command in commands {
             self.run_command(&ctx, command);
         }
@@ -2681,6 +2720,7 @@ impl PythiaApp {
             catalog_revision: 0,
             connections: &[],
             debug: None,
+            marks: None,
         };
         let Some(DocKind::DataSearch(s)) = self.docs.get_mut(&id).map(|d| &mut d.kind) else {
             panic!("not a data search");
@@ -2745,6 +2785,18 @@ impl PythiaApp {
 
     pub fn test_debug_mut(&mut self) -> &mut pythia_debugger::ui::DebugSession {
         &mut self.debug
+    }
+
+    /// The focused program window's active editor, if one is focused.
+    pub fn test_program_editor(&mut self) -> Option<&mut crate::editor::Editor> {
+        match self.docs.get_mut(&self.focused?).map(|d| &mut d.kind) {
+            Some(DocKind::Program(w)) => w.active_editor(),
+            _ => None,
+        }
+    }
+
+    pub fn test_browser_selected(&self) -> Option<ObjectRef> {
+        self.browser.selected().cloned()
     }
 
     pub fn test_transaction_state(&self) -> Result<(), &'static str> {
@@ -2988,6 +3040,7 @@ impl TabViewer for Viewer<'_> {
                     catalog_revision: self.catalog_revision,
                     connections: self.connections,
                     debug: Some(&*self.debug),
+                    marks: Some(&self.browser.marks),
                 };
                 let effects = doc.ui(ui, &cx);
                 self.effects.push((*id, effects));

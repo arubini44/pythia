@@ -114,6 +114,9 @@ pub struct EditorOutput {
     pub goto_request: Option<usize>,
     /// Shift+F12 on the word at this byte offset.
     pub references_request: Option<usize>,
+    /// Right-click at this byte offset: the context menu opens on
+    /// `response`, for what's there.
+    pub context_request: Option<usize>,
 }
 
 /// Requests collected during a frame.
@@ -124,6 +127,7 @@ struct Requests {
     hover: Option<usize>,
     goto: Option<usize>,
     references: Option<usize>,
+    context: Option<usize>,
 }
 
 /// An automatic completion request waiting for the typing pause.
@@ -190,6 +194,8 @@ pub struct CodeEditor {
     regions_cache: Option<(u64, Vec<fold::Region>)>,
     /// Screen rects of the "⋯" pills of folded lines (from the last frame).
     fold_pills: Vec<(egui::Rect, usize)>,
+    /// Geometry of the last frame, for [`CodeEditor::offset_pos`].
+    last_layout: Option<view::Layout>,
     /// Time Ctrl+K was pressed, waiting for the second key of a chord.
     chord: Option<f64>,
     snippets: Vec<Snippet>,
@@ -224,6 +230,7 @@ impl CodeEditor {
             hover_probe: None,
             references: None,
             link: None,
+            last_layout: None,
             hover_delay: 0.4,
             requests: Requests::default(),
             regions_cache: None,
@@ -366,6 +373,15 @@ impl CodeEditor {
         self.state
             .replace_byte_ranges(vec![(range, text.to_owned())], f64::MAX);
         self.state.history.seal();
+    }
+
+    pub fn select_all(&mut self) {
+        self.state.select_all();
+    }
+
+    /// Comments or uncomments the selected lines (`time` groups undo).
+    pub fn toggle_comment(&mut self, time: f64) {
+        self.state.toggle_comment(time);
     }
 
     pub fn request_focus(&mut self) {

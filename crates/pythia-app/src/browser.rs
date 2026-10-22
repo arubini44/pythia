@@ -73,7 +73,7 @@ impl Marks {
         }
     }
 
-    fn is_favorite(&self, connection: &str, object: &ObjectRef) -> bool {
+    pub fn is_favorite(&self, connection: &str, object: &ObjectRef) -> bool {
         self.favorites
             .get(connection)
             .is_some_and(|l| l.contains(object))
@@ -195,6 +195,8 @@ pub struct Browser {
     expanded: HashSet<Node>,
     pending: HashMap<u64, Pending>,
     selected: Option<ObjectRef>,
+    /// Scroll to this object once its row exists.
+    reveal: Option<ObjectRef>,
     confirm_drop: Option<ObjectRef>,
 }
 
@@ -220,6 +222,67 @@ impl Browser {
     #[cfg_attr(not(test), expect(dead_code, reason = "used by screenshot tests"))]
     pub fn is_loading(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Shows another schema, keeping the same folders open.
+    fn set_schema(&mut self, schema: String, effects: &mut Effects) {
+        if self.schema.as_ref() == Some(&schema) {
+            return;
+        }
+        self.schema = Some(schema);
+        self.expanded.retain(|n| matches!(n, Node::Folder(..)));
+        let folders: Vec<ObjectType> = self
+            .expanded
+            .drain()
+            .filter_map(|n| {
+                if let Node::Folder(_, t) = n {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let owner = self.schema.clone().unwrap_or_default();
+        for t in folders {
+            self.expanded.insert(Node::Folder(owner.clone(), t));
+        }
+        self.refresh(effects);
+    }
+
+    /// Shows an object in the tree: in its schema, with its folder open,
+    /// selected, and scrolled to once the folder has loaded. Bodies show as
+    /// their package or type.
+    fn reveal(&mut self, object: ObjectRef, effects: &mut Effects) {
+        let object_type = match object.object_type {
+            ObjectType::PackageBody => ObjectType::Package,
+            ObjectType::TypeBody => ObjectType::Type,
+            t => t,
+        };
+        if !ObjectType::BROWSER.contains(&object_type) {
+            effects.log.push(format!(
+                "{} objects aren't listed in the object browser",
+                object_type.dictionary_name().to_lowercase()
+            ));
+            return;
+        }
+        let object = ObjectRef {
+            object_type,
+            ..object
+        };
+        self.set_schema(object.owner.clone(), effects);
+        if !object.name.contains(&self.filter.trim().to_uppercase()) {
+            self.filter.clear();
+        }
+        let node = Node::Folder(object.owner.clone(), object_type);
+        if self.expanded.insert(node)
+            && !self
+                .folders
+                .contains_key(&(object.owner.clone(), object_type))
+        {
+            self.load_folder(effects, &object.owner, object_type);
+        }
+        self.selected = Some(object.clone());
+        self.reveal = Some(object);
     }
 
     /// Expands the given folders of the current schema.
@@ -550,27 +613,8 @@ impl Browser {
                         ui.spinner();
                     }
                 });
-            if let Some(s) = chosen
-                && Some(&s) != self.schema.as_ref()
-            {
-                self.schema = Some(s);
-                self.expanded.retain(|n| matches!(n, Node::Folder(..)));
-                let folders: Vec<ObjectType> = self
-                    .expanded
-                    .drain()
-                    .filter_map(|n| {
-                        if let Node::Folder(_, t) = n {
-                            Some(t)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                let owner = self.schema.clone().unwrap_or_default();
-                for t in folders {
-                    self.expanded.insert(Node::Folder(owner.clone(), t));
-                }
-                self.refresh(&mut effects);
+            if let Some(s) = chosen {
+                self.set_schema(s, &mut effects);
             }
             if pythia_ui::icons::icon_button(ui, Icon::Refresh, "Refresh").clicked() {
                 self.refresh(&mut effects);
@@ -639,17 +683,41 @@ impl Browser {
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         let mut toggles = Vec::new();
         let mut actions = Vec::new();
-        egui::ScrollArea::both().auto_shrink(false).show_rows(
-            ui,
-            row_height,
-            rows.len(),
-            |ui, range| {
-                for row in &rows[range] {
-                    self.row_ui(ui, row, row_height, &mut toggles, &mut actions);
-                }
-            },
-        );
+        let revealed = self.reveal.as_ref().and_then(|target| {
+            rows.iter().position(
+                |r| matches!(r, Row::Object { object, .. } if object_ref(object) == *target),
+            )
+        });
+        let mut scroll = egui::ScrollArea::both().auto_shrink(false);
+        if let Some(row) = revealed {
+            let above = (ui.available_height() / row_height / 3.0).floor();
+            scroll = scroll.vertical_scroll_offset((row as f32 - above).max(0.0) * row_height);
+        }
+        scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
+            for row in &rows[range] {
+                self.row_ui(ui, row, row_height, &mut toggles, &mut actions);
+            }
+        });
         drop(rows);
+        if revealed.is_some() {
+            self.reveal = None;
+        } else if let Some(target) = self.reveal.clone()
+            && let Some(Loaded::Ready(objects)) = self
+                .folders
+                .get(&(target.owner.clone(), target.object_type))
+        {
+            // Loaded: either filtered out (show it anyway) or not there.
+            if objects.iter().any(|o| object_ref(o) == target) {
+                self.filter.clear();
+                self.invalid_only = false;
+                self.changed = Changed::Any;
+            } else {
+                self.reveal = None;
+                effects
+                    .log
+                    .push(format!("{} not found", target.qualified()));
+            }
+        }
 
         for node in toggles {
             if !self.expanded.remove(&node) {
@@ -825,7 +893,7 @@ impl Browser {
         row: &Row,
         height: f32,
         toggles: &mut Vec<Node>,
-        actions: &mut Vec<Action>,
+        actions: &mut Vec<ObjectAction>,
     ) {
         const INDENT: f32 = 18.0;
         let small = IconSize::Small;
@@ -879,7 +947,7 @@ impl Browser {
                         label.context_menu(|ui| {
                             let kind = object_type.dictionary_name().to_lowercase();
                             if ui.button(format!("New {kind}…")).clicked() {
-                                actions.push(Action::New((*owner).to_owned(), *object_type));
+                                actions.push(ObjectAction::New((*owner).to_owned(), *object_type));
                                 ui.close();
                             }
                         });
@@ -922,10 +990,10 @@ impl Browser {
                         ui.weak(format!("Last DDL: {}", object.last_ddl));
                     });
                     if response.clicked() {
-                        actions.push(Action::Select(r.clone()));
+                        actions.push(ObjectAction::Select(r.clone()));
                     }
                     if response.double_clicked() {
-                        actions.push(Action::Default(r.clone()));
+                        actions.push(ObjectAction::Default(r.clone()));
                     }
                     response.context_menu(|ui| self.context_menu(ui, &r, actions));
                 }
@@ -1005,11 +1073,11 @@ impl Browser {
                         object_type: ObjectType::Trigger,
                     };
                     if part.kind == PartKind::Trigger && label.double_clicked() {
-                        actions.push(Action::Edit(trigger.clone()));
+                        actions.push(ObjectAction::Edit(trigger.clone()));
                     }
                     label.context_menu(|ui| {
                         if part.kind == PartKind::Trigger && ui.button("Edit trigger").clicked() {
-                            actions.push(Action::Edit(trigger.clone()));
+                            actions.push(ObjectAction::Edit(trigger.clone()));
                             ui.close();
                         }
                         if ui.button("Copy name").clicked() {
@@ -1033,7 +1101,7 @@ impl Browser {
                     ui.weak(&m.signature);
                     label.context_menu(|ui| {
                         if ui.button("Test…").clicked() {
-                            actions.push(Action::Test(package.clone(), Some(m.name.clone())));
+                            actions.push(ObjectAction::Test(package.clone(), Some(m.name.clone())));
                             ui.close();
                         }
                         if ui.button("Edit package body").clicked() {
@@ -1041,7 +1109,7 @@ impl Browser {
                                 object_type: ObjectType::PackageBody,
                                 ..package.clone()
                             };
-                            actions.push(Action::Edit(body));
+                            actions.push(ObjectAction::Edit(body));
                             ui.close();
                         }
                     });
@@ -1095,10 +1163,10 @@ impl Browser {
                         object.qualified()
                     ));
                     if response.clicked() {
-                        actions.push(Action::Select((*object).clone()));
+                        actions.push(ObjectAction::Select((*object).clone()));
                     }
                     if response.double_clicked() {
-                        actions.push(Action::Default((*object).clone()));
+                        actions.push(ObjectAction::Default((*object).clone()));
                     }
                     response.context_menu(|ui| self.context_menu(ui, object, actions));
                 }
@@ -1132,101 +1200,59 @@ impl Browser {
         response
     }
 
-    fn context_menu(&self, ui: &mut Ui, object: &ObjectRef, actions: &mut Vec<Action>) {
-        let t = object.object_type;
-        let mut item = |ui: &mut Ui, label: &str, action: Action| {
-            if ui.button(label).clicked() {
-                actions.push(action);
-                ui.close();
-            }
-        };
-        if t.has_data() {
-            item(ui, "Query data", Action::Query(object.clone()));
-        }
-        if t.has_source() {
-            item(ui, "Edit", Action::Edit(object.clone()));
-        }
-        if matches!(t, ObjectType::Procedure | ObjectType::Function) {
-            item(ui, "Test…", Action::Test(object.clone(), None));
-        }
-        item(ui, "Describe", Action::Describe(object.clone()));
-        if t == ObjectType::Table {
-            item(ui, "Edit table…", Action::EditTable(object.clone()));
-        }
-        if has_editor(t) {
-            item(ui, "Edit…", Action::EditObject(object.clone()));
-        }
-        if has_grants(t) {
-            item(ui, "Grants…", Action::Grants(object.clone()));
-        }
-        let mut generate = None;
-        if t.has_data() {
-            ui.menu_button("Generate", |ui| {
-                for kind in [
-                    Template::Select,
-                    Template::Insert,
-                    Template::Update,
-                    Template::ColumnList,
-                ] {
-                    if ui.button(kind.label()).clicked() {
-                        generate = Some(Action::Generate(object.clone(), kind));
-                        ui.close();
-                    }
-                }
-            });
-        }
-        ui.separator();
-        if t.has_source() || matches!(t, ObjectType::View | ObjectType::MaterializedView) {
-            item(ui, "Compile", Action::Compile(object.clone()));
-        }
+    fn context_menu(&self, ui: &mut Ui, object: &ObjectRef, actions: &mut Vec<ObjectAction>) {
         let connection = self.connection.as_deref().unwrap_or_default();
-        let favorite = if self.marks.is_favorite(connection, object) {
-            "Remove from favorites"
-        } else {
-            "Add to favorites"
+        let options = MenuOptions {
+            favorite: self.marks.is_favorite(connection, object),
+            drop: true,
+            reveal: false,
+            member: None,
         };
-        item(ui, favorite, Action::ToggleFavorite(object.clone()));
-        item(ui, "Copy name", Action::CopyName(object.clone()));
-        item(
-            ui,
-            "Copy qualified name",
-            Action::CopyQualified(object.clone()),
-        );
-        ui.separator();
-        item(ui, "Drop…", Action::Drop(object.clone()));
-        actions.extend(generate);
+        actions.extend(object_menu(ui, object, &options));
+    }
+
+    /// Carries out an action chosen outside the browser, e.g. in an editor's
+    /// context menu, on the attached connection.
+    pub fn perform(&mut self, action: ObjectAction, ctx: &egui::Context) -> Effects {
+        let mut effects = Effects::default();
+        if let Some(connection) = self.connection.clone() {
+            self.action(action, &connection, ctx, &mut effects);
+        }
+        effects
     }
 
     fn action(
         &mut self,
-        action: Action,
+        action: ObjectAction,
         connection: &str,
         ctx: &egui::Context,
         effects: &mut Effects,
     ) {
         let connection = connection.to_owned();
         match action {
-            Action::Select(o) => self.selected = Some(o),
-            Action::Default(o) if o.object_type.has_source() => {
+            ObjectAction::Select(o) => self.selected = Some(o),
+            ObjectAction::Default(o) if o.object_type.has_source() => {
                 effects.open.push(OpenRequest::Program {
                     connection,
                     object: o,
                 });
             }
-            Action::Default(o) | Action::Describe(o) => effects.open.push(OpenRequest::Object {
-                connection,
-                object: o,
-            }),
-            Action::Query(o) => effects.open.push(OpenRequest::Sql {
+            ObjectAction::Default(o) | ObjectAction::Describe(o) => {
+                effects.open.push(OpenRequest::Object {
+                    connection,
+                    object: o,
+                })
+            }
+            ObjectAction::Query(o) => effects.open.push(OpenRequest::Sql {
                 connection,
                 text: format!("select * from {}", o.qualified()),
                 run: true,
             }),
-            Action::Edit(o) => effects.open.push(OpenRequest::Program {
+            ObjectAction::Edit(o) => effects.open.push(OpenRequest::Program {
                 connection,
                 object: o,
             }),
-            Action::Compile(o) => {
+            ObjectAction::Compile(o) => {
                 let sql = match o.object_type {
                     ObjectType::PackageBody => {
                         format!("alter package {} compile body", o.qualified())
@@ -1243,32 +1269,32 @@ impl Browser {
                 };
                 self.run(effects, &o, "compiled", sql);
             }
-            Action::CopyName(o) => ctx.copy_text(o.name.clone()),
-            Action::CopyQualified(o) => ctx.copy_text(o.qualified()),
-            Action::Drop(o) => self.confirm_drop = Some(o),
-            Action::ToggleFavorite(o) => {
+            ObjectAction::CopyName(o) => ctx.copy_text(o.name.clone()),
+            ObjectAction::CopyQualified(o) => ctx.copy_text(o.qualified()),
+            ObjectAction::Drop(o) => self.confirm_drop = Some(o),
+            ObjectAction::ToggleFavorite(o) => {
                 let opening = !self.marks.is_favorite(&connection, &o);
                 self.marks.toggle_favorite(&connection, o);
                 if opening {
                     self.expanded.insert(Node::Section(Section::Favorites));
                 }
             }
-            Action::EditTable(object) => effects
+            ObjectAction::EditTable(object) => effects
                 .open
                 .push(OpenRequest::EditTable { connection, object }),
-            Action::New(owner, object_type) => effects.open.push(OpenRequest::EditObject {
+            ObjectAction::New(owner, object_type) => effects.open.push(OpenRequest::EditObject {
                 connection,
                 target: EditTarget::New { owner, object_type },
             }),
-            Action::EditObject(object) => effects.open.push(OpenRequest::EditObject {
+            ObjectAction::EditObject(object) => effects.open.push(OpenRequest::EditObject {
                 connection,
                 target: EditTarget::Edit(object),
             }),
-            Action::Grants(object) => effects.open.push(OpenRequest::EditObject {
+            ObjectAction::Grants(object) => effects.open.push(OpenRequest::EditObject {
                 connection,
                 target: EditTarget::Grants(object),
             }),
-            Action::Generate(object, kind) => {
+            ObjectAction::Generate(object, kind) => {
                 let id = request_id();
                 let query = MetaQuery::Columns {
                     owner: object.owner.clone(),
@@ -1277,7 +1303,13 @@ impl Browser {
                 self.pending.insert(id, Pending::Generate { object, kind });
                 effects.request(Target::Main, DbRequest::Meta { id, query });
             }
-            Action::Test(object, member) => {
+            ObjectAction::EditAt(object, member) => effects.open.push(OpenRequest::ProgramMember {
+                connection,
+                object,
+                member,
+            }),
+            ObjectAction::Reveal(object) => self.reveal(object, effects),
+            ObjectAction::Test(object, member) => {
                 let id = request_id();
                 let request = pythia_lsp_core::CatalogRequest::Members {
                     owner: object.owner.clone(),
@@ -1338,7 +1370,110 @@ impl Browser {
     }
 }
 
-enum Action {
+/// Entries of an object's context menu besides those for its type.
+pub struct MenuOptions {
+    /// The object is a favorite: the entry removes it.
+    pub favorite: bool,
+    /// Offer Drop… (left out in editors, where it's too easy to hit).
+    pub drop: bool,
+    /// Offer "Show in object browser".
+    pub reveal: bool,
+    /// A subprogram of the package, e.g. `PROC` in `pkg.proc`.
+    pub member: Option<String>,
+}
+
+/// The context menu of a database object, shared by the object browser and
+/// the editors. Returns the chosen action.
+pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Option<ObjectAction> {
+    let t = object.object_type;
+    let mut chosen = None;
+    let mut item = |ui: &mut Ui, label: &str, action: ObjectAction| {
+        if ui.button(label).clicked() {
+            chosen = Some(action);
+            ui.close();
+        }
+    };
+    if t.has_data() {
+        item(ui, "Query data", ObjectAction::Query(object.clone()));
+    }
+    if t.has_source() {
+        match &options.member {
+            Some(member) => item(
+                ui,
+                &format!("Edit {}", member.to_lowercase()),
+                ObjectAction::EditAt(object.clone(), member.clone()),
+            ),
+            None => item(ui, "Edit", ObjectAction::Edit(object.clone())),
+        }
+    }
+    let testable = matches!(t, ObjectType::Procedure | ObjectType::Function)
+        || (t == ObjectType::Package && options.member.is_some());
+    if testable {
+        item(
+            ui,
+            "Test…",
+            ObjectAction::Test(object.clone(), options.member.clone()),
+        );
+    }
+    item(ui, "Describe", ObjectAction::Describe(object.clone()));
+    if t == ObjectType::Table {
+        item(ui, "Edit table…", ObjectAction::EditTable(object.clone()));
+    }
+    if has_editor(t) {
+        item(ui, "Edit…", ObjectAction::EditObject(object.clone()));
+    }
+    if has_grants(t) {
+        item(ui, "Grants…", ObjectAction::Grants(object.clone()));
+    }
+    if t.has_data() {
+        ui.menu_button("Generate", |ui| {
+            for kind in [
+                Template::Select,
+                Template::Insert,
+                Template::Update,
+                Template::ColumnList,
+            ] {
+                item(
+                    ui,
+                    kind.label(),
+                    ObjectAction::Generate(object.clone(), kind),
+                );
+            }
+        });
+    }
+    ui.separator();
+    if t.has_source() || matches!(t, ObjectType::View | ObjectType::MaterializedView) {
+        item(ui, "Compile", ObjectAction::Compile(object.clone()));
+    }
+    let favorite = if options.favorite {
+        "Remove from favorites"
+    } else {
+        "Add to favorites"
+    };
+    item(ui, favorite, ObjectAction::ToggleFavorite(object.clone()));
+    if options.reveal {
+        item(
+            ui,
+            "Show in object browser",
+            ObjectAction::Reveal(object.clone()),
+        );
+    }
+    item(ui, "Copy name", ObjectAction::CopyName(object.clone()));
+    item(
+        ui,
+        "Copy qualified name",
+        ObjectAction::CopyQualified(object.clone()),
+    );
+    if options.drop {
+        ui.separator();
+        item(ui, "Drop…", ObjectAction::Drop(object.clone()));
+    }
+    chosen
+}
+
+/// What can be done with a database object, from the browser or an editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectAction {
     Select(ObjectRef),
     Default(ObjectRef),
     Query(ObjectRef),
@@ -1349,6 +1484,10 @@ enum Action {
     CopyQualified(ObjectRef),
     Drop(ObjectRef),
     Test(ObjectRef, Option<String>),
+    /// Open the package at this subprogram.
+    EditAt(ObjectRef, String),
+    /// Show the object in the browser's tree.
+    Reveal(ObjectRef),
     Generate(ObjectRef, Template),
     EditTable(ObjectRef),
     /// Form editor for a new object of this type in this schema.

@@ -1296,6 +1296,12 @@ impl SqlWindow {
                 self.editor.set_debug_lines(&[], line);
             }
             effects.extend(self.assist.handle(&mut self.editor, &out, cx));
+            effects.extend(crate::editor_menu::show(
+                &out.response,
+                &mut self.editor,
+                &mut self.assist,
+                cx,
+            ));
             self.assist.background(&mut self.editor, ui);
             self.state.line_col = self.editor.line_col();
         });

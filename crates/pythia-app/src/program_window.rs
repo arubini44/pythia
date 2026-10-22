@@ -47,6 +47,8 @@ struct State {
     message: Option<(bool, String)>,
     /// Line to show once the part's source has loaded: (part, line).
     pending_goto: Option<(usize, usize)>,
+    /// Subprogram to show once all parts have loaded.
+    pending_member: Option<String>,
     /// LAST_DDL_TIME of each part when loaded or last compiled here.
     ddl_times: HashMap<usize, Option<String>>,
     /// Requests reading LAST_DDL_TIME: id → (part, purpose).
@@ -103,6 +105,31 @@ impl ProgramWindow {
         } else {
             self.parts[i].editor.goto(line, 1);
         }
+    }
+
+    /// Shows a subprogram: its implementation in the body, else its
+    /// declaration in the spec (now, or once the source has loaded).
+    pub fn goto_member(&mut self, member: &str) {
+        self.state.pending_member = Some(member.to_owned());
+        if self.state.loading.is_empty() {
+            self.show_member();
+        }
+    }
+
+    fn show_member(&mut self) {
+        let Some(member) = self.state.pending_member.take() else {
+            return;
+        };
+        // Bodies come after specs; look there first.
+        for i in (0..self.parts.len()).rev() {
+            let part = &mut self.parts[i];
+            if let Some(span) = member_span(part.editor.text(), &member) {
+                self.active = i;
+                part.editor.select(span);
+                return;
+            }
+        }
+        self.state.message = Some((false, format!("{} not found", member.to_lowercase())));
     }
 
     pub fn active_editor(&mut self) -> Option<&mut Editor> {
@@ -335,6 +362,9 @@ impl ProgramWindow {
                         Err(_) if i > 0 => {}
                         Err(e) => self.state.message = Some((true, e.to_string())),
                         Ok(_) => {}
+                    }
+                    if self.state.loading.is_empty() {
+                        self.show_member();
                     }
                 }
             }
@@ -586,6 +616,12 @@ impl ProgramWindow {
                 out.hover_request = None;
             }
             effects.extend(part.assist.handle(&mut part.editor, &out, cx));
+            effects.extend(crate::editor_menu::show(
+                &out.response,
+                &mut part.editor,
+                &mut part.assist,
+                cx,
+            ));
             part.assist.background(&mut part.editor, ui);
             if let Some(line) = out.gutter_clicked {
                 effects.breakpoints.push((unit.clone(), line as u32));
@@ -613,6 +649,23 @@ impl Part {
     fn is_dirty(&self) -> bool {
         self.editor.text() != self.saved
     }
+}
+
+/// The name of the declaration `member` (a subprogram, variable, type, …)
+/// in `text`.
+fn member_span(text: &str, member: &str) -> Option<std::ops::Range<usize>> {
+    use pythia_lsp_core::{OutlineItem, OutlineKind};
+    fn find(items: &[OutlineItem], member: &str) -> Option<std::ops::Range<usize>> {
+        items.iter().find_map(|item| {
+            let declaration = !matches!(item.kind, OutlineKind::Statement | OutlineKind::Block);
+            if declaration && item.name.eq_ignore_ascii_case(member) {
+                Some(item.name_span.clone())
+            } else {
+                find(&item.children, member)
+            }
+        })
+    }
+    find(&pythia_lsp_core::outline(text), member)
 }
 
 /// The debugger's name for a program window part.

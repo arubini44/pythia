@@ -16,6 +16,12 @@ All notable changes to Pythia are documented here. The format follows
   auto-commit toggle and Format.
 
 ### Added
+- Editors: a context menu. On a database object it offers what the object
+  browser offers (query, edit, test, describe, edit table, grants, generate,
+  compile, favorites, copy name) and Show in object browser; on a local
+  name, go to declaration and find references; plus cut, copy, paste,
+  select all, toggle comment and format. On a package member (`pkg.proc`)
+  Edit and Ctrl+click open the package at that subprogram.
 - Debugger: step through the debugged block itself (it now has debug
   information), and stepping out of the outermost unit continues there; the
   SQL window marks the block's line.

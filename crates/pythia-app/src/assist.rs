@@ -27,6 +27,29 @@ pub struct Assist {
     pending: Option<Pending>,
     /// Catalog revision the pending request last ran against.
     catalog_revision: u64,
+    /// What the last right-click was on, for the context menu.
+    context: Option<Context>,
+}
+
+/// What a right-click in the editor was on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Context {
+    pub offset: usize,
+    pub target: ContextTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextTarget {
+    /// Waiting for dictionary data.
+    Looking,
+    /// A database object, possibly a member of it (`pkg.proc`).
+    Object {
+        object: ObjectRef,
+        member: Option<String>,
+    },
+    /// A declaration in this text.
+    Local(std::ops::Range<usize>),
+    Nothing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +59,8 @@ enum Pending {
     Signature(usize),
     Hover(usize),
     Goto(usize),
+    /// What's at this offset, for the context menu.
+    Context(usize),
 }
 
 impl Assist {
@@ -85,6 +110,18 @@ impl Assist {
         &self.outline
     }
 
+    /// What the last right-click was on.
+    pub fn context(&self) -> Option<&Context> {
+        self.context.as_ref()
+    }
+
+    /// Marks the references to the symbol at `offset`.
+    pub fn references(&mut self, editor: &mut Editor, offset: usize) {
+        self.analysis.update(editor.text());
+        let refs = self.analysis.references(offset);
+        editor.inner().highlight_references(refs);
+    }
+
     /// Handles the editor's requests of this frame; call after `Editor::ui`.
     pub fn handle(&mut self, editor: &mut Editor, out: &EditorOutput, cx: &DocContext) -> Effects {
         let mut effects = Effects::default();
@@ -95,6 +132,14 @@ impl Assist {
         };
 
         let mut work: Vec<Pending> = Vec::new();
+        // A context menu still looking up its name retries on its own: a
+        // hover over the same word must not take its place.
+        if cx.catalog_revision != self.catalog_revision
+            && let Some(context) = &self.context
+            && context.target == ContextTarget::Looking
+        {
+            work.push(Pending::Context(context.offset));
+        }
         if let Some(p) = self.pending
             && cx.catalog_revision != self.catalog_revision
         {
@@ -123,6 +168,13 @@ impl Assist {
         work.extend(out.signature_request.map(Pending::Signature));
         work.extend(out.hover_request.map(Pending::Hover));
         work.extend(out.goto_request.map(Pending::Goto));
+        if let Some(offset) = out.context_request {
+            self.context = Some(Context {
+                offset,
+                target: ContextTarget::Looking,
+            });
+            work.push(Pending::Context(offset));
+        }
         if work.is_empty() && out.references_request.is_none() {
             return effects;
         }
@@ -136,7 +188,9 @@ impl Assist {
         for request in work {
             let missing = self.run(request, editor, catalog, cx, &mut effects);
             if !missing.is_empty() {
-                self.pending = Some(request);
+                if !matches!(request, Pending::Context(_)) {
+                    self.pending = Some(request);
+                }
                 effects.catalog_requests.extend(missing);
             }
         }
@@ -144,7 +198,7 @@ impl Assist {
     }
 
     fn run(
-        &self,
+        &mut self,
         request: Pending,
         editor: &mut Editor,
         catalog: &dyn Catalog,
@@ -202,7 +256,7 @@ impl Assist {
                         owner,
                         name,
                         object_type,
-                        ..
+                        member,
                     }) => {
                         if let (Some(connection), Some(t)) = (
                             cx.connection.clone(),
@@ -213,14 +267,48 @@ impl Assist {
                                 name,
                                 object_type: t,
                             };
-                            effects.open.push(if t.has_source() {
-                                OpenRequest::Program { connection, object }
-                            } else {
-                                OpenRequest::Object { connection, object }
+                            effects.open.push(match member {
+                                // `pkg.proc`: the package at `proc`.
+                                Some(member) if t.has_source() => OpenRequest::ProgramMember {
+                                    connection,
+                                    object,
+                                    member,
+                                },
+                                _ if t.has_source() => OpenRequest::Program { connection, object },
+                                _ => OpenRequest::Object { connection, object },
                             });
                         }
                     }
                     None => {}
+                }
+                result.missing
+            }
+            Pending::Context(offset) => {
+                let result = self.analysis.definition(offset, catalog);
+                let target = match result.target {
+                    Some(Definition::Local(range)) => ContextTarget::Local(range),
+                    Some(Definition::Object {
+                        owner,
+                        name,
+                        object_type,
+                        member,
+                    }) => match ObjectType::from_dictionary(&object_type) {
+                        Some(t) => ContextTarget::Object {
+                            object: ObjectRef {
+                                owner,
+                                name,
+                                object_type: t,
+                            },
+                            // Columns are no subprograms to open at.
+                            member: member.filter(|_| t.has_source()),
+                        },
+                        None => ContextTarget::Nothing,
+                    },
+                    None if result.missing.is_empty() => ContextTarget::Nothing,
+                    None => ContextTarget::Looking,
+                };
+                if let Some(context) = self.context.as_mut().filter(|c| c.offset == offset) {
+                    context.target = target;
                 }
                 result.missing
             }

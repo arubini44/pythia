@@ -223,6 +223,18 @@ impl Editor {
         self.refresh();
     }
 
+    pub fn select_all(&mut self) {
+        self.inner.select_all();
+        self.inner.request_focus();
+    }
+
+    /// Comments or uncomments the selected lines.
+    pub fn toggle_comment(&mut self, time: f64) {
+        self.inner.toggle_comment(time);
+        self.refresh();
+        self.inner.request_focus();
+    }
+
     /// Labels in the open completion popup.
     #[cfg_attr(not(test), expect(dead_code, reason = "used by UI tests"))]
     pub fn completion_labels(&self) -> Vec<&str> {

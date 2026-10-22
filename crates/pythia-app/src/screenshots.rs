@@ -400,6 +400,7 @@ fn data_editing() {
             catalog_revision: 0,
             connections: &[],
             debug: None,
+            marks: None,
         };
         let effects = app.test_sql_window().start_editing(0, &cx);
         app.test_apply(effects);
@@ -450,6 +451,7 @@ fn data_editing() {
             catalog_revision: 0,
             connections: &[],
             debug: None,
+            marks: None,
         };
         let effects = app.test_sql_window().apply_changes(0, &cx);
         app.test_apply(effects);
@@ -1803,6 +1805,119 @@ fn drag_object_into_editor() {
             .map(|o| o.name.as_str()),
         Some("DEMO_DEPARTMENTS")
     );
+}
+
+/// Right-clicking a name in an editor offers what the object browser offers
+/// for it, without Drop; package members open at the subprogram.
+#[test]
+fn editor_context_menu() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let spec = std::env::var("PYTHIA_TEST_DB").unwrap();
+    let (cred, db) = spec.rsplit_once('@').unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let conn = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+    let _ = conn.execute("drop table pythia_menu_t purge", &[]);
+    for ddl in [
+        "create table pythia_menu_t (id number)",
+        "create or replace package pythia_menu_pkg as\n  procedure do_it;\nend;",
+        "create or replace package body pythia_menu_pkg as\n  procedure helper is begin null; end;\n  procedure do_it is\n  begin\n    helper;\n  end;\nend;",
+    ] {
+        conn.execute(ddl, &[]).unwrap();
+    }
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let text = "select * from pythia_menu_t;\nbegin\n  pythia_menu_pkg.do_it;\nend;\n";
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: text.into(),
+        run: false,
+    });
+    h.run_steps(3);
+    let right_click = |h: &mut Ui, word: &str| {
+        let offset = text.find(word).unwrap() + 2;
+        let pos = h
+            .state_mut()
+            .test_sql_window()
+            .editor
+            .inner()
+            .offset_pos(offset)
+            .expect("drawn");
+        h.event(egui::Event::PointerMoved(pos));
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            h.step();
+        }
+    };
+    // Waits until the menu shows `label` (names are looked up in the background).
+    let menu_item = |h: &mut Ui, label: &str| {
+        let start = Instant::now();
+        while h.query_by_label(label).is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "no menu item {label}"
+            );
+            h.step();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    };
+
+    right_click(&mut h, "pythia_menu_t");
+    menu_item(&mut h, "Query data");
+    for label in ["Edit table…", "Describe", "Show in object browser"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    // With a submenu arrow or a shortcut in the label.
+    for label in ["Generate", "Cut", "Paste", "Toggle comment"] {
+        assert!(h.query_by_label_contains(label).is_some(), "{label}");
+    }
+    assert!(h.query_by_label("Drop…").is_none(), "no Drop in editors");
+    save(&mut h, "17-editor-context-menu-dark");
+    h.get_by_label("Show in object browser").click();
+    let table = ObjectRef {
+        owner: "PYTHIA".into(),
+        name: "PYTHIA_MENU_T".into(),
+        object_type: pythia_db::ObjectType::Table,
+    };
+    wait_until(&mut h, "revealed", |app| {
+        app.test_browser_selected().as_ref() == Some(&table)
+    });
+
+    right_click(&mut h, "do_it");
+    menu_item(&mut h, "Edit do_it");
+    assert!(h.query_by_label("Test…").is_some());
+    h.get_by_label("Edit do_it").click();
+    let start = Instant::now();
+    loop {
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+        if let Some(editor) = h.state_mut().test_program_editor()
+            && let Some(range) = editor.selection()
+        {
+            assert_eq!(&editor.text()[range.clone()], "do_it");
+            assert!(
+                editor
+                    .text()
+                    .to_lowercase()
+                    .starts_with("create or replace package body")
+            );
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "package body not opened at do_it"
+        );
+    }
+    conn.execute("drop package pythia_menu_pkg", &[]).unwrap();
+    conn.execute("drop table pythia_menu_t purge", &[]).unwrap();
 }
 
 /// Commit and Rollback follow the focused window's transaction, and never

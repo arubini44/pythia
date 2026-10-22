@@ -77,6 +77,11 @@ pub struct Effects {
     pub debug: Option<String>,
     /// Breakpoints toggled in an editor: (unit, line).
     pub breakpoints: Vec<(pythia_debugger::Unit, u32)>,
+    /// Object actions chosen in an editor, for the object browser to carry
+    /// out on this connection.
+    pub object_actions: Vec<(String, crate::browser::ObjectAction)>,
+    /// App commands to run (e.g. Format from an editor's context menu).
+    pub commands: Vec<crate::commands::Command>,
 }
 
 impl Effects {
@@ -93,6 +98,8 @@ impl Effects {
         self.catalog_requests.extend(other.catalog_requests);
         self.debug = other.debug.or(self.debug.take());
         self.breakpoints.extend(other.breakpoints);
+        self.object_actions.extend(other.object_actions);
+        self.commands.extend(other.commands);
     }
 }
 
@@ -132,6 +139,13 @@ pub enum OpenRequest {
         connection: String,
         object: ObjectRef,
         line: usize,
+    },
+    /// Open a package (or type) at a subprogram: its implementation in the
+    /// body, or its declaration when there's no body.
+    ProgramMember {
+        connection: String,
+        object: ObjectRef,
+        member: String,
     },
     /// Insert text at the cursor of the focused SQL window (or a new one).
     InsertText { text: String },
@@ -190,6 +204,8 @@ pub struct DocContext<'a> {
     pub connections: &'a [String],
     /// Debugger state, for breakpoint and execution markers.
     pub debug: Option<&'a pythia_debugger::ui::DebugSession>,
+    /// Favorites and recent objects, for the editors' context menu.
+    pub marks: Option<&'a crate::browser::Marks>,
 }
 
 impl Document {

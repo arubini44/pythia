@@ -113,7 +113,7 @@ impl Palette {
 }
 
 /// Geometry of the current frame. All rects in screen coordinates.
-struct Layout {
+pub(super) struct Layout {
     /// Top-left of the (virtual) content.
     origin: Pos2,
     /// Visible part of the content, relative to `origin`.
@@ -311,6 +311,7 @@ impl CodeEditor {
                         });
                     });
                 }
+                self.last_layout = Some(layout);
                 response
             });
 
@@ -330,6 +331,7 @@ impl CodeEditor {
             hover_request: requests.hover,
             goto_request: requests.goto,
             references_request: requests.references,
+            context_request: requests.context,
         }
     }
 
@@ -397,6 +399,17 @@ impl CodeEditor {
             return;
         };
         let in_gutter = pos.x < layout.gutter_left() + layout.gutter_w;
+        if response.secondary_clicked() && !in_gutter {
+            // The caret moves to the click unless it's in the selection,
+            // which the menu's actions then apply to.
+            let (_, _, char_pos) = self.hit(layout, pos);
+            let at = self.state.rope.char_to_byte(char_pos);
+            if !self.selection().is_some_and(|s| s.contains(&at)) {
+                self.state.set_caret(char_pos);
+            }
+            self.requests.context = Some(at);
+            return;
+        }
         let pill = response
             .hovered()
             .then(|| {
@@ -1100,6 +1113,20 @@ impl CodeEditor {
     }
 
     // ----- painting -----------------------------------------------------
+
+    /// Where the character at byte `offset` was drawn in the last frame
+    /// (its center), e.g. to point at a word.
+    pub fn offset_pos(&self, offset: usize) -> Option<Pos2> {
+        let layout = self.last_layout.as_ref()?;
+        let rope = &self.state.rope;
+        let at = rope.byte_to_char(offset.min(rope.len_bytes()));
+        let (line, col) = super::text::line_col(rope, at);
+        let vcol = visual_col(&line_text(rope, line), col, self.state.tab_width);
+        Some(pos2(
+            layout.text_x() + (vcol as f32 + 0.5) * layout.char_w,
+            layout.row_y(line) + layout.row_h / 2.0,
+        ))
+    }
 
     fn caret_rect(&self, layout: &Layout) -> Rect {
         let head = self.state.primary().head;
