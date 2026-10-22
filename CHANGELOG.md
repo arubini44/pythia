@@ -6,6 +6,8 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-22
+
 ### Changed
 - Toolbar: follows the focused window. Commit and Rollback are only enabled
   with a pending transaction (and then stand out), never open a session,
@@ -229,5 +231,6 @@ First release.
 - Scheduler jobs window: run, stop, enable, disable, drop, run history.
 - Saved user reports with parameters.
 
-[Unreleased]: https://github.com/ortic/pythia/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ortic/pythia/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ortic/pythia/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ortic/pythia/releases/tag/v0.1.0
