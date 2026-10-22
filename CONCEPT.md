@@ -232,11 +232,12 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.10 Object Browser / Code Browser (M3)
 
 - [x] Tree: connection → schema → object type → objects
-- [x] Object types: tables, views, materialized views, sequences, synonyms, packages, procedures, functions, types, triggers, indexes, constraints, DB links, jobs/scheduler, queues, directories, users, roles, profiles (no constraints, queues, directories, users, roles or profiles folders)
+- [x] Object types: tables, views, materialized views, sequences, synonyms, packages, procedures, functions, types, triggers, indexes, constraints, DB links, jobs/scheduler, queues, directories, users, roles, profiles (no constraints, queues, directories or profiles folders)
 - [x] "My objects" / all schemas / filter by schema
 - [x] Filters: name pattern, status (invalid), modified since, custom saved filters (no saved filters)
 - [x] Invalid objects highlighted
 - [x] Context menu: view, edit, compile, drop, rename, describe, query data, generate DDL, copy name, grant (no rename or grant)
+- [x] New objects from the context menu (folders, objects, a table's indexes/constraints/triggers, users and roles) and File → New Object
 - [x] Expand table → columns, indexes, constraints, triggers, FKs, references-by
 - [x] Expand package → procedures/functions with parameters (outline from parser)
 - [x] Dependencies view (uses / used by)
@@ -249,7 +250,9 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 - [x] View and generate DDL (`DBMS_METADATA`) with options (storage, tablespace, constraints)
 - [x] Table editor: columns, keys, indexes, checks, comments, partitions → generates `ALTER` script (no partitions)
-- [x] Sequence, synonym, view, index, user, role editors (no user or role editors)
+- [x] Table builder: new tables (columns, primary/unique/foreign keys, checks, indexes, identity columns, temporary tables, copy of a table) → `CREATE TABLE` script, applied in the window
+- [x] Sequence, synonym, view, materialized view, index, database link, user, role editors
+- [x] New triggers, procedures, functions, packages and types from a form that writes the first source for a program window
 - [x] Grants editor
 - [x] Preview generated DDL before applying
 

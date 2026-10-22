@@ -16,6 +16,9 @@ pub struct ProgramWindow {
     pub active: usize,
     #[serde(default = "yes")]
     pub show_outline: bool,
+    /// Not in the database yet: compiling creates it.
+    #[serde(default)]
+    pub new: bool,
     #[serde(skip)]
     state: State,
 }
@@ -96,8 +99,21 @@ impl ProgramWindow {
             },
             parts,
             active,
+            new: false,
             state: State::default(),
         }
+    }
+
+    /// A unit that doesn't exist yet, with its (unsaved) sources, spec
+    /// first. Compiling creates it.
+    pub fn with_sources(object: ObjectRef, sources: Vec<String>) -> Self {
+        let mut window = Self::new(object);
+        for (part, text) in window.parts.iter_mut().zip(sources) {
+            part.editor.set_text(text);
+        }
+        window.active = 0;
+        window.new = true;
+        window
     }
 
     /// Shows `line` of the part with `object_type` (now, or once loaded).
@@ -466,6 +482,11 @@ impl ProgramWindow {
                         self.state.compile_queue.clear();
                     }
                     let mut effects = self.ddl_time(i, DdlCheck::Remember);
+                    // Created, if with errors.
+                    if self.new {
+                        self.new = false;
+                        effects.changed = Some(self.object.clone());
+                    }
                     effects.extend(self.compile_part());
                     return effects;
                 }

@@ -1,15 +1,33 @@
-//! Object editors: forms for sequences, views, synonyms, indexes and the
-//! grants of any object. Each loads the object (if it exists), shows the
-//! statements the edits turn into and applies them on the window's session.
+//! Object editors: forms that create or change sequences, views,
+//! materialized views, synonyms, indexes, database links, users and roles,
+//! and the grants of any object. Each loads the object (if it exists), shows
+//! the statements the edits turn into and applies them on the window's
+//! session. Procedures, functions, packages, types and triggers start from a
+//! form as well: it writes their first source, which a program window takes
+//! over (compiling creates them).
 
+mod account;
+mod db_link;
 mod grants;
 mod index;
+mod mview;
+mod program;
 mod sequence;
 mod synonym;
+mod trigger;
+mod type_def;
 mod view;
 
 #[cfg(test)]
+pub use account::AccountDef;
+#[cfg(test)]
+pub use db_link::LinkDef;
+#[cfg(test)]
+pub use program::{Mode, Param, ProgramDef, Subprogram};
+#[cfg(test)]
 pub use sequence::SequenceDef;
+#[cfg(test)]
+pub use trigger::TriggerDef;
 #[cfg(test)]
 pub use view::ViewDef;
 
@@ -33,6 +51,10 @@ pub enum EditTarget {
     New {
         owner: String,
         object_type: ObjectType,
+        /// The object the new one is on or for: the table of an index or
+        /// trigger, the source of a view, the target of a synonym.
+        #[serde(default)]
+        from: Option<ObjectRef>,
     },
     Edit(ObjectRef),
     Grants(ObjectRef),
@@ -61,12 +83,34 @@ impl EditTarget {
     }
 }
 
-/// Types with a form editor (grants work for any object).
+/// Types whose existing objects have a form editor (grants work for any
+/// object).
 pub fn has_editor(t: ObjectType) -> bool {
     matches!(
         t,
-        ObjectType::Sequence | ObjectType::View | ObjectType::Synonym | ObjectType::Index
+        ObjectType::Sequence
+            | ObjectType::View
+            | ObjectType::MaterializedView
+            | ObjectType::Synonym
+            | ObjectType::Index
+            | ObjectType::DatabaseLink
+            | ObjectType::User
+            | ObjectType::Role
     )
+}
+
+/// Types created from a form (tables from the table builder).
+pub fn can_create(t: ObjectType) -> bool {
+    has_editor(t)
+        || matches!(
+            t,
+            ObjectType::Table
+                | ObjectType::Trigger
+                | ObjectType::Procedure
+                | ObjectType::Function
+                | ObjectType::Package
+                | ObjectType::Type
+        )
 }
 
 /// Types that take object grants.
@@ -89,19 +133,66 @@ pub fn has_grants(t: ObjectType) -> bool {
 enum Form {
     Sequence(sequence::SequenceDef),
     View(view::ViewDef),
+    MaterializedView(mview::MviewDef),
     Synonym(synonym::SynonymDef),
     Index(index::IndexDef),
+    DatabaseLink(db_link::LinkDef),
+    Account(account::AccountDef),
     Grants(grants::GrantsDef),
+    Program(program::ProgramDef),
+    Type(type_def::TypeDef),
+    Trigger(trigger::TriggerDef),
 }
 
 impl Form {
+    /// The object's name as the dictionary has it.
     fn name(&self) -> String {
         match self {
             Form::Sequence(d) => ident(&d.name),
             Form::View(d) => ident(&d.name),
+            Form::MaterializedView(d) => ident(&d.name),
             Form::Synonym(d) => ident(&d.name),
             Form::Index(d) => ident(&d.name),
+            Form::DatabaseLink(d) => ident(&d.name),
+            Form::Account(d) => ident(&d.name),
+            Form::Program(d) => ident(&d.name),
+            Form::Type(d) => ident(&d.name),
+            Form::Trigger(d) => ident(&d.effective_name()),
             Form::Grants(_) => String::new(),
+        }
+    }
+
+    /// Who owns the object: the editor's schema, except for public
+    /// synonyms and links (PUBLIC) and users and roles (nobody).
+    fn owner<'a>(&self, schema: &'a str) -> &'a str {
+        match self {
+            Form::Synonym(d) if d.public => "PUBLIC",
+            Form::DatabaseLink(d) if d.public => "PUBLIC",
+            Form::Account(_) => "",
+            _ => schema,
+        }
+    }
+
+    /// A PL/SQL unit: the form writes its first source for a program
+    /// window instead of statements to run.
+    fn is_program(&self) -> bool {
+        matches!(self, Form::Program(_) | Form::Type(_) | Form::Trigger(_))
+    }
+
+    /// The query of a view or materialized view, edited in a code editor.
+    fn query(&self) -> Option<&String> {
+        match self {
+            Form::View(d) => Some(&d.query),
+            Form::MaterializedView(d) => Some(&d.query),
+            _ => None,
+        }
+    }
+
+    fn query_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Form::View(d) => Some(&mut d.query),
+            Form::MaterializedView(d) => Some(&mut d.query),
+            _ => None,
         }
     }
 }
@@ -111,15 +202,27 @@ impl Form {
 pub struct Lists {
     /// Owner of the edited object.
     pub schema: String,
+    pub release: pythia_db::compat::Release,
     pub owners: Vec<String>,
     /// Objects by owner, loaded when a picker needs them.
     pub objects: HashMap<String, Vec<String>>,
     pub tables: Vec<String>,
+    pub views: Vec<String>,
     /// Columns by table (of `schema`).
     pub columns: HashMap<String, Vec<String>>,
     pub tablespaces: Vec<String>,
+    pub temp_tablespaces: Vec<String>,
     pub db_links: Vec<String>,
     pub grantees: Vec<String>,
+    pub profiles: Vec<String>,
+    pub roles: Vec<String>,
+    /// System privileges.
+    pub privileges: Vec<String>,
+    /// The session's system privileges, to say what's missing.
+    pub session_privileges: Vec<String>,
+    /// Objects of the edited type in the schema, to warn before a new
+    /// PL/SQL unit replaces one (`CREATE OR REPLACE`).
+    pub existing: Vec<String>,
     /// Lists a form asked for this frame.
     pub want_objects: Option<String>,
     pub want_columns: Option<String>,
@@ -128,12 +231,24 @@ pub struct Lists {
 /// The lists loaded with the form.
 #[derive(Default)]
 struct BaseLists {
+    release: pythia_db::compat::Release,
     owners: Vec<String>,
     tables: Vec<String>,
+    views: Vec<String>,
     tablespaces: Vec<String>,
+    temp_tablespaces: Vec<String>,
     db_links: Vec<String>,
     grantees: Vec<String>,
+    profiles: Vec<String>,
+    roles: Vec<String>,
+    privileges: Vec<String>,
+    session_privileges: Vec<String>,
+    existing: Vec<String>,
 }
+
+/// The object as loaded (none for a new one), the form to start from, and
+/// the lists.
+type Loaded = (Option<Form>, Form, BaseLists);
 
 enum ListRequest {
     Objects(String),
@@ -142,9 +257,9 @@ enum ListRequest {
 
 /// A statement that failed while applying.
 #[derive(Debug)]
-struct ApplyError {
-    statement: String,
-    error: DbError,
+pub struct ApplyError {
+    pub statement: String,
+    pub error: DbError,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -160,9 +275,11 @@ struct State {
     lists_loading: BTreeMap<u64, ListRequest>,
     requested: BTreeSet<String>,
     original: Option<Form>,
+    /// A new object's form as it started, to tell whether it was changed.
+    initial: Option<Form>,
     edited: Option<Form>,
     lists: Lists,
-    /// The view's query.
+    /// The query of a view or materialized view.
     query: Option<Editor>,
     applying: Option<u64>,
     load_error: Option<String>,
@@ -199,7 +316,7 @@ impl ObjectEditor {
     pub fn is_dirty(&self) -> bool {
         match (&self.state.original, &self.state.edited) {
             (Some(a), Some(b)) => a != b,
-            (None, Some(b)) => !b.name().is_empty(),
+            (None, Some(b)) => self.state.initial.as_ref() != Some(b),
             _ => false,
         }
     }
@@ -218,24 +335,36 @@ impl ObjectEditor {
     /// Changes the form in tests, e.g. `|f| f.cache = 50` on a sequence.
     #[cfg(test)]
     pub fn edit_for_test(&mut self, f: impl FnOnce(&mut dyn std::any::Any)) {
-        match self.state.edited.as_mut() {
-            Some(Form::Sequence(d)) => f(d),
-            Some(Form::View(d)) => {
-                f(d);
-                if let Some(q) = self.state.query.as_mut() {
-                    q.set_text(d.query.clone());
-                }
-            }
-            Some(Form::Synonym(d)) => f(d),
-            Some(Form::Index(d)) => f(d),
-            Some(Form::Grants(d)) => f(d),
-            None => {}
+        let Some(form) = self.state.edited.as_mut() else {
+            return;
+        };
+        match form {
+            Form::Sequence(d) => f(d),
+            Form::View(d) => f(d),
+            Form::MaterializedView(d) => f(d),
+            Form::Synonym(d) => f(d),
+            Form::Index(d) => f(d),
+            Form::DatabaseLink(d) => f(d),
+            Form::Account(d) => f(d),
+            Form::Grants(d) => f(d),
+            Form::Program(d) => f(d),
+            Form::Type(d) => f(d),
+            Form::Trigger(d) => f(d),
+        }
+        if let (Some(query), Some(editor)) = (form.query(), self.state.query.as_mut()) {
+            editor.set_text(query.clone());
         }
     }
 
     #[cfg(test)]
     pub fn apply_for_test(&mut self) -> Effects {
         self.apply()
+    }
+
+    /// "Open in editor" of a PL/SQL unit's form.
+    #[cfg(test)]
+    pub fn open_in_editor_for_test(&mut self, connection: &str) -> Effects {
+        self.open_in_editor(Some(connection.to_owned()))
     }
 
     /// Loads the object and the picker lists.
@@ -259,23 +388,28 @@ impl ObjectEditor {
         };
         if self.state.loading == Some(id) {
             self.state.loading = None;
-            match result.map(|any| any.downcast::<(Option<Form>, BaseLists)>()) {
+            match result.map(|any| any.downcast::<Loaded>()) {
                 Ok(Ok(loaded)) => {
-                    let (form, base) = *loaded;
-                    let edited = form.clone().unwrap_or_else(|| new_form(&self.target));
-                    self.state.query = match &edited {
-                        Form::View(v) => Some(Editor::new(v.query.clone())),
-                        _ => None,
-                    };
+                    let (form, start, base) = *loaded;
+                    self.state.query = start.query().map(|q| Editor::new(q.clone()));
                     self.state.original = form;
-                    self.state.edited = Some(edited);
+                    self.state.initial = Some(start.clone());
+                    self.state.edited = Some(start);
                     let lists = &mut self.state.lists;
                     lists.schema = self.target.owner().to_owned();
+                    lists.release = base.release;
                     lists.owners = base.owners;
                     lists.tables = base.tables;
+                    lists.views = base.views;
                     lists.tablespaces = base.tablespaces;
+                    lists.temp_tablespaces = base.temp_tablespaces;
                     lists.db_links = base.db_links;
                     lists.grantees = base.grantees;
+                    lists.profiles = base.profiles;
+                    lists.roles = base.roles;
+                    lists.privileges = base.privileges;
+                    lists.session_privileges = base.session_privileges;
+                    lists.existing = base.existing;
                 }
                 Ok(Err(_)) => self.state.load_error = Some("unexpected result".into()),
                 Err(e) => self.state.load_error = Some(e.to_string()),
@@ -306,16 +440,22 @@ impl ObjectEditor {
                             message.push_str(w);
                         }
                         self.state.outcome = Some((message, warnings.is_empty()));
-                        if let EditTarget::New { owner, object_type } = &self.target
+                        if let EditTarget::New {
+                            owner, object_type, ..
+                        } = &self.target
                             && let Some(form) = &self.state.edited
                         {
                             self.target = EditTarget::Edit(ObjectRef {
-                                owner: owner.clone(),
+                                owner: form.owner(owner).to_owned(),
                                 name: form.name(),
                                 object_type: *object_type,
                             });
                         }
-                        return self.load();
+                        let mut effects = self.load();
+                        if let EditTarget::Edit(object) = &self.target {
+                            effects.changed = Some(object.clone());
+                        }
+                        return effects;
                     }
                     Err(e) => {
                         self.locate_error(&e);
@@ -336,12 +476,17 @@ impl ObjectEditor {
         Effects::default()
     }
 
-    /// Selects the error position in the view's query editor.
+    /// Selects the error position in the query editor.
     fn locate_error(&mut self, e: &ApplyError) {
         let (Some(offset), Some(query)) = (e.error.offset, self.state.query.as_mut()) else {
             return;
         };
-        let Some(start) = e.statement.find(" as\n").map(|i| i + 4) else {
+        let Some(start) = e
+            .statement
+            .find(" as\n")
+            .or_else(|| e.statement.find("\nas\n"))
+            .map(|i| i + 4)
+        else {
             return;
         };
         let Some(at) = (offset as usize).checked_sub(start) else {
@@ -354,11 +499,14 @@ impl ObjectEditor {
     }
 
     fn sync_query(&mut self) {
-        if let (Some(Form::View(v)), Some(q)) = (self.state.edited.as_mut(), &self.state.query) {
-            v.query = q.text().to_owned();
+        if let (Some(form), Some(q)) = (self.state.edited.as_mut(), &self.state.query)
+            && let Some(query) = form.query_mut()
+        {
+            *query = q.text().to_owned();
         }
     }
 
+    /// The statements to run, or a PL/SQL unit's first sources.
     fn statements(&self) -> Result<Vec<String>, String> {
         let Some(edited) = &self.state.edited else {
             return Ok(Vec::new());
@@ -377,6 +525,13 @@ impl ObjectEditor {
                 sequence::statements(owner, o, d)
             }
             (_, Form::View(d)) => view::statements(owner, d),
+            (o, Form::MaterializedView(d)) => {
+                let o = o.and_then(|f| match f {
+                    Form::MaterializedView(m) => Some(m),
+                    _ => None,
+                });
+                mview::statements(owner, o, d)
+            }
             (_, Form::Synonym(d)) => synonym::statements(owner, d),
             (o, Form::Index(d)) => {
                 let o = o.and_then(|f| match f {
@@ -384,6 +539,20 @@ impl ObjectEditor {
                     _ => None,
                 });
                 index::statements(owner, o, d)
+            }
+            (o, Form::DatabaseLink(d)) => {
+                let o = o.and_then(|f| match f {
+                    Form::DatabaseLink(l) => Some(l),
+                    _ => None,
+                });
+                db_link::statements(o, d)
+            }
+            (o, Form::Account(d)) => {
+                let o = o.and_then(|f| match f {
+                    Form::Account(a) => Some(a),
+                    _ => None,
+                });
+                account::statements(o, d)
             }
             (o, Form::Grants(d)) => {
                 let empty = grants::GrantsDef::default();
@@ -398,6 +567,18 @@ impl ObjectEditor {
                     .unwrap_or_default();
                 Ok(grants::statements(&object, o, d))
             }
+            (_, Form::Program(d)) => program::sources(owner, d),
+            (_, Form::Type(d)) => type_def::source(owner, d).map(|s| vec![s]),
+            (_, Form::Trigger(d)) => trigger::source(owner, d).map(|s| vec![s]),
+        }
+    }
+
+    /// The statements as shown: passwords hidden.
+    fn shown(&self, statements: &[String]) -> Vec<String> {
+        match &self.state.edited {
+            Some(Form::DatabaseLink(d)) => db_link::masked(statements, d),
+            Some(Form::Account(d)) => account::masked(statements, d),
+            _ => statements.to_vec(),
         }
     }
 
@@ -421,6 +602,30 @@ impl ObjectEditor {
             Ok(Box::new(outcome) as Box<dyn std::any::Any + Send>)
         });
         effects.request(Target::Own, DbRequest::Task { id, task });
+        effects
+    }
+
+    /// Opens the unit's sources in a new program window and closes the form.
+    fn open_in_editor(&mut self, connection: Option<String>) -> Effects {
+        let mut effects = Effects::default();
+        let (Ok(sources), Some(form), Some(connection)) =
+            (self.statements(), &self.state.edited, connection)
+        else {
+            return effects;
+        };
+        if sources.is_empty() {
+            return effects;
+        }
+        effects.open.push(OpenRequest::NewProgram {
+            connection,
+            object: ObjectRef {
+                owner: self.target.owner().to_owned(),
+                name: form.name(),
+                object_type: self.target.object_type(),
+            },
+            sources,
+        });
+        effects.close = true;
         effects
     }
 
@@ -491,14 +696,21 @@ impl ObjectEditor {
         self.sync_query();
         let statements = self.statements();
         let existing = self.state.original.is_some();
+        let program = self.state.edited.as_ref().is_some_and(Form::is_program);
         ui.horizontal(|ui| {
             let t = self.target.object_type();
             if let Some(icon) = Icon::for_object_type(t.dictionary_name()) {
                 ui.add(icon.sized(ui, pythia_ui::icons::IconSize::Small));
             }
+            let kind = t.dictionary_name().to_lowercase();
             let heading = match &self.target {
-                EditTarget::New { owner, .. } => {
-                    format!("New {} in {owner}", t.dictionary_name().to_lowercase())
+                EditTarget::New { owner, .. } if owner.is_empty() => format!("New {kind}"),
+                EditTarget::New { owner, .. } if owner == "PUBLIC" => format!("New public {kind}"),
+                EditTarget::New { owner, .. } => format!("New {kind} in {owner}"),
+                EditTarget::Edit(o) if o.owner.is_empty() => {
+                    let mut kind = kind.clone();
+                    kind[..1].make_ascii_uppercase();
+                    format!("{kind} {}", o.name)
                 }
                 EditTarget::Edit(o) => format!("{}.{}", o.owner, o.name),
                 EditTarget::Grants(o) => format!("Grants on {}.{}", o.owner, o.name),
@@ -506,6 +718,17 @@ impl ObjectEditor {
             ui.label(RichText::new(heading).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ready = matches!(&statements, Ok(s) if !s.is_empty());
+                if program {
+                    let open = egui::Button::image_and_text(Icon::Edit.image(ui), "Open in editor");
+                    if ui
+                        .add_enabled(ready && cx.connection.is_some(), open)
+                        .on_hover_text("Continue in a program window, where compiling creates it")
+                        .clicked()
+                    {
+                        effects.extend(self.open_in_editor(cx.connection.clone()));
+                    }
+                    return;
+                }
                 let apply = egui::Button::image_and_text(Icon::Execute.image(ui), "Apply");
                 if ui
                     .add_enabled(ready && cx.connected && !self.is_busy(), apply)
@@ -534,10 +757,11 @@ impl ObjectEditor {
                         .clicked()
                     {
                         self.state.edited = self.state.original.clone();
-                        if let (Some(Form::View(v)), Some(q)) =
-                            (&self.state.edited, self.state.query.as_mut())
-                        {
-                            q.set_text(v.query.clone());
+                        if let (Some(query), Some(q)) = (
+                            self.state.edited.as_ref().and_then(Form::query),
+                            self.state.query.as_mut(),
+                        ) {
+                            q.set_text(query.clone());
                         }
                     }
                     if ui.button("Reload").clicked() {
@@ -547,6 +771,16 @@ impl ObjectEditor {
             });
         });
         ui.separator();
+        if let Some(form) = self.state.edited.as_ref().filter(|f| f.is_program()) {
+            let name = form.name();
+            if self.state.lists.existing.contains(&name) {
+                let kind = self.target.object_type().dictionary_name().to_lowercase();
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("{kind} {name} exists: compiling the new source replaces it"),
+                );
+            }
+        }
         if let Some((message, ok)) = &self.state.outcome {
             let color = if *ok {
                 Color32::from_rgb(0x2f, 0xa0, 0x4c)
@@ -560,16 +794,29 @@ impl ObjectEditor {
         // The DDL preview keeps a fixed share at the bottom.
         let preview_height = (ui.available_height() * 0.3).clamp(90.0, 220.0);
         let form_height = (ui.available_height() - preview_height - 30.0).max(120.0);
+        let owner = self.target.owner().to_owned();
+        let original = self.state.original.as_ref();
         let lists = &mut self.state.lists;
         let editor_id = egui::Id::new(("object-editor-query", cx.id));
+        let query = &mut self.state.query;
         ui.allocate_ui(
             egui::vec2(ui.available_width(), form_height),
             |ui| match self.state.edited.as_mut().expect("loaded") {
-                Form::View(def) => {
-                    view::ui(ui, def, existing);
+                form @ (Form::View(_) | Form::MaterializedView(_)) => {
+                    match form {
+                        Form::View(def) => view::ui(ui, def, existing),
+                        Form::MaterializedView(def) => {
+                            let original = original.and_then(|f| match f {
+                                Form::MaterializedView(m) => Some(m),
+                                _ => None,
+                            });
+                            mview::ui(ui, def, original, lists)
+                        }
+                        _ => {}
+                    }
                     ui.add_space(6.0);
                     ui.label(RichText::new("Query").strong());
-                    if let Some(query) = self.state.query.as_mut() {
+                    if let Some(query) = query.as_mut() {
                         let height = ui.available_height().max(80.0);
                         ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
                             query.ui(ui, editor_id, &cx.settings.editor);
@@ -583,8 +830,19 @@ impl ObjectEditor {
                             Form::Sequence(def) => sequence::ui(ui, def, existing),
                             Form::Synonym(def) => synonym::ui(ui, def, existing, lists),
                             Form::Index(def) => index::ui(ui, def, existing, lists),
+                            Form::DatabaseLink(def) => db_link::ui(ui, def, existing, &owner),
+                            Form::Account(def) => {
+                                let original = original.and_then(|f| match f {
+                                    Form::Account(a) => Some(a),
+                                    _ => None,
+                                });
+                                account::ui(ui, def, original, lists)
+                            }
                             Form::Grants(def) => grants::ui(ui, def, lists),
-                            Form::View(_) => {}
+                            Form::Program(def) => program::ui(ui, def),
+                            Form::Type(def) => type_def::ui(ui, def),
+                            Form::Trigger(def) => trigger::ui(ui, def, lists),
+                            Form::View(_) | Form::MaterializedView(_) => {}
                         })
                         .inner
                 }
@@ -593,7 +851,7 @@ impl ObjectEditor {
         self.request_lists(&mut effects);
 
         ui.separator();
-        ui.label(RichText::new("Statements").strong());
+        ui.label(RichText::new(if program { "Source" } else { "Statements" }).strong());
         match &statements {
             Err(problem) => {
                 ui.label(RichText::new(problem).color(ui.visuals().warn_fg_color));
@@ -602,6 +860,12 @@ impl ObjectEditor {
                 ui.weak("No changes");
             }
             Ok(s) => {
+                let shown = self.shown(s);
+                let text = if program {
+                    shown.join("\n/\n\n") + "\n/"
+                } else {
+                    script(&shown)
+                };
                 let theme = pythia_ui::SyntaxTheme::for_visuals(ui.visuals());
                 let font = egui::FontId::monospace(cx.settings.editor.font_size.min(14.0));
                 egui::Frame::new()
@@ -614,7 +878,7 @@ impl ObjectEditor {
                             .auto_shrink([false, true])
                             .max_height(ui.available_height())
                             .show(ui, |ui| {
-                                let job = pythia_ui::highlight(&script(s), font, &theme);
+                                let job = pythia_ui::highlight(&text, font, &theme);
                                 ui.add(egui::Label::new(job).extend());
                             });
                     });
@@ -624,76 +888,179 @@ impl ObjectEditor {
     }
 }
 
-/// A new, empty form.
-fn new_form(target: &EditTarget) -> Form {
-    match target.object_type() {
-        ObjectType::View => Form::View(view::ViewDef::new()),
-        ObjectType::Synonym => Form::Synonym(synonym::SynonymDef::default()),
-        ObjectType::Index => Form::Index(index::IndexDef::new()),
-        _ => Form::Sequence(sequence::SequenceDef::new()),
-    }
+/// A new object's form, filled in from the object it's on or for.
+fn new_form(conn: &Connection, target: &EditTarget) -> Result<Form, DbError> {
+    let EditTarget::New {
+        owner,
+        object_type,
+        from,
+    } = target
+    else {
+        return Err(DbError::new("Not a new object".to_owned()));
+    };
+    let from = from.as_ref();
+    Ok(match object_type {
+        ObjectType::Sequence => Form::Sequence(sequence::SequenceDef::new()),
+        ObjectType::View => {
+            let mut def = view::ViewDef::new();
+            if let Some(from) = from {
+                let columns = names(
+                    conn,
+                    "select column_name from all_tab_columns
+                      where owner = :1 and table_name = :2 order by column_id",
+                    &[&from.owner, &from.name],
+                )?;
+                def.name = quote_ident(&format!("{}_V", from.name));
+                def.query = view::query_on(owner, from, &columns);
+            }
+            Form::View(def)
+        }
+        ObjectType::MaterializedView => Form::MaterializedView(mview::MviewDef::new()),
+        ObjectType::Synonym => {
+            let mut def = synonym::SynonymDef {
+                public: owner == "PUBLIC",
+                ..Default::default()
+            };
+            if let Some(from) = from {
+                def.name = quote_ident(&from.name);
+                def.target_owner = quote_ident(&from.owner);
+                def.target_name = quote_ident(&from.name);
+                // In the object's own schema the name is taken: a public
+                // synonym is what's usually wanted.
+                def.public |= from.owner == *owner;
+            }
+            Form::Synonym(def)
+        }
+        ObjectType::Index => {
+            let mut def = index::IndexDef::new();
+            if let Some(from) = from {
+                def.table = quote_ident(&from.name);
+                def.name = quote_ident(&format!("{}_IX", from.name));
+            }
+            Form::Index(def)
+        }
+        ObjectType::DatabaseLink => Form::DatabaseLink(db_link::LinkDef {
+            public: owner == "PUBLIC",
+            ..Default::default()
+        }),
+        ObjectType::User => Form::Account(account::AccountDef::new_user()),
+        ObjectType::Role => Form::Account(account::AccountDef::new_role()),
+        t @ (ObjectType::Procedure | ObjectType::Function | ObjectType::Package) => {
+            Form::Program(program::ProgramDef::new(*t))
+        }
+        ObjectType::Type => Form::Type(type_def::TypeDef::new()),
+        ObjectType::Trigger => Form::Trigger(match from {
+            Some(from) => trigger::TriggerDef::on(&from.name, from.object_type == ObjectType::View),
+            None => trigger::TriggerDef::default(),
+        }),
+        t => {
+            return Err(DbError::new(format!(
+                "No form for a new {}",
+                t.dictionary_name().to_lowercase()
+            )));
+        }
+    })
 }
 
-fn load(conn: &Connection, target: &EditTarget) -> Result<(Option<Form>, BaseLists), DbError> {
+fn tablespaces(conn: &Connection) -> Result<Vec<String>, DbError> {
+    names(
+        conn,
+        "select tablespace_name from user_tablespaces
+          where contents = 'PERMANENT' order by tablespace_name",
+        &[],
+    )
+}
+
+fn load(conn: &Connection, target: &EditTarget) -> Result<Loaded, DbError> {
     let owner = target.owner();
-    let mut base = BaseLists::default();
-    let form = match target {
-        EditTarget::Grants(o) => {
-            base.grantees = grantees(conn)?;
-            Some(Form::Grants(grants::load(
-                conn,
-                &o.owner,
-                &o.name,
-                o.object_type,
-            )?))
-        }
-        _ => {
-            match target.object_type() {
-                ObjectType::Synonym => {
-                    base.owners = names(
-                        conn,
-                        "select username from all_users order by username",
-                        &[],
-                    )?;
-                    base.db_links = names(
-                        conn,
-                        "select db_link from all_db_links order by db_link",
-                        &[],
-                    )?;
-                }
-                ObjectType::Index => {
-                    base.tables = names(
-                        conn,
-                        "select table_name from all_tables where owner = :1 order by table_name",
-                        &[&owner],
-                    )?;
-                    base.tablespaces = names(
-                        conn,
-                        "select tablespace_name from user_tablespaces
-                          where contents = 'PERMANENT' order by tablespace_name",
-                        &[],
-                    )?;
-                }
-                _ => {}
-            }
-            match target.object() {
-                None => None,
-                Some(o) => Some(match o.object_type {
-                    ObjectType::Sequence => Form::Sequence(sequence::load(conn, owner, &o.name)?),
-                    ObjectType::View => Form::View(view::load(conn, owner, &o.name)?),
-                    ObjectType::Synonym => Form::Synonym(synonym::load(conn, owner, &o.name)?),
-                    ObjectType::Index => Form::Index(index::load(conn, owner, &o.name)?),
-                    t => {
-                        return Err(DbError::new(format!(
-                            "No editor for {}",
-                            t.dictionary_name().to_lowercase()
-                        )));
-                    }
-                }),
-            }
-        }
+    let mut base = BaseLists {
+        release: pythia_db::compat::release(conn)?,
+        ..BaseLists::default()
     };
-    Ok((form, base))
+    if let EditTarget::Grants(o) = target {
+        base.grantees = grantees(conn)?;
+        let form = Form::Grants(grants::load(conn, &o.owner, &o.name, o.object_type)?);
+        return Ok((Some(form.clone()), form, base));
+    }
+    match target.object_type() {
+        ObjectType::Synonym => {
+            base.owners = names(
+                conn,
+                "select username from all_users order by username",
+                &[],
+            )?;
+            base.db_links = names(
+                conn,
+                "select db_link from all_db_links order by db_link",
+                &[],
+            )?;
+        }
+        ObjectType::Index => {
+            base.tables = names(
+                conn,
+                "select table_name from all_tables where owner = :1 order by table_name",
+                &[&owner],
+            )?;
+            base.tablespaces = tablespaces(conn)?;
+        }
+        ObjectType::MaterializedView => base.tablespaces = tablespaces(conn)?,
+        ObjectType::Trigger => {
+            base.tables = names(
+                conn,
+                "select table_name from all_tables where owner = :1 order by table_name",
+                &[&owner],
+            )?;
+            base.views = names(
+                conn,
+                "select view_name from all_views where owner = :1 order by view_name",
+                &[&owner],
+            )?;
+        }
+        ObjectType::User | ObjectType::Role => account::lists(conn, &mut base)?,
+        _ => {}
+    }
+    if let EditTarget::New { object_type, .. } = target
+        && matches!(
+            object_type,
+            ObjectType::Procedure
+                | ObjectType::Function
+                | ObjectType::Package
+                | ObjectType::Type
+                | ObjectType::Trigger
+        )
+    {
+        base.existing = names(
+            conn,
+            "select object_name from all_objects where owner = :1 and object_type = :2",
+            &[&owner, &object_type.dictionary_name()],
+        )?;
+    }
+    let original = match target.object() {
+        None => None,
+        Some(o) => Some(match o.object_type {
+            ObjectType::Sequence => Form::Sequence(sequence::load(conn, owner, &o.name)?),
+            ObjectType::View => Form::View(view::load(conn, owner, &o.name)?),
+            ObjectType::MaterializedView => {
+                Form::MaterializedView(mview::load(conn, owner, &o.name)?)
+            }
+            ObjectType::Synonym => Form::Synonym(synonym::load(conn, owner, &o.name)?),
+            ObjectType::Index => Form::Index(index::load(conn, owner, &o.name)?),
+            ObjectType::DatabaseLink => Form::DatabaseLink(db_link::load(conn, owner, &o.name)?),
+            ObjectType::User => Form::Account(account::load_user(conn, &o.name)?),
+            ObjectType::Role => Form::Account(account::load_role(conn, &o.name)?),
+            t => {
+                return Err(DbError::new(format!(
+                    "No editor for {}",
+                    t.dictionary_name().to_lowercase()
+                )));
+            }
+        }),
+    };
+    let start = match &original {
+        Some(form) => form.clone(),
+        None => new_form(conn, target)?,
+    };
+    Ok((original, start, base))
 }
 
 /// Users and roles that can receive grants.
@@ -713,7 +1080,7 @@ fn grantees(conn: &Connection) -> Result<Vec<String>, DbError> {
     Ok(out)
 }
 
-fn names(
+pub fn names(
     conn: &Connection,
     sql: &str,
     binds: &[&dyn pythia_db::oracle::sql_type::ToSql],
@@ -753,14 +1120,14 @@ fn apply(
     Ok(warnings)
 }
 
-fn error_text(e: &DbError) -> String {
+pub fn error_text(e: &DbError) -> String {
     match e.code {
         Some(code) if !e.message.starts_with("ORA-") => format!("ORA-{code:05}: {}", e.message),
         _ => e.message.clone(),
     }
 }
 
-fn first_line(s: &str) -> &str {
+pub fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or_default()
 }
 
@@ -1038,5 +1405,372 @@ mod tests {
         ] {
             conn.execute(s, &[]).unwrap();
         }
+    }
+    fn connect(var: &str) -> Option<(Connection, String)> {
+        let spec = std::env::var(var).ok()?;
+        let (cred, db) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        Some((Connection::connect(user, pw, db).unwrap(), spec))
+    }
+
+    /// Compiles a unit's source as a program window does; its errors.
+    fn compile(conn: &Connection, owner: &str, source: &str, name: &str) -> Vec<String> {
+        conn.execute(source.trim_end().trim_end_matches('/').trim_end(), &[])
+            .unwrap_or_else(|e| panic!("{e}\n{source}"));
+        names(
+            conn,
+            "select line || ': ' || text from all_errors where owner = :1 and name = :2
+              order by type, sequence",
+            &[&owner, &name],
+        )
+        .unwrap()
+    }
+
+    /// The new forms' SQL against the database: materialized view and the
+    /// first sources of a trigger, procedure, function, package
+    /// and types, which must compile as they are.
+    #[test]
+    fn builds_live_objects() {
+        let Some((conn, _)) = connect("PYTHIA_TEST_DB") else {
+            return;
+        };
+        let owner = conn
+            .query_row_as::<String>("select user from dual", &[])
+            .unwrap();
+        let cleanup = "begin
+               for o in (select object_name, object_type from user_objects
+                          where object_name like 'PYTHIA\\_OB\\_%' escape '\\'
+                            and object_type in ('TABLE', 'MATERIALIZED VIEW', 'PROCEDURE',
+                                'FUNCTION', 'PACKAGE', 'TYPE', 'VIEW')
+                          order by decode(object_type, 'MATERIALIZED VIEW', 0, 'TYPE', 2, 1),
+                                   object_name desc) loop
+                 -- A materialized view's table goes with it.
+                 begin
+                   execute immediate 'drop ' || o.object_type || ' ' || o.object_name
+                     || case o.object_type when 'TABLE' then ' cascade constraints purge'
+                                           when 'TYPE' then ' force' end;
+                 exception when others then null;
+                 end;
+               end loop;
+             end;";
+        conn.execute(cleanup, &[]).unwrap();
+        let run = |statements: Vec<String>| {
+            apply(&conn, &statements, None).unwrap_or_else(|e| {
+                panic!("{}: {}", e.statement, e.error);
+            })
+        };
+        conn.execute(
+            "create table pythia_ob_t (id number primary key, status varchar2(10), total number)",
+            &[],
+        )
+        .unwrap();
+        conn.execute(
+            "create view pythia_ob_v as select id, status from pythia_ob_t",
+            &[],
+        )
+        .unwrap();
+
+        // Materialized view: create, reload, change refresh and rewrite.
+        let mut mv = mview::MviewDef::new();
+        mv.name = "pythia_ob_mv".into();
+        mv.query = "select status, count(*) n from pythia_ob_t group by status".into();
+        mv.refresh = mview::Refresh::Complete;
+        run(mview::statements(&owner, None, &mv).unwrap());
+        let loaded = mview::load(&conn, &owner, "PYTHIA_OB_MV").unwrap();
+        assert_eq!(loaded.refresh, mview::Refresh::Complete);
+        assert!(!loaded.on_commit && !loaded.rewrite);
+        assert_eq!(loaded.query.to_lowercase(), mv.query);
+        let mut edited = loaded.clone();
+        edited.refresh = mview::Refresh::Force;
+        edited.next = "sysdate + 1".into();
+        run(mview::statements(&owner, Some(&loaded), &edited).unwrap());
+        assert_eq!(
+            mview::load(&conn, &owner, "PYTHIA_OB_MV").unwrap().refresh,
+            mview::Refresh::Force
+        );
+        let mut requery = edited.clone();
+        requery.query = "select status from pythia_ob_t".into();
+        run(mview::statements(&owner, Some(&edited), &requery).unwrap());
+        assert_eq!(
+            mview::load(&conn, &owner, "PYTHIA_OB_MV")
+                .unwrap()
+                .query
+                .to_lowercase(),
+            "select status from pythia_ob_t"
+        );
+
+        // Triggers: on the table (row, statement, compound) and the view.
+        let mut t = trigger::TriggerDef::on("PYTHIA_OB_T", false);
+        t.update_columns = "status".into();
+        t.when = "new.status is not null".into();
+        let src = trigger::source(&owner, &t).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src, "PYTHIA_OB_T_BIU"),
+            Vec::<String>::new()
+        );
+        t.compound = true;
+        t.when.clear();
+        t.delete = true;
+        let src = trigger::source(&owner, &t).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src, "PYTHIA_OB_T_CIUD"),
+            Vec::<String>::new()
+        );
+        t.compound = false;
+        t.row_level = false;
+        t.timing = trigger::Timing::After;
+        t.enabled = false;
+        let src = trigger::source(&owner, &t).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src, "PYTHIA_OB_T_AIUD"),
+            Vec::<String>::new()
+        );
+        let status: String = conn
+            .query_row_as(
+                "select status from user_triggers where trigger_name = 'PYTHIA_OB_T_AIUD'",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(status, "DISABLED");
+        let v = trigger::TriggerDef::on("PYTHIA_OB_V", true);
+        let src = trigger::source(&owner, &v).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src, "PYTHIA_OB_V_IOIU"),
+            Vec::<String>::new()
+        );
+
+        // Procedure, function and package (spec and body with stubs).
+        let mut p = program::ProgramDef::new(ObjectType::Procedure);
+        p.name = "pythia_ob_proc".into();
+        p.subprograms[0].params = vec![
+            program::Param {
+                name: "p_id".into(),
+                mode: program::Mode::In,
+                data_type: "pythia_ob_t.id%type".into(),
+                default: String::new(),
+            },
+            program::Param {
+                name: "p_out".into(),
+                mode: program::Mode::Out,
+                data_type: "varchar2".into(),
+                default: String::new(),
+            },
+        ];
+        p.invoker_rights = true;
+        let src = program::sources(&owner, &p).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src[0], "PYTHIA_OB_PROC"),
+            Vec::<String>::new()
+        );
+        let mut f = program::ProgramDef::new(ObjectType::Function);
+        f.name = "pythia_ob_func".into();
+        let src = program::sources(&owner, &f).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src[0], "PYTHIA_OB_FUNC"),
+            Vec::<String>::new()
+        );
+        let mut pkg = program::ProgramDef::new(ObjectType::Package);
+        pkg.name = "pythia_ob_pkg".into();
+        pkg.subprograms = vec![
+            program::Subprogram {
+                function: false,
+                name: "start_job".into(),
+                params: p.subprograms[0].params.clone(),
+                returns: String::new(),
+            },
+            program::Subprogram {
+                function: true,
+                name: "status_of".into(),
+                params: Vec::new(),
+                returns: "varchar2".into(),
+            },
+        ];
+        let src = program::sources(&owner, &pkg).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src[0], "PYTHIA_OB_PKG"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            compile(&conn, &owner, &src[1], "PYTHIA_OB_PKG"),
+            Vec::<String>::new()
+        );
+
+        // Types: an object type and collections of it.
+        let mut ty = type_def::TypeDef::new();
+        ty.name = "pythia_ob_obj_t".into();
+        ty.attributes.push(type_def::Attribute {
+            name: "label".into(),
+            data_type: "varchar2(100)".into(),
+        });
+        ty.not_final = true;
+        let src = type_def::source(&owner, &ty).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src, "PYTHIA_OB_OBJ_T"),
+            Vec::<String>::new()
+        );
+        let list = type_def::TypeDef {
+            name: "pythia_ob_list_t".into(),
+            kind: type_def::TypeKind::Table,
+            element: "pythia_ob_obj_t".into(),
+            ..type_def::TypeDef::new()
+        };
+        let src = type_def::source(&owner, &list).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src, "PYTHIA_OB_LIST_T"),
+            Vec::<String>::new()
+        );
+        let array = type_def::TypeDef {
+            name: "pythia_ob_array_t".into(),
+            kind: type_def::TypeKind::Varray,
+            element: "number".into(),
+            limit: 5,
+            ..type_def::TypeDef::new()
+        };
+        let src = type_def::source(&owner, &array).unwrap();
+        assert_eq!(
+            compile(&conn, &owner, &src, "PYTHIA_OB_ARRAY_T"),
+            Vec::<String>::new()
+        );
+
+        let invalid: Vec<String> = names(
+            &conn,
+            "select object_type || ' ' || object_name from user_objects
+              where object_name like 'PYTHIA\\_OB\\_%' escape '\\' and status <> 'VALID'",
+            &[],
+        )
+        .unwrap();
+        assert!(invalid.is_empty(), "{invalid:?}");
+        conn.execute(cleanup, &[]).unwrap();
+    }
+
+    /// A database link back to the test database (needs CREATE DATABASE
+    /// LINK, so it runs as the DBA).
+    #[test]
+    fn creates_live_link() {
+        let Some((conn, spec)) = connect("PYTHIA_TEST_DB_DBA") else {
+            return;
+        };
+        let owner = conn
+            .query_row_as::<String>("select user from dual", &[])
+            .unwrap();
+        conn.execute(
+            "begin execute immediate 'drop database link pythia_ob_link';
+             exception when others then null; end;",
+            &[],
+        )
+        .unwrap();
+        let run = |statements: Vec<String>| {
+            apply(&conn, &statements, None).unwrap_or_else(|e| {
+                panic!("{}: {}", e.statement, e.error);
+            })
+        };
+        let (cred, _) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        // The server resolves the link: its own service on the default port
+        // (the test's host and port may be a mapping into a container).
+        let service: String = conn
+            .query_row_as(
+                "select sys_context('USERENV', 'SERVICE_NAME') from dual",
+                &[],
+            )
+            .unwrap();
+        let db = format!("localhost/{service}");
+        let link = db_link::LinkDef {
+            public: false,
+            name: "pythia_ob_link".into(),
+            user: user.into(),
+            password: pw.into(),
+            using: db.clone(),
+        };
+        run(db_link::statements(None, &link).unwrap());
+        let loaded = db_link::load(&conn, &owner, "PYTHIA_OB_LINK").unwrap();
+        assert_eq!(loaded.user, user.to_lowercase());
+        assert_eq!(loaded.using, db);
+        let mut edited = loaded.clone();
+        edited.password = pw.into();
+        let s = db_link::statements(Some(&loaded), &edited).unwrap();
+        assert!(s[0].starts_with("drop database link"), "{s:?}");
+        run(s);
+        // On a session of its own: one that used the link can't drop it.
+        let (other, _) = connect("PYTHIA_TEST_DB_DBA").unwrap();
+        let one: i64 = other
+            .query_row_as("select 1 from dual@pythia_ob_link", &[])
+            .unwrap();
+        assert_eq!(one, 1);
+        drop(other);
+        conn.execute("drop database link pythia_ob_link", &[])
+            .unwrap();
+    }
+
+    /// Users and roles through the account form's SQL (needs a DBA).
+    #[test]
+    fn creates_live_accounts() {
+        let Some((conn, _)) = connect("PYTHIA_TEST_DB_DBA") else {
+            return;
+        };
+        let cleanup = "begin
+               for u in (select username from dba_users where username = 'PYTHIA_OB_USER') loop
+                 execute immediate 'drop user pythia_ob_user cascade';
+               end loop;
+               for r in (select role from dba_roles where role = 'PYTHIA_OB_ROLE') loop
+                 execute immediate 'drop role pythia_ob_role';
+               end loop;
+             end;";
+        conn.execute(cleanup, &[]).unwrap();
+        let run = |statements: Vec<String>| {
+            apply(&conn, &statements, None).unwrap_or_else(|e| {
+                panic!("{}: {}", e.statement, e.error);
+            })
+        };
+        let mut base = BaseLists::default();
+        account::lists(&conn, &mut base).unwrap();
+        assert!(base.privileges.iter().any(|p| p == "CREATE TABLE"));
+        assert!(base.roles.iter().any(|r| r == "CONNECT"));
+        assert!(base.session_privileges.iter().any(|p| p == "CREATE USER"));
+        let tablespace = base
+            .tablespaces
+            .iter()
+            .find(|t| *t == "USERS")
+            .cloned()
+            .unwrap_or_else(|| base.tablespaces[0].clone());
+
+        let mut role = account::AccountDef::new_role();
+        role.name = "pythia_ob_role".into();
+        role.privileges.insert("CREATE SESSION".into());
+        run(account::statements(None, &role).unwrap());
+        let loaded = account::load_role(&conn, "PYTHIA_OB_ROLE").unwrap();
+        assert_eq!(loaded.auth, account::Auth::None);
+        assert_eq!(loaded.privileges, role.privileges);
+
+        let mut user = account::AccountDef::new_user();
+        user.name = "pythia_ob_user".into();
+        user.password = "Pythia_ob_1".into();
+        user.default_tablespace = tablespace.clone();
+        user.quota = "10M".into();
+        user.roles.insert("PYTHIA_OB_ROLE".into());
+        user.privileges.insert("CREATE TABLE".into());
+        run(account::statements(None, &user).unwrap());
+        let loaded = account::load_user(&conn, "PYTHIA_OB_USER").unwrap();
+        assert_eq!(loaded.auth, account::Auth::Password);
+        assert_eq!(ident(&loaded.default_tablespace), tablespace);
+        assert_eq!(loaded.quota, "10M");
+        assert!(loaded.roles.contains("PYTHIA_OB_ROLE"), "{loaded:?}");
+        assert!(loaded.privileges.contains("CREATE TABLE"));
+        assert!(!loaded.locked && !loaded.expire);
+        // Nothing to do on the loaded user.
+        assert_eq!(account::statements(Some(&loaded), &loaded), Ok(Vec::new()));
+
+        let mut edited = loaded.clone();
+        edited.locked = true;
+        edited.quota = "unlimited".into();
+        edited.privileges.remove("CREATE TABLE");
+        edited.roles.clear();
+        run(account::statements(Some(&loaded), &edited).unwrap());
+        let reloaded = account::load_user(&conn, "PYTHIA_OB_USER").unwrap();
+        assert!(reloaded.locked);
+        assert_eq!(reloaded.quota, "unlimited");
+        assert!(!reloaded.privileges.contains("CREATE TABLE"));
+        assert!(reloaded.roles.is_empty(), "{reloaded:?}");
+        conn.execute(cleanup, &[]).unwrap();
     }
 }

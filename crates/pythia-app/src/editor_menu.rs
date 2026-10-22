@@ -50,6 +50,7 @@ pub fn show(
                         drop: false,
                         reveal: true,
                         member,
+                        create: false,
                     };
                     if let Some(action) = object_menu(ui, &object, &options) {
                         effects.object_actions.push((connection.clone(), action));

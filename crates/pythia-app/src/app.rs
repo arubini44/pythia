@@ -460,7 +460,9 @@ impl PythiaApp {
             connection, object, ..
         }
         | OpenRequest::Object { connection, object }
-        | OpenRequest::EditTable { connection, object } = &request
+        | OpenRequest::EditTable {
+            connection, object, ..
+        } = &request
         {
             self.browser.marks.touch(connection, object.clone());
         }
@@ -582,10 +584,36 @@ impl PythiaApp {
                     }
                 }
             }
-            OpenRequest::EditTable { connection, object } => {
+            OpenRequest::EditTable {
+                connection,
+                object,
+                tab,
+            } => {
                 self.add_doc(
                     Some(connection),
-                    DocKind::TableEditor(crate::table_editor::TableEditor::new(object)),
+                    DocKind::TableEditor(
+                        crate::table_editor::TableEditor::new(object).with_tab(tab),
+                    ),
+                );
+            }
+            OpenRequest::NewTable {
+                connection,
+                owner,
+                like,
+            } => {
+                self.add_doc(
+                    Some(connection),
+                    DocKind::TableEditor(crate::table_editor::TableEditor::create(owner, like)),
+                );
+            }
+            OpenRequest::NewProgram {
+                connection,
+                object,
+                sources,
+            } => {
+                self.add_doc(
+                    Some(connection),
+                    DocKind::Program(ProgramWindow::with_sources(object, sources)),
                 );
             }
             OpenRequest::InsertText { text } => {
@@ -749,6 +777,7 @@ impl PythiaApp {
         let connection = doc
             .and_then(|id| self.docs.get(&id))
             .and_then(|d| d.connection.clone());
+        let close = effects.close;
         for (target, request) in effects.requests {
             let target_connection = match &target {
                 Target::Connection(c) => Some(c.clone()),
@@ -866,8 +895,20 @@ impl PythiaApp {
                 .unwrap_or_default();
             self.ai_start(request, None, source, connection.clone());
         }
+        if let (Some(object), Some(name)) = (effects.changed, &connection)
+            && self.browser.connection.as_deref() == Some(name.as_str())
+        {
+            let effects = self.browser.show_changed(object);
+            self.apply_browser(effects);
+        }
         for request in effects.open {
             self.open(request);
+        }
+        if close && let Some(id) = doc {
+            if let Some(path) = self.dock.find_tab(&Tab::Doc(id)) {
+                self.dock.remove_tab(path);
+            }
+            self.close_doc(id);
         }
     }
 
@@ -1683,8 +1724,68 @@ impl PythiaApp {
 
     // ----- commands -------------------------------------------------------
 
+    /// Opens the form (or table builder) for a new object in the schema the
+    /// object browser shows, else the connection's current one.
+    fn new_object(&mut self, object_type: pythia_db::ObjectType) {
+        use pythia_db::ObjectType;
+        let Some(connection) = self.current_connection() else {
+            self.connect_dialog.show(self.last_profile.as_ref());
+            return;
+        };
+        let owner = match object_type {
+            ObjectType::User | ObjectType::Role => String::new(),
+            _ => self
+                .browser
+                .schema()
+                .filter(|_| self.browser.connection.as_deref() == Some(connection.as_str()))
+                // PUBLIC only owns synonyms and links.
+                .filter(|s| {
+                    *s != "PUBLIC"
+                        || matches!(object_type, ObjectType::Synonym | ObjectType::DatabaseLink)
+                })
+                .map(str::to_owned)
+                .or_else(|| self.conns.get(&connection).map(|c| c.current_schema()))
+                .unwrap_or_default(),
+        };
+        self.open(match object_type {
+            ObjectType::Table => OpenRequest::NewTable {
+                connection,
+                owner,
+                like: None,
+            },
+            _ => OpenRequest::EditObject {
+                connection,
+                target: crate::object_editor::EditTarget::New {
+                    owner,
+                    object_type,
+                    from: None,
+                },
+            },
+        });
+    }
+
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
         match command {
+            Command::NewTable
+            | Command::NewView
+            | Command::NewMaterializedView
+            | Command::NewSequence
+            | Command::NewSynonym
+            | Command::NewIndex
+            | Command::NewTrigger
+            | Command::NewProcedure
+            | Command::NewFunction
+            | Command::NewPackage
+            | Command::NewType
+            | Command::NewDatabaseLink
+            | Command::NewUser
+            | Command::NewRole => {
+                if let Some((_, object_type)) =
+                    Command::NEW_OBJECTS.iter().find(|(c, _)| *c == command)
+                {
+                    self.new_object(*object_type);
+                }
+            }
             Command::NewSqlWindow => {
                 let title = self.new_sql_title();
                 let connection = self.current_connection();
@@ -2629,6 +2730,15 @@ impl PythiaApp {
         egui::MenuBar::new().ui(ui, |ui| {
             bar_menu(ui, "File", |ui| {
                 item(ui, Command::NewSqlWindow);
+                ui.menu_button("New Object", |ui| {
+                    for (i, (command, _)) in Command::NEW_OBJECTS.iter().enumerate() {
+                        // Tables and views, code, then links and accounts.
+                        if matches!(i, 6 | 11) {
+                            ui.separator();
+                        }
+                        item(ui, *command);
+                    }
+                });
                 item(ui, Command::OpenFile);
                 item(ui, Command::SaveFile);
                 item(ui, Command::SaveFileAs);
@@ -3727,6 +3837,14 @@ impl PythiaApp {
         match self.docs.get_mut(&id).map(|d| &mut d.kind) {
             Some(DocKind::ObjectEditor(e)) => e,
             _ => panic!("not an object editor"),
+        }
+    }
+
+    pub fn test_table_editor(&mut self) -> &mut crate::table_editor::TableEditor {
+        let id = self.focused.expect("focused document");
+        match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+            Some(DocKind::TableEditor(e)) => e,
+            _ => panic!("not a table editor"),
         }
     }
 

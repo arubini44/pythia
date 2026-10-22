@@ -227,25 +227,7 @@ fn object_names(
 /// Foreign keys, indexes and comments of a table as statements, appended to
 /// its DDL for display (the CREATE TABLE text has none of them).
 fn table_extras(def: &TableDef) -> String {
-    let empty = TableDef {
-        name: def.name.clone(),
-        columns: def
-            .columns
-            .iter()
-            .map(|c| table::ColumnDef {
-                comment: None,
-                ..c.clone()
-            })
-            .collect(),
-        comment: None,
-        constraints: def
-            .constraints
-            .iter()
-            .filter(|c| c.kind != table::ConstraintKind::Foreign)
-            .cloned()
-            .collect(),
-        indexes: Vec::new(),
-    };
+    let empty = def.as_created();
     let diff = table::diff(def, &empty, false);
     let mut out = String::new();
     let mut statements = diff.statements;
@@ -460,25 +442,7 @@ fn create_statements(
             // CREATE TABLE has columns, PK/UK/checks; foreign keys, indexes
             // and comments come from the structural diff against that.
             if let Some(def) = source.tables.get(&key.name) {
-                let created = TableDef {
-                    name: def.name.clone(),
-                    columns: def
-                        .columns
-                        .iter()
-                        .map(|c| table::ColumnDef {
-                            comment: None,
-                            ..c.clone()
-                        })
-                        .collect(),
-                    comment: None,
-                    constraints: def
-                        .constraints
-                        .iter()
-                        .filter(|c| c.kind != table::ConstraintKind::Foreign)
-                        .cloned()
-                        .collect(),
-                    indexes: Vec::new(),
-                };
+                let created = def.as_created();
                 out.extend(table::diff(def, &created, false).statements);
             }
         }

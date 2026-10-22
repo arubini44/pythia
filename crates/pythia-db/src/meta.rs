@@ -30,6 +30,10 @@ pub enum ObjectType {
     Job,
     Library,
     Directory,
+    /// Users and roles aren't schema objects: their `ObjectRef` has an empty
+    /// owner.
+    User,
+    Role,
 }
 
 impl ObjectType {
@@ -76,6 +80,8 @@ impl ObjectType {
             ObjectType::Job => "JOB",
             ObjectType::Library => "LIBRARY",
             ObjectType::Directory => "DIRECTORY",
+            ObjectType::User => "USER",
+            ObjectType::Role => "ROLE",
         }
     }
 
@@ -105,6 +111,8 @@ impl ObjectType {
         ObjectType::Job,
         ObjectType::Library,
         ObjectType::Directory,
+        ObjectType::User,
+        ObjectType::Role,
     ];
 
     /// Folder label in the object browser.
@@ -128,6 +136,8 @@ impl ObjectType {
             ObjectType::Job => "Scheduler jobs",
             ObjectType::Library => "Libraries",
             ObjectType::Directory => "Directories",
+            ObjectType::User => "Users",
+            ObjectType::Role => "Roles",
         }
     }
 

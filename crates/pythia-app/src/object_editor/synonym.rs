@@ -44,7 +44,8 @@ pub fn statements(owner: &str, def: &SynonymDef) -> Result<Vec<String>, String> 
     if def.target_name.trim().is_empty() {
         return Err("Choose the object the synonym points to".into());
     }
-    let name = if def.public {
+    // PUBLIC's synonyms are public ones.
+    let name = if def.public || owner == "PUBLIC" {
         format!("public synonym {}", quote_ident(&ident(&def.name)))
     } else {
         format!("synonym {}", qualified(owner, &def.name))
@@ -62,7 +63,7 @@ pub fn statements(owner: &str, def: &SynonymDef) -> Result<Vec<String>, String> 
 pub fn ui(ui: &mut Ui, def: &mut SynonymDef, existing: bool, lists: &mut Lists) {
     form_grid(ui, "synonym", |ui| {
         form_row(ui, "Visibility", |ui| {
-            ui.add_enabled_ui(!existing, |ui| {
+            ui.add_enabled_ui(!existing && lists.schema != "PUBLIC", |ui| {
                 ui.radio_value(&mut def.public, false, "private");
                 ui.radio_value(&mut def.public, true, "public")
                     .on_hover_text("Visible to every user; needs CREATE PUBLIC SYNONYM");

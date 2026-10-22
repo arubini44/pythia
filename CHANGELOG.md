@@ -7,6 +7,31 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Creating objects without writing DDL (#29). The object browser's
+  right-click menu offers **New …** on every folder, a **New** submenu on
+  objects (a table like this one, an index, trigger or view on a table, a
+  synonym for an object) and **New index… / Add constraint… / New
+  trigger…** on a table's groups; File → New Object and the command palette
+  have the same, for the schema the browser shows.
+  - **Table builder**: the table editor starts empty (or as a copy of a
+    table). Columns with a type picker, primary key and identity column
+    (12c+) checkboxes, not null, default and comment; primary, unique and
+    foreign keys (referenced table picked, its key filled in) and checks
+    with names generated from the table's; indexes, with one click for
+    unindexed foreign keys; tablespace or a global temporary table. The
+    script is `CREATE TABLE` and what follows it.
+  - Forms for **materialized views** (build, refresh method and schedule,
+    query rewrite), **database links** (password hidden in the preview; a
+    change recreates the link, as `ALTER DATABASE LINK` needs a privilege
+    of its own), **users** (authentication, tablespaces, quota, profile,
+    lock, roles and system privileges) and **roles**, new and existing.
+    Users and roles are listed in the object browser.
+  - **Triggers, procedures, functions, packages and types** start from a
+    form (events and timing, parameters, return type, `AUTHID`, attributes
+    or collection type); **Open in editor** hands the source to a program
+    window, where compiling creates the unit. A package's body gets a stub
+    per subprogram. The form warns when the name exists.
+  - What was created shows up selected in the object browser.
 - Toolbar: a Debug button next to Execute (Ctrl+F9). It is enabled only
   with the cursor in an anonymous block of a connected SQL window, and when
   disabled says why; in a program window it points to Test… for a block
@@ -17,6 +42,9 @@ All notable changes to Pythia are documented here. The format follows
   says which package it is and how to get the contents.
 
 ### Changed
+- The table editor applies its script in its window (like the other
+  forms) and says which statement failed; Open in SQL window is still
+  there. It can add foreign keys, and its Null column is now Not null.
 - Auto-commit is a setting (Settings → Query, off by default) instead of a
   toolbar toggle per window. It applies to all SQL windows, including those
   already open, but never to production connections, where Commit asks
@@ -28,6 +56,8 @@ All notable changes to Pythia are documented here. The format follows
   Query. A window without an open connection can still pick one.
 
 ### Fixed
+- Generate body on a package spec with a schema (`create package hr.pkg`)
+  ended the body with `end hr.pkg;`, which doesn't compile.
 - The connection picker above a SQL window switched connections with a
   pending transaction, dropping the window's session without asking. Like
   the toolbar's menu, it now offers other connections only after a commit

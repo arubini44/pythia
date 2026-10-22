@@ -50,9 +50,17 @@ for Linux, Windows and macOS.
 - Object browser with lazy, virtualized folders, invalid markers, compile,
   drop, describe, query, test; favorites and recently opened objects;
   filters for invalid or recently changed objects; tables expand to
-  columns, indexes, constraints, triggers and referencing tables.
-- Form editors for sequences, views, synonyms, indexes and grants, with a
-  preview of the generated DDL.
+  columns, indexes, constraints, triggers and referencing tables; users
+  and roles.
+- Create objects from the browser's right-click menu (or File → New
+  Object): a table builder (columns with a type picker, primary and
+  foreign keys, checks, indexes, identity columns, temporary tables, a copy
+  of another table), and forms for views, materialized views, sequences,
+  synonyms, indexes, database links, users and roles, with a preview of the
+  generated DDL. Triggers, procedures, functions, packages and types start
+  from a form that writes their first source for a program window.
+- Form editors for existing sequences, views, materialized views, synonyms,
+  indexes, database links, users, roles and grants.
 - Program windows with spec and body, compile with clickable errors
   (gutter markers and squiggles), unsaved-change tracking, save to file.
 - **Test…** generates a ready-to-run block for any procedure or function

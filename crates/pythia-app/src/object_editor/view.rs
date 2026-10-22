@@ -6,7 +6,7 @@ use pythia_db::DbError;
 use pythia_db::oracle::Connection;
 
 use super::{form_grid, form_row, name_field, qualified};
-use crate::documents::quote_ident;
+use crate::documents::{ObjectRef, quote_ident};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ViewDef {
@@ -121,6 +121,33 @@ pub fn statements(owner: &str, def: &ViewDef) -> Result<Vec<String>, String> {
     )])
 }
 
+/// A query of all columns of `from`, for a view on it in `owner`'s schema.
+pub fn query_on(owner: &str, from: &ObjectRef, columns: &[String]) -> String {
+    let name = |n: &str| {
+        let q = quote_ident(n);
+        if q.starts_with('"') {
+            q
+        } else {
+            q.to_lowercase()
+        }
+    };
+    let table = if from.owner == owner {
+        name(&from.name)
+    } else {
+        format!("{}.{}", name(&from.owner), name(&from.name))
+    };
+    let list = if columns.is_empty() {
+        "*".to_owned()
+    } else {
+        columns
+            .iter()
+            .map(|c| name(c))
+            .collect::<Vec<_>>()
+            .join(",\n       ")
+    };
+    format!("select {list}\n  from {table}")
+}
+
 /// The form above the query editor (which the document draws).
 pub fn ui(ui: &mut Ui, def: &mut ViewDef, existing: bool) {
     form_grid(ui, "view", |ui| {
@@ -168,6 +195,21 @@ mod tests {
             split_clause("select 'with read only' x from dual"),
             ("select 'with read only' x from dual", None)
         );
+    }
+
+    #[test]
+    fn queries_tables() {
+        let table = ObjectRef {
+            owner: "HR".into(),
+            name: "EMP".into(),
+            object_type: pythia_db::ObjectType::Table,
+        };
+        let columns = ["ID".to_owned(), "Name".to_owned()];
+        assert_eq!(
+            query_on("HR", &table, &columns),
+            "select id,\n       \"Name\"\n  from emp"
+        );
+        assert_eq!(query_on("APP", &table, &[]), "select *\n  from hr.emp");
     }
 
     #[test]

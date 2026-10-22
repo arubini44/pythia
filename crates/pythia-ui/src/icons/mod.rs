@@ -185,6 +185,7 @@ impl Icon {
             "DIRECTORY" => Icon::Folder,
             "LIBRARY" => Icon::Package,
             "USER" | "SCHEMA" => Icon::Schema,
+            "ROLE" => Icon::Lock,
             "COLUMN" => Icon::Column,
             "CONSTRAINT" => Icon::Constraint,
             _ => return None,
