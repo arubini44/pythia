@@ -1862,25 +1862,27 @@ fn object_editors() {
     let mut h = harness(false);
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
+    // PYTHIA_OEU_, not PYTHIA_OE_: the unit test `edits_live_objects`
+    // drops those, and runs at the same time.
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
         text: "begin
   for o in (select object_name, object_type from user_objects
-             where object_name like 'PYTHIA\\_OE\\_%' escape '\\'
+             where object_name like 'PYTHIA\\_OEU\\_%' escape '\\'
                and object_type in ('TABLE', 'VIEW', 'SEQUENCE', 'SYNONYM')) loop
     execute immediate 'drop ' || o.object_type || ' ' || o.object_name
       || case o.object_type when 'TABLE' then ' purge' end;
   end loop;
 end;
 /
-create table pythia_oe_orders (order_id number primary key, customer varchar2(40) not null,
+create table pythia_oeu_orders (order_id number primary key, customer varchar2(40) not null,
   status varchar2(10), ordered_at date default sysdate not null);
-create index pythia_oe_orders_ix on pythia_oe_orders (customer, ordered_at desc);
-create or replace view pythia_oe_open_orders as
-  select order_id, customer, ordered_at from pythia_oe_orders where status = 'OPEN'
+create index pythia_oeu_orders_ix on pythia_oeu_orders (customer, ordered_at desc);
+create or replace view pythia_oeu_open_orders as
+  select order_id, customer, ordered_at from pythia_oeu_orders where status = 'OPEN'
   with check option;
-create synonym pythia_oe_ord for pythia_oe_orders;
-grant select, insert on pythia_oe_orders to public;"
+create synonym pythia_oeu_ord for pythia_oeu_orders;
+grant select, insert on pythia_oeu_orders to public;"
             .into(),
         run: true,
     });
@@ -1912,7 +1914,7 @@ grant select, insert on pythia_oe_orders to public;"
         let d = d
             .downcast_mut::<crate::object_editor::SequenceDef>()
             .unwrap();
-        d.name = "pythia_oe_invoice_seq".into();
+        d.name = "pythia_oeu_invoice_seq".into();
         d.start = "1000".into();
         d.cache = 50;
     });
@@ -1923,18 +1925,21 @@ grant select, insert on pythia_oe_orders to public;"
     wait_until(&mut h, "apply", |app| !app.test_focused_busy());
     let editor = h.state_mut().test_object_editor();
     assert_eq!(editor.outcome(), Some(("Applied", true)));
-    assert_eq!(editor.title(), "pythia_oe_invoice_seq (sequence)");
+    assert_eq!(editor.title(), "pythia_oeu_invoice_seq (sequence)");
     // Reloaded from the database: nothing left to apply.
     assert_eq!(editor.statements_for_test(), Ok(Vec::new()));
     save(&mut h, "editor-sequence");
 
     open(
         &mut h,
-        EditTarget::Edit(object("PYTHIA_OE_OPEN_ORDERS", pythia_db::ObjectType::View)),
+        EditTarget::Edit(object(
+            "PYTHIA_OEU_OPEN_ORDERS",
+            pythia_db::ObjectType::View,
+        )),
     );
     h.state_mut().test_object_editor().edit_for_test(|d| {
         let d = d.downcast_mut::<crate::object_editor::ViewDef>().unwrap();
-        d.query = "select order_id, customer, ordered_at, status\n  from pythia_oe_orders\n where status in ('OPEN', 'HOLD')".into();
+        d.query = "select order_id, customer, ordered_at, status\n  from pythia_oeu_orders\n where status in ('OPEN', 'HOLD')".into();
     });
     h.run_steps(3);
     save(&mut h, "editor-view");
@@ -1947,13 +1952,13 @@ grant select, insert on pythia_oe_orders to public;"
 
     open(
         &mut h,
-        EditTarget::Edit(object("PYTHIA_OE_ORD", pythia_db::ObjectType::Synonym)),
+        EditTarget::Edit(object("PYTHIA_OEU_ORD", pythia_db::ObjectType::Synonym)),
     );
     save(&mut h, "editor-synonym");
 
     open(
         &mut h,
-        EditTarget::Edit(object("PYTHIA_OE_ORDERS_IX", pythia_db::ObjectType::Index)),
+        EditTarget::Edit(object("PYTHIA_OEU_ORDERS_IX", pythia_db::ObjectType::Index)),
     );
     h.run_steps(3);
     wait_until(&mut h, "columns", |app| !app.test_focused_busy());
@@ -1961,7 +1966,7 @@ grant select, insert on pythia_oe_orders to public;"
 
     open(
         &mut h,
-        EditTarget::Grants(object("PYTHIA_OE_ORDERS", pythia_db::ObjectType::Table)),
+        EditTarget::Grants(object("PYTHIA_OEU_ORDERS", pythia_db::ObjectType::Table)),
     );
     save(&mut h, "editor-grants");
     assert!(
@@ -1974,10 +1979,10 @@ grant select, insert on pythia_oe_orders to public;"
 
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
-        text: "drop synonym pythia_oe_ord;
-drop view pythia_oe_open_orders;
-drop sequence pythia_oe_invoice_seq;
-drop table pythia_oe_orders purge;"
+        text: "drop synonym pythia_oeu_ord;
+drop view pythia_oeu_open_orders;
+drop sequence pythia_oeu_invoice_seq;
+drop table pythia_oeu_orders purge;"
             .into(),
         run: true,
     });
