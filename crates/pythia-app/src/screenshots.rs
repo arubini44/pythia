@@ -1804,3 +1804,42 @@ fn drag_object_into_editor() {
         Some("DEMO_DEPARTMENTS")
     );
 }
+
+/// Commit and Rollback follow the focused window's transaction, and never
+/// open a session just to end nothing.
+#[test]
+fn toolbar_follows_the_transaction() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "begin\n  execute immediate 'drop table pythia_toolbar_t';\nexception\n  when others then null;\nend;\n/\n\
+               create table pythia_toolbar_t (n number);\n\
+               insert into pythia_toolbar_t values (1);\n"
+            .into(),
+        run: false,
+    });
+    h.run_steps(2);
+    assert_eq!(
+        h.state().test_transaction_state(),
+        Err("No transaction in this window")
+    );
+    h.state_mut()
+        .test_command(crate::commands::Command::Rollback);
+    h.state_mut().test_command(crate::commands::Command::Commit);
+    h.run_steps(2);
+    assert!(!h.state().test_has_doc_session(), "no session opened");
+    h.state_mut().test_execute_focused();
+    wait_until(&mut h, "pending transaction", |app| {
+        app.test_transaction_state().is_ok()
+    });
+    h.state_mut()
+        .test_command(crate::commands::Command::Rollback);
+    wait_until(&mut h, "rolled back", |app| {
+        app.test_transaction_state() == Err("No transaction")
+    });
+}

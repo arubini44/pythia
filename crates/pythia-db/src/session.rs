@@ -160,6 +160,8 @@ impl Worker {
                 DbRequest::Task { id, task } => {
                     let result = task(&worker.conn);
                     worker.events.send(DbEvent::TaskDone { id, result });
+                    // Tasks (data edits, debug runs, …) can open a transaction.
+                    worker.report_transaction();
                 }
                 DbRequest::Disconnect => break,
             }
@@ -333,6 +335,11 @@ impl Worker {
             Ok(_) => {}
             Err(e) => warn!("reading dbms_output: {e}"),
         }
+        self.report_transaction();
+    }
+
+    /// Sends whether the session has an open transaction.
+    fn report_transaction(&self) {
         match self.conn.query_row_as::<Option<String>>(
             "select dbms_transaction.local_transaction_id from dual",
             &[],

@@ -1129,6 +1129,9 @@ impl PythiaApp {
                 let Some((_, name)) = self.focused_session() else {
                     return;
                 };
+                if self.transaction_state().is_err() {
+                    return;
+                }
                 if self.conns.get(&name).is_some_and(|c| c.profile.production) {
                     self.confirm = Some(Confirm {
                         action: ConfirmAction::Commit,
@@ -1406,15 +1409,44 @@ impl PythiaApp {
         self.apply(Some(id), effects);
     }
 
+    /// The focused window's own session, if it has one.
+    fn focused_doc_session(&self) -> Option<&crate::connections::DocSession> {
+        let id = self.focused?;
+        let connection = self.docs.get(&id)?.connection.as_deref()?;
+        self.conns.get(connection)?.docs.get(&id)
+    }
+
+    /// Whether Commit and Rollback apply to the focused window, or why not.
+    fn transaction_state(&self) -> Result<(), &'static str> {
+        match self.focused_doc_session() {
+            None => Err("No transaction in this window"),
+            Some(s) if s.autocommit => Err("Auto-commit is on"),
+            Some(s) if !s.pending_tx => Err("No transaction"),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// Commits or rolls back the focused window's session. A window without
+    /// a session of its own has nothing to end; none is opened for it.
     fn end_transaction(&mut self, commit: bool) {
         if let Some((id, name)) = self.focused_session()
-            && let Some(conn) = self.conns.get_mut(&name)
+            && let Some(s) = self.conns.get(&name).and_then(|c| c.docs.get(&id))
         {
-            conn.doc_session(id, &self.notify).session.send(if commit {
+            s.session.send(if commit {
                 DbRequest::Commit
             } else {
                 DbRequest::Rollback
             });
+        }
+    }
+
+    /// Moves a window to another connection (closing its old session).
+    fn rebind(&mut self, id: DocId, connection: String) {
+        self.conns.close_doc(id);
+        if let Some(doc) = self.docs.get_mut(&id) {
+            doc.connection = Some(connection);
+            let effects = doc.on_attach();
+            self.apply(Some(id), effects);
         }
     }
 
@@ -1783,76 +1815,294 @@ impl PythiaApp {
         }
     }
 
-    fn toolbar(&self, ui: &mut Ui, commands: &mut Vec<Command>) {
-        let connected = self.current_connection().is_some();
-        let focused = self.focused.and_then(|id| self.docs.get(&id));
+    /// The toolbar. Buttons follow the focused window and its session, and
+    /// say why they're disabled. Returns a connection picked for the
+    /// focused window.
+    fn toolbar(&self, ui: &mut Ui, commands: &mut Vec<Command>) -> Option<(DocId, String)> {
+        let focused_id = self.focused;
+        let focused = focused_id.and_then(|id| self.docs.get(&id));
         let running = focused.is_some_and(Document::is_busy);
         let is_sql = focused.is_some_and(|d| matches!(d.kind, DocKind::Sql(_)));
+        let is_program = focused.is_some_and(|d| matches!(d.kind, DocKind::Program(_)));
+        let connection = self.current_connection();
+        let conn = connection.as_deref().and_then(|c| self.conns.get(c));
+        let connected = conn.is_some_and(|c| c.is_connected());
+        let session = self.focused_doc_session();
+        let pending = session.is_some_and(|s| s.pending_tx);
+        let autocommit = session.is_some_and(|s| s.autocommit);
         let ctx = ui.ctx().clone();
         let tip = |c: Command| match self.keymap.shortcut(c) {
             Some(s) => format!("{} ({})", c.short_label(), ctx.format_shortcut(s)),
             None => c.short_label().to_owned(),
         };
+        let need_connection = || {
+            if connected {
+                Ok(())
+            } else {
+                Err("Not connected")
+            }
+        };
+        let mut rebind = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            let mut button =
-                |ui: &mut Ui, icon: Icon, text: &str, command: Command, enabled: bool| {
-                    let image = if icon.is_colored() {
-                        icon.image(ui)
-                    } else {
-                        icon.mono(Color32::WHITE)
-                    };
-                    let b = if text.is_empty() {
-                        egui::Button::image(image)
-                    } else {
-                        egui::Button::image_and_text(image, text)
-                    }
-                    .frame_when_inactive(false)
-                    .image_tint_follows_text_color(!icon.is_colored())
-                    .min_size(egui::vec2(28.0, 28.0));
-                    if ui
-                        .add_enabled(enabled, b)
-                        .on_hover_text(tip(command))
-                        .clicked()
-                    {
+            let button =
+                |ui: &mut Ui, icon: Icon, text: &str, command: Command, state: Result<(), &str>| {
+                    tool_button(ui, icon, text, &tip(command), state, Emphasis::Normal)
+                        .then_some(command)
+                };
+
+            // Files.
+            commands.extend(button(
+                ui,
+                Icon::NewSql,
+                "New SQL",
+                Command::NewSqlWindow,
+                Ok(()),
+            ));
+            ui.menu_button(RichText::new("⏷").small(), |ui| {
+                for command in [
+                    Command::OpenFile,
+                    Command::ReopenClosed,
+                    Command::NewSqlWindow,
+                ] {
+                    let item = egui::Button::new(command.short_label())
+                        .shortcut_text(self.keymap.shortcut_text(&ctx, command));
+                    if ui.add(item).clicked() {
                         commands.push(command);
                     }
-                };
-            button(ui, Icon::Connect, "Connect", Command::Connect, true);
-            button(ui, Icon::NewSql, "", Command::NewSqlWindow, true);
-            ui.separator();
-            button(
+                }
+            })
+            .response
+            .on_hover_text("Open a file, reopen a closed window");
+            commands.extend(button(
                 ui,
-                Icon::Execute,
-                "Execute",
-                Command::ExecuteAll,
-                connected && !running,
-            );
-            button(
+                Icon::Save,
+                "",
+                Command::SaveFile,
+                if is_sql || is_program {
+                    Ok(())
+                } else {
+                    Err("Only SQL and program windows are saved to files")
+                },
+            ));
+            ui.separator();
+
+            // The focused window's connection.
+            match conn {
+                None => {
+                    if tool_button(
+                        ui,
+                        Icon::Connect,
+                        "Connect…",
+                        &tip(Command::Connect),
+                        Ok(()),
+                        Emphasis::Primary,
+                    ) {
+                        commands.push(Command::Connect);
+                    }
+                }
+                Some(conn) => {
+                    let name = conn.name();
+                    let color =
+                        connection_color(&conn.profile).unwrap_or(ui.visuals().text_color());
+                    let (icon, label) = if conn.profile.production {
+                        (Icon::Production, format!("{name}  PRODUCTION"))
+                    } else {
+                        (Icon::Database, name.clone())
+                    };
+                    let title = (
+                        icon.image(ui),
+                        RichText::new(format!("{label}  ⏷")).color(color),
+                    );
+                    let response = egui::containers::menu::MenuButton::new(title)
+                        .ui(ui, |ui| {
+                            if is_sql && let Some(id) = focused_id {
+                                ui.weak("Connection of this window");
+                                for other in self.conns.open.keys() {
+                                    let item = ui.add_enabled(
+                                        !pending || *other == name,
+                                        egui::Button::selectable(*other == name, other),
+                                    );
+                                    let item = item.on_disabled_hover_text(
+                                        "Commit or roll back this window's transaction first",
+                                    );
+                                    if item.clicked() && *other != name {
+                                        rebind = Some((id, other.clone()));
+                                    }
+                                }
+                                ui.separator();
+                            }
+                            for (command, text) in [
+                                (Command::Connect, "Connect…".to_owned()),
+                                (Command::Disconnect, format!("Disconnect {name}")),
+                            ] {
+                                let item = egui::Button::new(text)
+                                    .shortcut_text(self.keymap.shortcut_text(&ctx, command));
+                                if ui.add(item).clicked() {
+                                    commands.push(command);
+                                }
+                            }
+                        })
+                        .0;
+                    let hover = match conn.server() {
+                        Some(server) => {
+                            format!("{}\nSchema {}", server.banner, server.current_schema)
+                        }
+                        None => format!("Connecting to {name}…"),
+                    };
+                    response.on_hover_text(hover);
+                }
+            }
+            ui.separator();
+
+            // Running statements, or compiling in a program window.
+            let not_running = if !is_sql && !is_program {
+                Err("This window doesn't run statements")
+            } else if running {
+                Err("Running")
+            } else {
+                need_connection()
+            };
+            if is_program {
+                let read_only = conn.is_some_and(|c| c.profile.read_only);
+                let state = if read_only {
+                    Err("The connection is read-only")
+                } else {
+                    not_running
+                };
+                if tool_button(
+                    ui,
+                    Icon::Compile,
+                    "Compile",
+                    &tip(Command::ExecuteAll).replace("Execute (selection or all)", "Compile"),
+                    state,
+                    Emphasis::Normal,
+                ) {
+                    commands.push(Command::ExecuteAll);
+                }
+            } else {
+                commands.extend(button(
+                    ui,
+                    Icon::Execute,
+                    "Execute",
+                    Command::ExecuteAll,
+                    not_running,
+                ));
+            }
+            let sql_only = |state: Result<(), &'static str>| {
+                if is_sql {
+                    state
+                } else {
+                    Err("Only in SQL windows")
+                }
+            };
+            commands.extend(button(
                 ui,
                 Icon::ExecuteCurrent,
                 "",
                 Command::ExecuteCurrent,
-                connected && !running && is_sql,
-            );
-            button(ui, Icon::Stop, "", Command::Cancel, running);
-            button(
+                sql_only(not_running),
+            ));
+            commands.extend(button(
                 ui,
                 Icon::Explain,
                 "",
                 Command::ExplainPlan,
-                connected && is_sql,
-            );
+                sql_only(if running {
+                    Err("Running")
+                } else {
+                    need_connection()
+                }),
+            ));
+            commands.extend(button(
+                ui,
+                Icon::Stop,
+                "",
+                Command::Cancel,
+                if running {
+                    Ok(())
+                } else {
+                    Err("Nothing is running")
+                },
+            ));
             ui.separator();
-            button(ui, Icon::Commit, "Commit", Command::Commit, connected);
-            button(ui, Icon::Rollback, "Rollback", Command::Rollback, connected);
+
+            // The focused window's transaction.
+            let transaction = self.transaction_state();
+            for (icon, command) in [
+                (Icon::Commit, Command::Commit),
+                (Icon::Rollback, Command::Rollback),
+            ] {
+                let emphasis = if pending {
+                    Emphasis::Warn
+                } else {
+                    Emphasis::Normal
+                };
+                if tool_button(ui, icon, "", &tip(command), transaction, emphasis) {
+                    commands.push(command);
+                }
+            }
+            let autocommit_state = if !is_sql {
+                Err("Only in SQL windows")
+            } else {
+                need_connection()
+            };
+            let toggle = ui
+                .add_enabled(
+                    autocommit_state.is_ok(),
+                    egui::Button::selectable(autocommit, "Auto-commit")
+                        .frame_when_inactive(false)
+                        .min_size(egui::vec2(28.0, 28.0)),
+                )
+                .on_hover_text(format!(
+                    "{}: {}",
+                    tip(Command::ToggleAutocommit),
+                    if autocommit { "on" } else { "off" }
+                ));
+            let toggle = match autocommit_state {
+                Err(reason) => toggle.on_disabled_hover_text(reason),
+                Ok(()) => toggle,
+            };
+            if toggle.clicked() {
+                commands.push(Command::ToggleAutocommit);
+            }
             ui.separator();
-            button(ui, Icon::History, "", Command::History, true);
-            button(ui, Icon::Search, "", Command::FindObject, connected);
+
+            // Tools.
+            commands.extend(button(
+                ui,
+                Icon::Text,
+                "",
+                Command::Format,
+                if is_sql || is_program {
+                    Ok(())
+                } else {
+                    Err("Only in SQL and program windows")
+                },
+            ));
+            commands.extend(button(
+                ui,
+                Icon::Search,
+                "",
+                Command::FindObject,
+                need_connection(),
+            ));
+            commands.extend(button(
+                ui,
+                Icon::History,
+                "",
+                Command::History,
+                if is_sql {
+                    Ok(())
+                } else {
+                    Err("Recalls statements into a SQL window")
+                },
+            ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                button(ui, Icon::Palette, "", Command::ShowPalette, true);
+                commands.extend(button(ui, Icon::Palette, "", Command::ShowPalette, Ok(())));
             });
         });
+        rebind
     }
 
     fn status_bar(&self, ui: &mut Ui) {
@@ -2222,9 +2472,10 @@ impl eframe::App for PythiaApp {
                 None => self.connect_dialog.show(self.last_profile.as_ref()),
             }
         }
-        egui::Panel::top("toolbar")
+        let toolbar_rebind = egui::Panel::top("toolbar")
             .frame(theme::toolbar_frame(ui.style()))
-            .show(ui, |ui| self.toolbar(ui, &mut commands));
+            .show(ui, |ui| self.toolbar(ui, &mut commands))
+            .inner;
         egui::Panel::bottom("status")
             .frame(theme::status_frame(ui.style()))
             .show(ui, |ui| self.status_bar(ui));
@@ -2280,13 +2531,8 @@ impl eframe::App for PythiaApp {
             rebind,
             ..
         } = viewer;
-        for (id, connection) in rebind {
-            self.conns.close_doc(id);
-            if let Some(doc) = self.docs.get_mut(&id) {
-                doc.connection = Some(connection);
-                let effects = doc.on_attach();
-                self.apply(Some(id), effects);
-            }
+        for (id, connection) in rebind.into_iter().chain(toolbar_rebind) {
+            self.rebind(id, connection);
         }
         for id in closed {
             self.close_doc(id);
@@ -2499,6 +2745,14 @@ impl PythiaApp {
 
     pub fn test_debug_mut(&mut self) -> &mut pythia_debugger::ui::DebugSession {
         &mut self.debug
+    }
+
+    pub fn test_transaction_state(&self) -> Result<(), &'static str> {
+        self.transaction_state()
+    }
+
+    pub fn test_has_doc_session(&self) -> bool {
+        self.focused_doc_session().is_some()
     }
 
     pub fn test_debug_running(&self) -> bool {
@@ -2839,6 +3093,62 @@ fn load_or_default<T: serde::de::DeserializeOwned + Default>(path: &std::path::P
         error!("{e:#}");
         T::default()
     })
+}
+
+/// How much a toolbar button stands out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Emphasis {
+    Normal,
+    /// The main action when nothing else applies (e.g. Connect…).
+    Primary,
+    /// Needs attention (e.g. Commit with a pending transaction).
+    Warn,
+}
+
+/// A toolbar button with an icon and an optional label, frameless unless
+/// emphasized. `state` says why it's disabled; disabled buttons are dimmed,
+/// colored icons included. Returns whether it was clicked.
+fn tool_button(
+    ui: &mut Ui,
+    icon: Icon,
+    text: &str,
+    tip: &str,
+    state: Result<(), &str>,
+    emphasis: Emphasis,
+) -> bool {
+    let enabled = state.is_ok();
+    let mut image = match (icon.is_colored(), emphasis) {
+        (_, Emphasis::Warn) => icon.mono(theme::WARN),
+        (true, _) => icon.image(ui),
+        (false, _) => icon.mono(Color32::WHITE),
+    };
+    if !enabled {
+        image = image.tint(Color32::from_white_alpha(90));
+    }
+    let label = match emphasis {
+        Emphasis::Normal => RichText::new(text),
+        Emphasis::Primary => RichText::new(text).strong(),
+        Emphasis::Warn => RichText::new(text).color(theme::WARN).strong(),
+    };
+    let mut b = if text.is_empty() {
+        egui::Button::image(image)
+    } else {
+        egui::Button::image_and_text(image, label)
+    }
+    .image_tint_follows_text_color(!icon.is_colored() && emphasis != Emphasis::Warn)
+    .min_size(egui::vec2(28.0, 28.0));
+    b = match emphasis {
+        Emphasis::Normal => b.frame_when_inactive(false),
+        Emphasis::Primary => b,
+        Emphasis::Warn => b.stroke(egui::Stroke::new(1.0, theme::WARN)),
+    };
+    let response = ui.add_enabled(enabled, b).on_hover_text(tip);
+    match state {
+        Err(reason) => response
+            .on_disabled_hover_text(format!("{tip}\n{reason}"))
+            .clicked(),
+        Ok(()) => response.clicked(),
+    }
 }
 
 fn connection_color(profile: &ConnectionProfile) -> Option<Color32> {

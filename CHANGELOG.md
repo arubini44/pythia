@@ -6,6 +6,15 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Toolbar: follows the focused window. Commit and Rollback are only enabled
+  with a pending transaction (and then stand out), never open a session,
+  and say when auto-commit is on; Execute becomes Compile in program windows
+  and is disabled where nothing runs; disabled buttons say why. New: a
+  labelled New SQL button with Open file/Reopen closed, Save, a connection
+  selector (switch this window's connection, connect, disconnect), an
+  auto-commit toggle and Format.
+
 ### Added
 - Debugger: step through the debugged block itself (it now has debug
   information), and stepping out of the outermost unit continues there; the
