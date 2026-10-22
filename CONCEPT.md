@@ -49,23 +49,26 @@ written in Rust with `egui` on the `wgpu` renderer.
 ```
 pythia/
 ├── crates/
-│   ├── pythia-app          # eframe entry point, window, docking layout, command palette
-│   ├── pythia-ui           # reusable widgets: code editor, data grid, tree view, diff view
+│   ├── pythia-app          # eframe entry point, docking layout, documents, commands, dialogs, code and data search
+│   ├── pythia-ui           # reusable widgets: code editor, data grid, icon set
 │   ├── pythia-db           # connection mgmt, sessions, query execution, metadata queries
 │   ├── pythia-plsql        # lexer, parser, AST, symbol tables, formatter
 │   ├── pythia-lsp-core     # completion, hover, go-to-definition, diagnostics (no UI)
-│   ├── pythia-debugger     # DBMS_DEBUG_JDWP / DBMS_DEBUG client, debug session state machine
-│   ├── pythia-data         # import/export, data compare, data generator
-│   ├── pythia-compare      # schema/DDL compare and sync script generation
-│   ├── pythia-search       # code search index, data search
+│   ├── pythia-debugger     # DBMS_DEBUG_JDWP client, debug session state machine, panel
+│   ├── pythia-data         # import/export
+│   ├── pythia-compare      # schema/DDL and data compare, sync script generation
+│   ├── pythia-monitor      # dashboard, sessions, AWR/ASH, trace analyzer
+│   ├── pythia-ai           # AI backends, prompts, data policy
 │   └── pythia-config       # settings, profiles, keybindings, themes
-└── tests/                # integration tests against Oracle Free container
 ```
+
+Integration tests against an Oracle Free container live with the crates
+(`crates/*/tests`, and modules' own tests); they skip without `PYTHIA_TEST_DB`.
 
 ### Core principles
 
 - [x] UI thread never blocks: every DB call runs in a worker task, the UI gets messages over channels (`DbRequest` / `DbEvent`)
-- [ ] Each editor tab can own a **dedicated session** or share one (like PL/SQL Developer's session modes: multi-session, dual-session, single-session)
+- [ ] Each editor tab can own a **dedicated session** or share one (like PL/SQL Developer's session modes: multi-session, dual-session, single-session) (each window has a session of its own; no sharing)
 - [x] Every long-running operation can be cancelled (`OCIBreak` / `Connection::break_execution`)
 - [ ] Metadata cache per connection with incremental refresh (based on `LAST_DDL_TIME`)
 - [x] Command pattern for all user actions, so we get keybindings, the command palette and macros from one place
@@ -113,11 +116,11 @@ pythia/
 - [x] Wallet / external authentication (`/@alias`)
 - [x] Connect as SYSDBA / SYSOPER / SYSBACKUP
 - [x] Proxy user connect (`user[proxy]`)
-- [x] Saved connections organized in folders, with colors and tags (e.g. red = production)
+- [x] Saved connections organized in folders, with colors and tags (e.g. red = production) (no tags; a production flag instead)
 - [x] Passwords in the OS keychain (`keyring`), never in plain text
 - [x] Production safety flags: read-only mode, confirm on commit, confirm DML/DDL
 - [x] Multiple simultaneous connections
-- [ ] Session modes: multi-session / dual-session / single-session
+- [ ] Session modes: multi-session / dual-session / single-session (multi-session only)
 - [x] Connection health check, auto-reconnect prompt (lost sessions are detected on errors and replaced on the next statement; no periodic ping or prompt)
 - [x] Set NLS settings, `CURRENT_SCHEMA`, module/action/client info on connect (`CURRENT_SCHEMA` per connection, NLS via the login script, module set to `pythia`; no action/client info)
 - [x] Login script per connection (like `login.sql`)
@@ -129,17 +132,17 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 - [x] Rope-backed buffer (`ropey`) with undo/redo history (grouped edits)
 - [x] Virtualized rendering (only visible lines laid out), smooth scrolling
-- [x] Line numbers, gutter with markers (breakpoints, errors, bookmarks, folding) (no folding markers; a bookmark marker kind exists but bookmarks aren't implemented)
+- [x] Line numbers, gutter with markers (breakpoints, errors, bookmarks, folding)
 - [x] Multi-cursor and column/block selection (Alt+drag)
-- [ ] Code folding (blocks, `BEGIN/END`, `IF`, `LOOP`, `CASE`, comments)
+- [x] Code folding (blocks, `BEGIN/END`, `IF`, `LOOP`, `CASE`, comments)
 - [x] Bracket and keyword matching (`BEGIN`↔`END`, `IF`↔`END IF`)
 - [x] Find/replace in file with regex, whole word, case sensitivity, in-selection
-- [ ] Go to line, bookmarks (numbered like PL/SQL Developer: Ctrl+Shift+0..9)
+- [x] Go to line, bookmarks (numbered like PL/SQL Developer: Ctrl+Shift+0..9) (Ctrl+G; numbered bookmarks 1..9, no 0)
 - [x] Auto-indent and smart tab
 - [x] Keyword case conversion (upper/lower/init cap) live or on demand (on demand: Ctrl+U / Ctrl+Shift+U on selection or word, formatter keyword case; no init cap, no live conversion)
 - [x] Comment/uncomment selection
 - [ ] Minimap (optional)
-- [x] Whitespace / EOL visualization
+- [x] Whitespace / EOL visualization (spaces and tabs; no EOL markers, the line ending is in the status bar)
 - [x] Encoding support (UTF-8, Windows-1252, ...) and line ending detection
 - [ ] Large file mode (>50MB): reduced features, still responsive
 - [ ] Split view of the same buffer
@@ -163,12 +166,12 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
   - [x] Procedure parameter hints (signature help)
 - [x] Hover info: object type, column datatype, parameter list, comments
 - [x] Go to definition (Ctrl+click), including into package bodies on the DB
-- [x] Find references within the file and across the schema (via `ALL_IDENTIFIERS` / PL/Scope when enabled) (within the file only, Shift+F12; no schema-wide search via PL/Scope)
-- [x] Live diagnostics: parse errors, unknown identifiers (optional)
-- [x] Hyperlinks for object names (open in object browser) (Ctrl+hover link, Ctrl+click opens the object's window; doesn't reveal it in the object browser)
-- [x] Code templates / snippets with placeholders (`sel` → `SELECT * FROM ...`) (built-in snippets with a caret position; no tab-stop placeholders, no user-defined templates)
+- [x] Find references within the file and across the schema (via `ALL_IDENTIFIERS` / PL/Scope when enabled) (within the file and across a program window's spec and body, Shift+F12; no schema-wide search via PL/Scope)
+- [x] Live diagnostics: parse errors, unknown identifiers (optional) (parse errors only; no unknown identifiers)
+- [x] Hyperlinks for object names (open in object browser) (Ctrl+hover link, Ctrl+click opens the object's window; the context menu's Show in object browser reveals it)
+- [x] Code templates / snippets with placeholders (`sel` → `SELECT * FROM ...`) (built-in snippets with tab stops; no user-defined templates)
 - [x] Code formatter (PL/SQL Beautifier equivalent) with configurable rules
-- [x] Code assistant settings: delay, case, min chars
+- [x] Code assistant settings: delay, case, min chars (no case setting; completions follow the typed case)
 
 ### 5.5 SQL Window (M1)
 
@@ -179,7 +182,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Execution timing, rows affected, DBMS_OUTPUT capture
 - [x] Cancel running statement
 - [x] Auto-commit setting (never on production connections), commit/rollback buttons, pending transaction indicator
-- [x] Warn on closing with an open transaction
+- [x] Warn on closing with an open transaction (on exit and disconnect; closing a window drops its transaction without asking, #35)
 - [x] Query history per connection (searchable, persisted)
 - [x] Fetch modes: first N rows, fetch next page, fetch all
 - [x] "Execute to file" for huge results
@@ -189,7 +192,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.6 Result Grid / Data Grid (M1/M5)
 
 - [x] Virtualized grid for millions of rows (row and column virtualization) (rows only; columns are not virtualized)
-- [ ] Column resize, reorder, hide, freeze
+- [x] Column resize, reorder, hide, freeze (resize and hide; no reorder or freeze)
 - [x] Sort and filter client-side; option to push sort/filter into SQL (no push of sort/filter into SQL)
 - [x] Data type aware rendering: NULL distinct, dates per NLS format, numbers aligned right
 - [x] LOB viewers: CLOB text, BLOB hex/image, XMLType, JSON pretty view (no XML pretty view)
@@ -198,7 +201,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Cell editors per type (date picker, number, LOB editor dialog) (dialog with calendar for dates and multi-line text; numbers inline)
 - [x] Copy as: TSV, CSV, INSERT statements, Markdown, JSON, with headers
 - [x] Paste from clipboard into grid (Excel ranges)
-- [x] Cell, row, and column selection; aggregates of selection (sum, count, avg, min, max) in the status bar
+- [x] Cell, row, and column selection; aggregates of selection (sum, count, avg, min, max) in the status bar (no whole-column selection)
 - [x] Find in grid (quick filter shows matching rows; no find next/previous)
 - [x] Highlight changed cells before commit
 - [x] Foreign key navigation: jump to parent/child rows
@@ -211,8 +214,8 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Compile with debug info (`PLSQL_OPTIMIZE_LEVEL`, `ALTER ... COMPILE DEBUG`)
 - [x] Show compiler warnings (`PLSQL_WARNINGS`) (warnings Oracle reports are shown; no setting to enable `PLSQL_WARNINGS` categories)
 - [x] Detect when the DB version changed since it was opened (conflict warning)
-- [x] Save to file / load from file
-- [x] Recompile invalid objects (schema-wide, dependency order) (`DBMS_UTILITY.COMPILE_SCHEMA` per schema from the object browser)
+- [x] Save to file / load from file (save only; files open in SQL windows)
+- [x] Recompile invalid objects (schema-wide, dependency order) (Invalid objects window: dependency order over several sessions, progress, cancel; `UTL_RECOMP` for SYSDBA)
 
 ### 5.8 Test Window (M4/M6)
 
@@ -225,7 +228,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.9 Command Window (M5)
 
 - [ ] SQL*Plus-like command window
-- [ ] Support common SQL*Plus commands: `SET`, `SHOW`, `DESC`, `SPOOL`, `PROMPT`, `DEFINE`, `@`, `@@`, `EXEC`, `VAR`, `PRINT`, `CONNECT`, `WHENEVER`
+- [x] Support common SQL*Plus commands: `SET`, `SHOW`, `DESC`, `SPOOL`, `PROMPT`, `DEFINE`, `@`, `@@`, `EXEC`, `VAR`, `PRINT`, `CONNECT`, `WHENEVER` (in SQL windows: `@`, `@@`, `EXEC`, `PROMPT`, `DEFINE`, `DESC`, `SET DEFINE`, `WHENEVER SQLERROR`; no `SHOW`, `SPOOL`, `VAR`, `PRINT`, `CONNECT`)
 - [x] Run deployment scripts with progress and stop-on-error (in SQL windows; no dedicated command window)
 - [ ] Spool output to file
 
@@ -236,10 +239,10 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] "My objects" / all schemas / filter by schema
 - [x] Filters: name pattern, status (invalid), modified since, custom saved filters (no saved filters)
 - [x] Invalid objects highlighted
-- [x] Context menu: view, edit, compile, drop, rename, describe, query data, generate DDL, copy name, grant (no rename or grant)
+- [x] Context menu: view, edit, compile, drop, rename, describe, query data, generate DDL, copy name, grant (no rename)
 - [x] New objects from the context menu (folders, objects, a table's indexes/constraints/triggers, users and roles) and File → New Object
 - [x] Expand table → columns, indexes, constraints, triggers, FKs, references-by
-- [x] Expand package → procedures/functions with parameters (outline from parser)
+- [x] Expand package → procedures/functions with parameters (members from the dictionary)
 - [x] Dependencies view (uses / used by)
 - [x] Drag object name into the editor (with options: name, `SELECT`, column list, call template) (names of objects and columns; templates via Generate)
 - [x] Recent objects and favorites
@@ -248,7 +251,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.11 Object Editors (M3/M5)
 
-- [x] View and generate DDL (`DBMS_METADATA`) with options (storage, tablespace, constraints)
+- [x] View and generate DDL (`DBMS_METADATA`) with options (storage, tablespace, constraints) (no options: always without storage and tablespace clauses)
 - [x] Table editor: columns, keys, indexes, checks, comments, partitions → generates `ALTER` script (no partitions)
 - [x] Table builder: new tables (columns, primary/unique/foreign keys, checks, indexes, identity columns, temporary tables, copy of a table) → `CREATE TABLE` script, applied in the window
 - [x] Sequence, synonym, view, materialized view, index, database link, user, role editors
@@ -277,7 +280,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.13 Code Search (M8)
 
-- [x] Search source across schemas (`ALL_SOURCE`) with regex, case, whole word
+- [x] Search source across schemas (`ALL_SOURCE`) with regex, case, whole word (no whole word option)
 - [x] Filter by object type, schema, name pattern
 - [x] Also search views (`ALL_VIEWS.TEXT`), triggers, job definitions
 - [x] Results grouped by object with line context; click → open at line
@@ -297,12 +300,12 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.15 Data Compare (M7)
 
 - [x] Compare tables between two connections/schemas (same or different DB)
-- [x] Key selection: PK, unique key, or user-defined columns
+- [x] Key selection: PK, unique key, or user-defined columns (PK or typed columns; no unique key picker)
 - [ ] Column mapping and exclusion
-- [x] Row-level diff: only in source, only in target, different (cell-level highlight)
+- [x] Row-level diff: only in source, only in target, different (cell-level highlight) (changed cells listed as key, column, source and target)
 - [x] Filters (WHERE clause per table)
 - [x] Streamed comparison of sorted sets for large tables (avoid loading everything into memory)
-- [x] Generate sync script (INSERT/UPDATE/DELETE) or apply directly
+- [x] Generate sync script (INSERT/UPDATE/DELETE) or apply directly (opens in a SQL window to run; no direct apply)
 - [ ] Save compare profiles
 
 ### 5.16 Schema / Object Compare (M7)
@@ -315,7 +318,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.17 Data Export (M5)
 
-- [x] Export query result or tables to CSV, TSV, XLSX, JSON, XML, HTML, Markdown, SQL INSERT statements
+- [x] Export query result or tables to CSV, TSV, XLSX, JSON, XML, HTML, Markdown, SQL INSERT statements (no XML)
 - [x] Export tables tool: multiple tables, WHERE per table, include DDL
 - [x] Options: delimiter, quoting, header, date/number formats, NULL representation, encoding (delimiter, header, NULL text; UTF-8 only)
 - [x] Streaming export (no full result in memory) (Execute to file)
@@ -325,11 +328,11 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 ### 5.18 Data Import (M5)
 
-- [x] Import from CSV/TSV, XLSX, JSON
+- [x] Import from CSV/TSV, XLSX, JSON (also XLS and ODS; no JSON)
 - [x] Preview with detected types; column mapping to target table
 - [x] Create target table from file structure
 - [x] Transformations: trim, date format, constant values, SQL expressions
-- [x] Batch inserts via array DML, configurable commit interval
+- [x] Batch inserts via array DML, configurable commit interval (one commit at the end, optional; no interval)
 - [x] Error handling: stop, skip row, log bad rows to file
 - [ ] Run SQL scripts as import (large `INSERT` scripts)
 - [ ] Optional: SQL*Loader control file generation
@@ -382,7 +385,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [ ] Plugin API (WASM via `wasmtime` or Lua via `mlua`)
 - [ ] User-defined tools (external commands with variables like `$OBJECT`, `$FILE`)
 - [ ] Custom menu entries and toolbar buttons
-- [ ] Optional AI assistant integration (explain SQL, generate queries) – opt-in, never sends data without consent
+- [x] Optional AI assistant integration (explain SQL, generate queries) – opt-in, never sends data without consent (result rows and bind values only when allowed in Settings → AI)
 
 ---
 
@@ -422,7 +425,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ## 7. Risks & Open Questions
 
 - [x] **Debugger protocol**: `DBMS_DEBUG` is deprecated, `DBMS_DEBUG_JDWP` needs a JDWP client implementation and network ACLs. Spike both early (before M6) to check feasibility
-- [ ] **Instant Client dependency**: `oracle` crate needs ODPI-C + Instant Client. Is a pure-Rust thin driver (TNS protocol) worth it long-term?
+- [ ] **Instant Client dependency**: `oracle` crate needs ODPI-C + Instant Client. Is a pure-Rust thin driver (TNS protocol) worth it long-term? (spiked: `--features pythia-db/thin` runs on the pure-Rust `oracledb` crate; no cancel, external authentication or proxy yet)
 - [x] **Editor widget effort**: a custom high-quality code editor in egui is a big task. Evaluate existing crates (`egui_code_editor`, `egui-textedit` extensions) vs building our own
 - [x] **PL/SQL grammar coverage**: the grammar is huge; aim for a "good enough" error-tolerant parser for outline, completion, and navigation rather than a full validating parser
 - [ ] **egui text rendering**: check font fallback, CJK, and subpixel quality on all platforms
