@@ -1164,6 +1164,9 @@ pub enum ConfirmAction {
     },
     Disconnect(String),
     Quit,
+    /// Close windows with an open transaction: committed (yes) or rolled
+    /// back (other) first.
+    CloseWindows(Vec<DocId>),
 }
 
 pub struct Confirm {
@@ -1171,10 +1174,20 @@ pub struct Confirm {
     pub title: String,
     pub text: String,
     pub yes: &'static str,
+    /// Another way to go ahead, e.g. rolling back instead of committing.
+    pub other: Option<&'static str>,
 }
 
-/// Shows the confirmation; returns `Some(true)` on yes, `Some(false)` on no.
-pub fn confirm_ui(ctx: &egui::Context, confirm: &Confirm) -> Option<bool> {
+/// What the user chose in a confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    Yes,
+    Other,
+    Cancel,
+}
+
+/// Shows the confirmation until the user chooses.
+pub fn confirm_ui(ctx: &egui::Context, confirm: &Confirm) -> Option<Answer> {
     let mut answer = None;
     let modal = egui::Modal::new(egui::Id::new("confirm")).show(ctx, |ui| {
         ui.set_max_width(400.0);
@@ -1184,15 +1197,20 @@ pub fn confirm_ui(ctx: &egui::Context, confirm: &Confirm) -> Option<bool> {
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui.button(RichText::new(confirm.yes).strong()).clicked() {
-                answer = Some(true);
+                answer = Some(Answer::Yes);
+            }
+            if let Some(other) = confirm.other
+                && ui.button(other).clicked()
+            {
+                answer = Some(Answer::Other);
             }
             if ui.button("Cancel").clicked() {
-                answer = Some(false);
+                answer = Some(Answer::Cancel);
             }
         });
     });
     if modal.should_close() && answer.is_none() {
-        answer = Some(false);
+        answer = Some(Answer::Cancel);
     }
     answer
 }

@@ -182,7 +182,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Execution timing, rows affected, DBMS_OUTPUT capture
 - [x] Cancel running statement
 - [x] Auto-commit setting (never on production connections), commit/rollback buttons, pending transaction indicator
-- [x] Warn on closing with an open transaction (on exit and disconnect; closing a window drops its transaction without asking, #35)
+- [x] Warn on closing with an open transaction
 - [x] Query history per connection (searchable, persisted)
 - [x] Fetch modes: first N rows, fetch next page, fetch all
 - [x] "Execute to file" for huge results

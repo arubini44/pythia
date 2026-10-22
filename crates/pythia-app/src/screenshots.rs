@@ -2541,6 +2541,84 @@ fn grid_columns() {
     assert_eq!(names, ["ID", "CREATED", "NAME_COL", "AMOUNT"]);
 }
 
+/// Closing a window with an uncommitted transaction asks first: Cancel
+/// keeps it, Roll back and close or Commit and close end it (#35).
+#[test]
+fn close_with_open_transaction() {
+    use crate::commands::Command;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let run = |h: &mut Harness<'_, PythiaApp>, text: &str| {
+        h.state_mut().test_open(OpenRequest::Sql {
+            connection: "pythia@FREEPDB1".into(),
+            text: text.into(),
+            run: true,
+        });
+        wait_until(h, text, |app| !app.test_focused_busy());
+    };
+    run(
+        &mut h,
+        "begin execute immediate 'drop table pythia_ctx_t purge';
+  exception when others then null; end;
+/
+create table pythia_ctx_t (id number);",
+    );
+    // What another session sees, once it's there.
+    let count = |h: &mut Harness<'_, PythiaApp>, expected: &str| {
+        let start = Instant::now();
+        loop {
+            run(h, "select count(*) from pythia_ctx_t");
+            let seen = h.state().test_sql_window_ref().unwrap().state.results[0].rows[0][0]
+                .clone()
+                .unwrap_or_default();
+            h.state_mut().test_command(Command::CloseTab);
+            h.run_steps(2);
+            if seen == expected || start.elapsed() > Duration::from_secs(10) {
+                return seen;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+
+    run(&mut h, "insert into pythia_ctx_t values (1)");
+    let window = h.state().test_focused();
+    assert!(h.state().test_pending_tx());
+    h.state_mut().test_command(Command::CloseTab);
+    h.run_steps(2);
+    assert!(h.query_by_label("Commit and close").is_some());
+    h.get_by_label_contains("has uncommitted changes");
+    save(&mut h, "close-open-transaction");
+
+    // Cancel: the window and its transaction stay.
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert_eq!(h.state().test_focused(), window);
+    assert!(h.state().test_pending_tx());
+
+    // Roll back and close.
+    h.state_mut().test_command(Command::CloseTab);
+    h.run_steps(2);
+    h.get_by_label("Roll back and close").click();
+    h.run_steps(2);
+    assert!(!h.state().test_pending_tx());
+    assert_ne!(h.state().test_focused(), window, "closed");
+    assert_eq!(count(&mut h, "0"), "0");
+
+    // Commit and close.
+    run(&mut h, "insert into pythia_ctx_t values (2)");
+    h.state_mut().test_command(Command::CloseTab);
+    h.run_steps(2);
+    h.get_by_label("Commit and close").click();
+    h.run_steps(2);
+    assert_eq!(count(&mut h, "1"), "1");
+
+    run(&mut h, "drop table pythia_ctx_t purge");
+}
+
 /// Favorites, recently opened objects and the invalid-only filter.
 #[test]
 fn browser_marks() {

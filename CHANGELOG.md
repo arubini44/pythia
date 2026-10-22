@@ -62,6 +62,10 @@ All notable changes to Pythia are documented here. The format follows
   Query. A window without an open connection can still pick one.
 
 ### Fixed
+- Closing a SQL window with an uncommitted transaction (its tab's ×,
+  Close Window, Close Other Windows) rolled the transaction back without
+  asking. It now asks: Commit and close, Roll back and close, or Cancel
+  (#35).
 - The object browser, project tree and saved connections list didn't
   highlight the selected row unless the mouse was over it (#31).
 - Hiding or showing a result grid column reset the widths of all the
