@@ -212,6 +212,83 @@ impl Editor {
         self.inner.goto_line(line.max(1));
     }
 
+    /// Replaces the text with its formatted version as one undo step,
+    /// changing only the part that differs; the caret keeps its place in the
+    /// unchanged text, or goes to the end of the changed part.
+    pub fn apply_format(&mut self, formatted: &str) -> bool {
+        let old = self.text.clone();
+        if old == formatted {
+            return false;
+        }
+        let prefix = common_prefix(&old, formatted);
+        let suffix = common_suffix(&old[prefix..], &formatted[prefix..]);
+        let changed = prefix..old.len() - suffix;
+        let new_end = formatted.len() - suffix;
+        let caret = self.cursor();
+        let caret = if caret >= changed.end {
+            new_end + (caret - changed.end)
+        } else if caret <= prefix {
+            caret
+        } else {
+            new_end
+        };
+        self.inner
+            .replace_range(changed, &formatted[prefix..new_end]);
+        self.refresh();
+        self.inner.select(caret..caret);
+        true
+    }
+
+    /// Formats the whole text (format on save); returns whether it changed.
+    pub fn format_all(&mut self, options: &pythia_plsql::FormatOptions) -> bool {
+        let formatted = pythia_plsql::format(self.text(), options);
+        formatted.changed && self.apply_format(&formatted.text)
+    }
+
+    /// Formats the editor's output of this frame as the settings ask: the
+    /// statements pasted text lands in, a SQL statement when its `;` is
+    /// typed.
+    pub fn format_as_typed(
+        &mut self,
+        out: &EditorOutput,
+        triggers: pythia_config::FormatTriggers,
+        options: &pythia_plsql::FormatOptions,
+    ) {
+        use pythia_plsql::{StatementKind, split_statements};
+        let wanted: Option<Range<usize>> =
+            if let Some(pasted) = out.pasted.clone().filter(|_| triggers.on_paste) {
+                // Statements the paste brought in whole, and SQL statements it
+                // touched; not a whole package for a pasted line.
+                let affected: Vec<Range<usize>> = split_statements(self.text())
+                    .into_iter()
+                    .filter(|s| s.range.start < pasted.end && pasted.start < s.range.end)
+                    .filter(|s| {
+                        s.kind == StatementKind::Sql
+                            || (pasted.start <= s.range.start && s.range.end <= pasted.end)
+                    })
+                    .map(|s| s.range)
+                    .collect();
+                affected
+                    .first()
+                    .zip(affected.last())
+                    .map(|(a, b)| a.start..b.end)
+            } else if let Some(after) = out.semicolon_typed.filter(|_| triggers.on_statement_end) {
+                // The SQL statement this `;` ends.
+                split_statements(self.text())
+                    .into_iter()
+                    .find(|s| s.kind == StatementKind::Sql && s.range.end + 1 == after)
+                    .map(|s| s.range)
+            } else {
+                None
+            };
+        if let Some(range) = wanted {
+            let formatted = pythia_plsql::format_range(self.text(), range, options);
+            if formatted.changed {
+                self.apply_format(&formatted.text);
+            }
+        }
+    }
+
     /// Changes whenever the text changes.
     pub fn revision(&self) -> u64 {
         self.revision
@@ -351,6 +428,24 @@ pub fn debug_hover(
     true
 }
 
+/// Length of the common start of two strings, at a char boundary.
+fn common_prefix(a: &str, b: &str) -> usize {
+    a.char_indices()
+        .zip(b.chars())
+        .find(|((_, x), y)| x != y)
+        .map_or(a.len().min(b.len()), |((i, _), _)| i)
+}
+
+/// Length of the common end of two strings, at a char boundary.
+fn common_suffix(a: &str, b: &str) -> usize {
+    a.chars()
+        .rev()
+        .zip(b.chars().rev())
+        .take_while(|(x, y)| x == y)
+        .map(|(c, _)| c.len_utf8())
+        .sum()
+}
+
 /// Byte offset of the start of a 1-based line (end of text if out of range).
 pub fn line_start(text: &str, line: usize) -> usize {
     if line <= 1 {
@@ -383,6 +478,22 @@ mod tests {
         assert_eq!(line_start(t, 2), 3);
         assert_eq!(line_start(t, 3), 6);
         assert_eq!(line_start(t, 9), 8);
+    }
+
+    #[test]
+    fn formatting_keeps_the_caret() {
+        let mut e = Editor::new("select a,b from t;\nselect 1 from dual;");
+        let at = e.text().find("select 1").unwrap() + 3;
+        e.inner().select(at..at);
+        assert!(e.apply_format("select a, b from t;\nselect 1 from dual;"));
+        assert_eq!(e.text(), "select a, b from t;\nselect 1 from dual;");
+        assert_eq!(e.cursor(), at + 1, "after the change: shifted");
+        // In the changed part ("  ,"): its end.
+        let mut e = Editor::new("select a  ,b from t;");
+        e.inner().select(9..9);
+        e.apply_format("select a, b from t;");
+        assert_eq!(e.cursor(), "select a, ".len());
+        assert!(!e.apply_format("select a, b from t;"), "nothing to do");
     }
 
     #[test]

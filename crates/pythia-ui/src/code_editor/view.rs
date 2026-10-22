@@ -332,6 +332,8 @@ impl CodeEditor {
             goto_request: requests.goto,
             references_request: requests.references,
             context_request: requests.context,
+            pasted: requests.pasted,
+            semicolon_typed: requests.semicolon,
         }
     }
 
@@ -548,6 +550,9 @@ impl CodeEditor {
                     if !text.is_empty() {
                         self.state.insert(&text, time);
                         self.after_typing(&text, config, time);
+                        if text == ";" {
+                            self.requests.semicolon = Some(self.cursor());
+                        }
                     }
                 }
                 Event::Ime(ImeEvent::Commit(text)) if !ro && !text.is_empty() => {
@@ -559,7 +564,17 @@ impl CodeEditor {
                     let text = self.state.cut(time);
                     ui.ctx().copy_text(text);
                 }
-                Event::Paste(text) if !ro => self.state.paste(&text, time),
+                Event::Paste(text) if !ro => {
+                    let single = self.state.sels.len() == 1;
+                    let from = self.state.primary().start();
+                    self.state.paste(&text, time);
+                    if single {
+                        let rope = &self.state.rope;
+                        let to = self.state.primary().head;
+                        self.requests.pasted =
+                            Some(rope.char_to_byte(from)..rope.char_to_byte(to.max(from)));
+                    }
+                }
                 Event::Key {
                     key,
                     physical_key,

@@ -32,11 +32,29 @@ pub struct Settings {
     pub debug_host: String,
     /// Code formatter rules.
     pub format: pythia_plsql::FormatOptions,
+    /// Named formatter rule sets to switch between and share.
+    pub format_profiles: std::collections::BTreeMap<String, pythia_plsql::FormatOptions>,
+    /// The profile the rules were last taken from or saved as.
+    pub format_profile: Option<String>,
+    /// When code is formatted without asking.
+    pub format_auto: FormatTriggers,
     /// Shortcut overrides on top of the preset: command id → shortcut text
     /// like `Ctrl+Shift+F` (empty: no shortcut).
     pub keybindings: std::collections::BTreeMap<String, String>,
     /// The invalid objects indicator and recompiling.
     pub invalid: InvalidObjectSettings,
+}
+
+/// When code is formatted automatically (all off by default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FormatTriggers {
+    /// Before saving a file and before compiling a program window.
+    pub on_save: bool,
+    /// The statements pasted text lands in.
+    pub on_paste: bool,
+    /// A SQL statement when its `;` is typed.
+    pub on_statement_end: bool,
 }
 
 /// Which schemas the invalid objects indicator counts.
@@ -81,6 +99,9 @@ impl Default for Settings {
             editor: EditorSettings::default(),
             debug_host: String::new(),
             format: pythia_plsql::FormatOptions::default(),
+            format_profiles: Default::default(),
+            format_profile: None,
+            format_auto: FormatTriggers::default(),
             keybindings: Default::default(),
             invalid: InvalidObjectSettings::default(),
         }

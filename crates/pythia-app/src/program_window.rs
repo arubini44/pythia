@@ -221,6 +221,17 @@ impl ProgramWindow {
         effects
     }
 
+    /// Formats the parts [`ProgramWindow::compile`] would compile (format
+    /// on save).
+    pub fn format_before_compile(&mut self, all: bool, options: &pythia_plsql::FormatOptions) {
+        let active = self.active;
+        for (i, part) in self.parts.iter_mut().enumerate() {
+            if all || i == active {
+                part.editor.format_all(options);
+            }
+        }
+    }
+
     /// Compiles the active part, or all parts (spec first).
     pub fn compile(&mut self, all: bool) -> Effects {
         if self.is_busy() {
@@ -433,6 +444,9 @@ impl ProgramWindow {
                 .on_hover_text("F8")
                 .clicked()
             {
+                if cx.settings.format_auto.on_save {
+                    self.format_before_compile(false, &cx.settings.format);
+                }
                 effects.extend(self.compile(false));
             }
             if self.parts.len() > 1
@@ -440,6 +454,9 @@ impl ProgramWindow {
                     .add_enabled(!busy && cx.connected, egui::Button::new("Compile all"))
                     .clicked()
             {
+                if cx.settings.format_auto.on_save {
+                    self.format_before_compile(true, &cx.settings.format);
+                }
                 effects.extend(self.compile(true));
             }
             if ui
@@ -645,6 +662,8 @@ impl ProgramWindow {
                 &mut part.assist,
                 cx,
             ));
+            part.editor
+                .format_as_typed(&out, cx.settings.format_auto, &cx.settings.format);
             part.assist.background(&mut part.editor, ui);
             if let Some(line) = out.gutter_clicked {
                 effects.breakpoints.push((unit.clone(), line as u32));

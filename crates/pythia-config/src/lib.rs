@@ -16,7 +16,8 @@ pub mod tns;
 
 pub use connections::{ConnectionProfile, Connections, Privilege};
 pub use settings::{
-    EditorSettings, InvalidObjectSettings, InvalidScope, KeymapPreset, Settings, ThemeChoice,
+    EditorSettings, FormatTriggers, InvalidObjectSettings, InvalidScope, KeymapPreset, Settings,
+    ThemeChoice,
 };
 
 /// Platform directories used by Pythia.

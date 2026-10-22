@@ -96,6 +96,8 @@ pub struct PythiaApp {
     catalog_revision: u64,
     /// Catalog task request id → connection.
     catalog_inflight: HashMap<u64, String>,
+    /// Reading a schema's source to learn formatter settings from: request id.
+    learn_inflight: Option<u64>,
     /// Invalid objects per connection, for the status bar.
     invalid: HashMap<String, InvalidCount>,
     /// Count requests in flight: request id → connection.
@@ -174,6 +176,7 @@ impl PythiaApp {
             catalogs: HashMap::new(),
             catalog_revision: 0,
             catalog_inflight: HashMap::new(),
+            learn_inflight: None,
             invalid: HashMap::new(),
             invalid_inflight: HashMap::new(),
             catalog_requested: std::collections::HashSet::new(),
@@ -828,6 +831,75 @@ impl PythiaApp {
         }
     }
 
+    /// Learns formatter settings from the focused editor, or (in the
+    /// background) from the current schema's source.
+    fn learn_format(&mut self, from: crate::settings_dialog::LearnFrom) {
+        use crate::settings_dialog::LearnFrom;
+        let base = self.settings.format.clone();
+        match from {
+            LearnFrom::Editor => {
+                let doc = self.focused.and_then(|id| self.docs.get(&id));
+                let text = match doc.map(|d| &d.kind) {
+                    Some(DocKind::Sql(w)) => Some(w.editor.text().to_owned()),
+                    Some(DocKind::Program(w)) => Some(
+                        w.parts
+                            .iter()
+                            .map(|p| p.editor.text())
+                            .collect::<Vec<_>>()
+                            .join("\n/\n"),
+                    ),
+                    _ => None,
+                };
+                let from = doc.map_or("the focused window".into(), |d| d.title());
+                let learned = text
+                    .filter(|t| !t.trim().is_empty())
+                    .map(|t| pythia_plsql::infer_format(&t, &base));
+                self.settings_dialog.learned(from, learned);
+            }
+            LearnFrom::Schema => {
+                let Some(connection) = self.current_connection() else {
+                    self.settings_dialog
+                        .learned("a schema (not connected)".into(), None);
+                    return;
+                };
+                let schema = self
+                    .conns
+                    .get(&connection)
+                    .map(|c| c.current_schema())
+                    .unwrap_or_default();
+                let id = request_id();
+                self.learn_inflight = Some(id);
+                let task: pythia_db::TaskFn = Box::new(move |c: &pythia_db::oracle::Connection| {
+                    let rows = c.query_as::<(String, String, Option<String>)>(
+                        "select name, type, text from all_source where owner = :1 \
+                         and type in ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', \
+                         'TRIGGER', 'TYPE BODY') order by name, type, line \
+                         fetch first 50000 rows only",
+                        &[&schema],
+                    )?;
+                    let mut src = String::new();
+                    let mut unit = None;
+                    for row in rows {
+                        let (name, kind, text) = row?;
+                        if unit.as_ref() != Some(&(name.clone(), kind.clone())) {
+                            if unit.is_some() {
+                                src.push_str("\n/\n");
+                            }
+                            unit = Some((name, kind));
+                        }
+                        src.push_str(&text.unwrap_or_default());
+                    }
+                    let learned =
+                        (!src.trim().is_empty()).then(|| pythia_plsql::infer_format(&src, &base));
+                    Ok(Box::new((format!("schema {schema}"), learned))
+                        as Box<dyn std::any::Any + Send>)
+                });
+                self.conns
+                    .send_main(&connection, DbRequest::Task { id, task });
+            }
+        }
+    }
+
     /// Counts the connection's invalid objects in the background (on the main
     /// session: a cheap query), for the status bar.
     fn refresh_invalid(&mut self, connection: &str) {
@@ -1260,6 +1332,9 @@ impl PythiaApp {
                     Some(DocKind::Sql(w)) => match (&w.path, command) {
                         (Some(path), Command::SaveFile) => {
                             let path = path.clone();
+                            if self.settings.format_auto.on_save {
+                                w.editor.format_all(&self.settings.format);
+                            }
                             match w.save_to(path.clone()) {
                                 Ok(()) => self.log(format!("Saved {}", path.display())),
                                 Err(e) => {
@@ -1675,7 +1750,12 @@ impl PythiaApp {
                 }
                 effects
             }
-            DocKind::Program(w) if !read_only => w.compile(false),
+            DocKind::Program(w) if !read_only => {
+                if settings.format_auto.on_save {
+                    w.format_before_compile(false, &settings.format);
+                }
+                w.compile(false)
+            }
             _ => Effects::default(),
         };
         self.apply(Some(id), effects);
@@ -1889,6 +1969,21 @@ impl PythiaApp {
                     ));
                 } else {
                     self.log(format!("{name}: {e}"));
+                }
+            }
+            DbEvent::TaskDone { id, result } if self.learn_inflight == Some(id) => {
+                self.learn_inflight = None;
+                type Learned = (String, Option<pythia_plsql::FormatOptions>);
+                match result.map(|any| any.downcast::<Learned>()) {
+                    Ok(Ok(learned)) => {
+                        let (from, options) = *learned;
+                        self.settings_dialog.learned(from, options);
+                    }
+                    Ok(Err(_)) => {}
+                    Err(e) => {
+                        self.log(format!("Reading the schema's source: {e}"));
+                        self.settings_dialog.learned("the schema".into(), None);
+                    }
                 }
             }
             DbEvent::TaskDone { id, result } if self.invalid_inflight.contains_key(&id) => {
@@ -2525,7 +2620,12 @@ impl PythiaApp {
             FileAction::Open => self.open_file(path, None),
             FileAction::SaveAs(id) => {
                 let result = match self.docs.get_mut(&id).map(|d| &mut d.kind) {
-                    Some(DocKind::Sql(w)) => w.save_to(path.clone()),
+                    Some(DocKind::Sql(w)) => {
+                        if self.settings.format_auto.on_save {
+                            w.editor.format_all(&self.settings.format);
+                        }
+                        w.save_to(path.clone())
+                    }
                     Some(DocKind::Program(w)) => std::fs::write(&path, w.active_source()),
                     _ => Ok(()),
                 };
@@ -2666,6 +2766,7 @@ impl PythiaApp {
                 self.apply_settings(ctx);
                 self.save_settings();
             }
+            crate::settings_dialog::SettingsResult::Learn(from) => self.learn_format(from),
             crate::settings_dialog::SettingsResult::None => {}
         }
         if let Some(command) = self.palette.ui(ctx, &self.keymap) {
@@ -3212,6 +3313,10 @@ impl PythiaApp {
 
     pub fn test_close_settings(&mut self) {
         self.settings_dialog.open = false;
+    }
+
+    pub fn test_learning(&self) -> bool {
+        self.learn_inflight.is_some()
     }
 
     pub fn test_open_file(&mut self, path: std::path::PathBuf) {

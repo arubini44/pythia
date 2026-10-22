@@ -45,6 +45,15 @@ All notable changes to Pythia are documented here. The format follows
   SQL window marks the block's line.
 - Debugger: the call stack names the subprogram (`orders_api.load_order:31`)
   and the package initialization section.
+- Formatter: profiles (named rule sets to switch between, export and import
+  as TOML to share a team style), learning the rules from the focused
+  editor or the current schema's stored source (the differences are shown
+  with the preview before you apply them), and formatting automatically on
+  save and compile, on paste and when a statement's `;` is typed (only
+  what changes is replaced, as one undo step, and the caret stays put).
+  New rules: CASE arms, subqueries, parameter lists and INSERT column and
+  VALUES lists each fit on one line or always break, and THEN/LOOP on their
+  own line.
 
 ### Fixed
 - Windows: no console window with log output next to the app (also none for

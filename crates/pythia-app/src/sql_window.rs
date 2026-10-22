@@ -1313,6 +1313,8 @@ impl SqlWindow {
                 &mut self.assist,
                 cx,
             ));
+            self.editor
+                .format_as_typed(&out, cx.settings.format_auto, &cx.settings.format);
             if let Some(from) = self.assist.take_jumped_from() {
                 effects.jumped_from = Some((0, from));
             }

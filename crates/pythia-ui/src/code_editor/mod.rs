@@ -117,6 +117,10 @@ pub struct EditorOutput {
     /// Right-click at this byte offset: the context menu opens on
     /// `response`, for what's there.
     pub context_request: Option<usize>,
+    /// Text was pasted here (byte range, single caret only).
+    pub pasted: Option<Range<usize>>,
+    /// A `;` was typed; the byte offset after it.
+    pub semicolon_typed: Option<usize>,
 }
 
 /// Requests collected during a frame.
@@ -128,6 +132,8 @@ struct Requests {
     goto: Option<usize>,
     references: Option<usize>,
     context: Option<usize>,
+    pasted: Option<Range<usize>>,
+    semicolon: Option<usize>,
 }
 
 /// An automatic completion request waiting for the typing pause.

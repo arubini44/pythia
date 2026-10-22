@@ -2131,6 +2131,109 @@ fn invalid_objects_indicator_and_recompile() {
     }
 }
 
+/// Formatting while typing and on paste, and learning the formatter
+/// settings from the focused editor.
+#[test]
+fn format_automatically_and_learn_the_style() {
+    let mut h = headless_harness();
+    h.state_mut()
+        .test_settings_mut()
+        .format_auto
+        .on_statement_end = true;
+    h.state_mut().test_settings_mut().format_auto.on_paste = true;
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: String::new(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut().test_sql_window().editor.goto(1, 1);
+    h.run_steps(2);
+    let text = |h: &mut Ui| h.state_mut().test_sql_window().editor.text().to_owned();
+
+    // Typing the `;` that ends a statement formats it.
+    h.event(egui::Event::Text("select a,b   from t".into()));
+    h.run_steps(2);
+    assert_eq!(text(&mut h), "select a,b   from t");
+    h.event(egui::Event::Text(";".into()));
+    h.run_steps(2);
+    assert_eq!(text(&mut h), "select a, b from t;");
+    let caret = h.state_mut().test_sql_window().editor.cursor();
+    assert_eq!(caret, text(&mut h).len(), "the caret stays after the ;");
+
+    // A pasted statement is formatted where it lands.
+    h.key_press(egui::Key::Enter);
+    h.run_steps(1);
+    h.event(egui::Event::Paste("SELECT  x,y FROM z;".into()));
+    h.run_steps(2);
+    assert_eq!(text(&mut h), "select a, b from t;\nselect x, y from z;");
+
+    // Learning: the editor is written in UPPER CASE with 4 spaces.
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "BEGIN\n    IF x > 1 THEN\n        y := 1;\n    END IF;\n    FOR i IN 1..3 LOOP\n        \
+               NULL;\n    END LOOP;\nEND;\n/\nSELECT a, b FROM t WHERE c = 1;\n"
+            .into(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut().test_settings(true);
+    h.run_steps(2);
+    // The pointer has never been over the dialog: hover first.
+    h.get_by_label("Focused editor").hover();
+    h.run_steps(1);
+    h.get_by_label("Focused editor").click();
+    h.run_steps(3);
+    assert!(
+        h.query_by_label_contains("Keywords: lower → UPPER")
+            .is_some()
+    );
+    assert!(h.query_by_label_contains("Indent: 2 → 4").is_some());
+    h.get_by_label("Apply").click();
+    h.run_steps(2);
+    let format = h.state_mut().test_settings_mut().format.clone();
+    assert_eq!(format.keyword_case, pythia_plsql::Case::Upper);
+    assert_eq!(format.indent, 4);
+
+    // Saved as a profile.
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "New profile")
+        .focus();
+    h.run_steps(1);
+    h.event(egui::Event::Text("team".into()));
+    h.run_steps(1);
+    h.get_by_label("Save as profile").click();
+    h.run_steps(2);
+    let settings = h.state_mut().test_settings_mut().clone();
+    assert_eq!(settings.format_profile.as_deref(), Some("team"));
+    assert_eq!(settings.format_profiles.get("team"), Some(&format));
+}
+
+/// The schema's stored source teaches the formatter its style.
+#[test]
+fn learn_the_style_from_a_schema() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_settings(true);
+    h.run_steps(2);
+    h.get_by_label("Current schema").hover();
+    h.run_steps(1);
+    h.get_by_label("Current schema").click();
+    h.run_steps(1);
+    assert!(h.state().test_learning());
+    wait_until(&mut h, "learning", |app| !app.test_learning());
+    assert!(
+        h.query_by_label_contains("Learned from schema PYTHIA")
+            .is_some(),
+        "{:?}",
+        h.query_by_label_contains("Nothing to learn")
+            .map(|n| format!("{n:?}"))
+    );
+}
+
 /// Commit and Rollback follow the focused window's transaction, and never
 /// open a session just to end nothing.
 #[test]
