@@ -152,6 +152,10 @@ fn apply(style: &mut Style, p: &Palette) {
     w.noninteractive = widget(p.panel, p.border, p.text);
     w.noninteractive.weak_bg_fill = p.panel;
     w.inactive = widget(p.hover, Color32::TRANSPARENT, p.text);
+    // No stroke rather than a transparent one: egui takes the stroke width
+    // off the button padding, and buttons without an idle frame (icon
+    // buttons) only draw the stroke on hover, so they would grow by it.
+    w.inactive.bg_stroke = Stroke::NONE;
     w.hovered = widget(p.active, p.border, p.text);
     w.active = widget(p.active, ACCENT, p.text);
     w.open = widget(p.active, p.border, p.text);
@@ -176,4 +180,24 @@ pub fn status_frame(style: &Style) -> Frame {
             1.0,
             style.visuals.widgets.noninteractive.bg_stroke.color,
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    /// Buttons without an idle frame (icon buttons) keep their size on hover.
+    #[test]
+    fn frameless_button_keeps_size_on_hover() {
+        let mut h = Harness::new_ui(|ui| {
+            ui.add(egui::Button::new("Run").frame_when_inactive(false));
+        });
+        super::install(&h.ctx);
+        h.run();
+        let idle = h.get_by_label("Run").rect();
+        h.get_by_label("Run").hover();
+        h.run();
+        assert_eq!(h.get_by_label("Run").rect(), idle);
+    }
 }

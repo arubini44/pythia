@@ -51,6 +51,7 @@ All notable changes to orui are documented here. The format follows
 - Light theme: text fields in dialogs were white on white.
 - ORA-01805 (time zone regions with Instant Client Basic Light) is
   explained.
+- Toolbar and other frameless buttons no longer grow when hovered.
 
 ## [0.1.0] - 2026-10-22
 
