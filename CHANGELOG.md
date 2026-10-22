@@ -22,6 +22,16 @@ All notable changes to Pythia are documented here. The format follows
   name, go to declaration and find references; plus cut, copy, paste,
   select all, toggle comment and format. On a package member (`pkg.proc`)
   Edit and Ctrl+click open the package at that subprogram.
+- Navigation in packages: in a program window the body knows the spec's
+  declarations and the other way round (go to definition, hover,
+  completion, references), Ctrl+click on a call picks the overload its
+  arguments fit, a named argument (`p_id =>`) leads to the callee's
+  parameter, labels (`exit outer_loop`, `goto done`) are navigable, and
+  hover shows the comment above a declaration. New commands (palette,
+  Settings → Keyboard, editor menu): Back/Forward (Alt+Left/Right, mouse
+  buttons), Switch Spec/Body (Ctrl+Shift+B), Go to Symbol (Ctrl+F12), Peek
+  Definition (Alt+F12) and Find References (Shift+F12) as a list to step
+  through.
 - Debugger: step through the debugged block itself (it now has debug
   information), and stepping out of the outermost unit continues there; the
   SQL window marks the block's line.

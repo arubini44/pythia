@@ -308,6 +308,17 @@ impl SqlWindow {
         self.run_next(cx)
     }
 
+    /// Asks the editor for navigation at its caret.
+    pub fn navigate(&mut self, request: crate::assist::Request) {
+        let at = self.editor.cursor();
+        self.assist.request(request, at);
+    }
+
+    /// Declarations in the text, for Go to Symbol.
+    pub fn symbols(&self) -> Vec<crate::dialogs::SymbolItem> {
+        crate::dialogs::symbol_items(0, self.editor.text(), None)
+    }
+
     /// 1-based editor line of a byte offset.
     fn line_of(&self, offset: usize) -> usize {
         let text = self.editor.text();
@@ -1302,6 +1313,23 @@ impl SqlWindow {
                 &mut self.assist,
                 cx,
             ));
+            if let Some(from) = self.assist.take_jumped_from() {
+                effects.jumped_from = Some((0, from));
+            }
+            if let Some(places) = self.assist.take_references() {
+                let text = self.editor.text();
+                effects.references = Some(
+                    places
+                        .into_iter()
+                        .filter_map(|place| match place {
+                            crate::assist::Place::Here(r) => {
+                                Some(crate::documents::Reference::new(0, r, text, None))
+                            }
+                            crate::assist::Place::Companion(_) => None,
+                        })
+                        .collect(),
+                );
+            }
             self.assist.background(&mut self.editor, ui);
             self.state.line_col = self.editor.line_col();
         });

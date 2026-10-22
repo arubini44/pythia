@@ -95,6 +95,20 @@ pub(crate) enum Resolved {
         package: ScopeId,
         name: String,
     },
+    /// A formal parameter in named notation (`p_id =>`) of a subprogram in
+    /// this text.
+    Parameter {
+        subprogram: SymRef,
+        index: usize,
+    },
+    /// A formal parameter in named notation of a subprogram in the
+    /// database: `member` of `object`, or the object itself when it's a
+    /// standalone procedure or function.
+    CatalogParameter {
+        object: CatalogObject,
+        member: Option<String>,
+        param: crate::catalog::CatalogParam,
+    },
     Builtin(&'static Builtin),
     Schema(String),
 }
@@ -842,6 +856,20 @@ impl<'a> Sema<'a> {
             if last.bind {
                 return None;
             }
+            let named_argument = self
+                .next_significant(i)
+                .is_some_and(|n| self.text(&self.tokens[n].span) == "=>");
+            if named_argument && let Some(formal) = self.formal_parameter(i, offset, name) {
+                return Some((formal, span));
+            }
+            if self.in_label_position(i)
+                && let Some(r) = self.visible_symbols(offset).into_iter().find(|r| {
+                    let s = self.symbol(*r);
+                    s.kind == SymbolKind::Label && s.name.name == *name
+                })
+            {
+                return Some((Resolved::Local(r), span));
+            }
             if let Some(q) = query {
                 // Alias / table name in FROM, or used as `alias.`.
                 if let Some((qid, idx)) = self.source_by_name(q, name) {
@@ -895,6 +923,13 @@ impl<'a> Sema<'a> {
                 }
             }
             if let Some(r) = self.find_local(offset, name) {
+                // A call names the overload its arguments fit.
+                let r = if self.symbol(r).kind.is_subprogram() {
+                    self.pick_overload(&self.find_subprograms(offset, name), i)
+                        .unwrap_or(r)
+                } else {
+                    r
+                };
                 return Some((Resolved::Local(r), span));
             }
             if let Some(b) = builtins::function(name) {
@@ -959,6 +994,181 @@ impl<'a> Sema<'a> {
             },
             MemberTarget::Sequence | MemberTarget::Nothing => None,
         }
+    }
+
+    /// Whether token `i` is where a label is named: after `EXIT`,
+    /// `CONTINUE`, `GOTO` or `END LOOP`.
+    fn in_label_position(&self, i: usize) -> bool {
+        let Some(prev) = self.prev_significant(i) else {
+            return false;
+        };
+        match self
+            .text(&self.tokens[prev].span)
+            .to_ascii_uppercase()
+            .as_str()
+        {
+            "EXIT" | "CONTINUE" | "GOTO" => true,
+            "LOOP" => self
+                .prev_significant(prev)
+                .is_some_and(|p| self.text(&self.tokens[p].span).eq_ignore_ascii_case("end")),
+            _ => false,
+        }
+    }
+
+    /// Arguments of the call whose name is token `i`: the number of
+    /// positional ones and the names of named ones. Without parentheses
+    /// there are none.
+    fn call_args(&self, i: usize) -> (usize, Vec<String>) {
+        let Some(open) = self
+            .next_significant(i)
+            .filter(|&n| self.text(&self.tokens[n].span) == "(")
+        else {
+            return (0, Vec::new());
+        };
+        let (mut depth, mut positional, mut named) = (0usize, 0usize, Vec::new());
+        let (mut has_content, mut is_named) = (false, false);
+        for j in open + 1..self.tokens.len() {
+            let t = &self.tokens[j];
+            if t.kind.is_trivia() {
+                continue;
+            }
+            match self.text(&t.span) {
+                ")" if depth == 0 => break,
+                ";" => break,
+                "(" => {
+                    depth += 1;
+                    has_content = true;
+                }
+                ")" => depth -= 1,
+                "," if depth == 0 => {
+                    positional += usize::from(has_content && !is_named);
+                    (has_content, is_named) = (false, false);
+                }
+                "=>" if depth == 0 => {
+                    if let Some(p) = self.prev_significant(j) {
+                        named.push(normalize_ident(self.text(&self.tokens[p].span)).0);
+                    }
+                    is_named = true;
+                }
+                _ => has_content = true,
+            }
+        }
+        positional += usize::from(has_content && !is_named);
+        (positional, named)
+    }
+
+    /// The overload the call at token `i` means: named arguments must be
+    /// parameters, and the argument count must fit (counting defaults).
+    /// Prefers the closest parameter count.
+    pub fn pick_overload(&self, candidates: &[SymRef], i: usize) -> Option<SymRef> {
+        if candidates.len() < 2 {
+            return candidates.first().copied();
+        }
+        let (positional, named) = self.call_args(i);
+        let given = positional + named.len();
+        candidates
+            .iter()
+            .copied()
+            .filter(|r| {
+                let params = &self.symbol(*r).params;
+                named
+                    .iter()
+                    .all(|n| params.iter().any(|p| &p.name.name == n))
+                    && given <= params.len()
+                    && params.iter().filter(|p| !p.has_default).count() <= given
+            })
+            .min_by_key(|r| self.symbol(*r).params.len() - given)
+            .or(candidates.first().copied())
+    }
+
+    /// The token naming the call whose argument list contains token `i`.
+    fn enclosing_callee(&self, i: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut j = i;
+        while let Some(k) = self.prev_significant(j) {
+            match self.text(&self.tokens[k].span) {
+                ")" => depth += 1,
+                "(" if depth == 0 => {
+                    let callee = self.prev_significant(k)?;
+                    return is_ref_token(self.tokens[callee].kind).then_some(callee);
+                }
+                "(" => depth -= 1,
+                ";" if depth == 0 => return None,
+                _ => {}
+            }
+            j = k;
+        }
+        None
+    }
+
+    /// The formal parameter `name` (token `i`, followed by `=>`) of the
+    /// subprogram being called.
+    fn formal_parameter(&self, i: usize, offset: usize, name: &str) -> Option<Resolved> {
+        let callee = self.enclosing_callee(i)?;
+        let chain = self.chain_ending_at(callee);
+        let names: Vec<&str> = chain.iter().map(|p| p.ident.name.as_str()).collect();
+        let with_param = |candidates: Vec<SymRef>| -> Option<Resolved> {
+            let candidates: Vec<SymRef> = candidates
+                .into_iter()
+                .filter(|r| self.symbol(*r).params.iter().any(|p| p.name.name == name))
+                .collect();
+            let subprogram = self.pick_overload(&candidates, callee)?;
+            let index = self
+                .symbol(subprogram)
+                .params
+                .iter()
+                .position(|p| p.name.name == name)?;
+            Some(Resolved::Parameter { subprogram, index })
+        };
+        match names.as_slice() {
+            [proc] if self.find_local(offset, proc).is_some() => {
+                return with_param(self.find_subprograms(offset, proc));
+            }
+            [pkg, proc] if self.find_local(offset, pkg).is_none() => {
+                if let Some(scope) = self.local_package(pkg) {
+                    let candidates = (0..self.ast.scope(scope).symbols.len())
+                        .map(|index| SymRef { scope, index })
+                        .filter(|r| {
+                            let s = self.symbol(*r);
+                            s.kind.is_subprogram() && s.name.name == *proc
+                        })
+                        .collect();
+                    return with_param(candidates);
+                }
+            }
+            _ => {}
+        }
+        // In the database: a standalone subprogram or a package member.
+        let (object, member) = match names.as_slice() {
+            [proc] => (self.cat.resolve(None, proc)??, None),
+            [first, proc] => match self.cat.resolve(None, first)? {
+                Some(o) => (o, Some(proc.to_string())),
+                None => (self.cat.resolve(Some(first), proc)??, None),
+            },
+            [schema, object, proc] => (
+                self.cat.resolve(Some(schema), object)??,
+                Some(proc.to_string()),
+            ),
+            _ => return None,
+        };
+        let callable = match member {
+            None => matches!(object.object_type.as_str(), "PROCEDURE" | "FUNCTION"),
+            Some(_) => matches!(object.object_type.as_str(), "PACKAGE" | "TYPE"),
+        };
+        if !callable {
+            return None;
+        }
+        let param = self
+            .cat
+            .members(&object.owner, &object.name)?
+            .into_iter()
+            .filter(|m| member.as_ref().is_none_or(|n| &m.name == n))
+            .find_map(|m| m.params.into_iter().find(|p| p.name == name))?;
+        Some(Resolved::CatalogParameter {
+            object,
+            member,
+            param,
+        })
     }
 
     fn resolve_table_path(

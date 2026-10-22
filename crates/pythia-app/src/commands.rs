@@ -62,6 +62,13 @@ commands! {
     History => "Edit: Recall Statement (history)",
     Format => "Edit: Format Code",
     RenameSymbol => "Edit: Rename Symbol",
+    GoToDefinition => "Navigate: Go to Definition",
+    PeekDefinition => "Navigate: Peek Definition",
+    FindReferences => "Navigate: Find References",
+    GoToSymbol => "Navigate: Go to Symbol in File…",
+    SwitchSpecBody => "Navigate: Switch Spec/Body",
+    NavigateBack => "Navigate: Back",
+    NavigateForward => "Navigate: Forward",
     FoldAll => "Edit: Fold All",
     UnfoldAll => "Edit: Unfold All",
     FindObject => "Tools: Find Database Object…",
@@ -180,6 +187,31 @@ impl Keymap {
                 (Command::History, KeyboardShortcut::new(ctrl, Key::E)),
                 (Command::Format, KeyboardShortcut::new(ctrl | shift, Key::F)),
                 (Command::RenameSymbol, KeyboardShortcut::new(shift, Key::F6)),
+                (
+                    Command::GoToDefinition,
+                    KeyboardShortcut::new(none, Key::F12),
+                ),
+                (
+                    Command::PeekDefinition,
+                    KeyboardShortcut::new(Modifiers::ALT, Key::F12),
+                ),
+                (
+                    Command::FindReferences,
+                    KeyboardShortcut::new(shift, Key::F12),
+                ),
+                (Command::GoToSymbol, KeyboardShortcut::new(ctrl, Key::F12)),
+                (
+                    Command::SwitchSpecBody,
+                    KeyboardShortcut::new(ctrl | shift, Key::B),
+                ),
+                (
+                    Command::NavigateBack,
+                    KeyboardShortcut::new(Modifiers::ALT, Key::ArrowLeft),
+                ),
+                (
+                    Command::NavigateForward,
+                    KeyboardShortcut::new(Modifiers::ALT, Key::ArrowRight),
+                ),
                 (
                     Command::FindObject,
                     KeyboardShortcut::new(ctrl | shift, Key::O),

@@ -101,6 +101,10 @@ pub struct PythiaApp {
     log: Vec<String>,
     connect_dialog: ConnectDialog,
     palette: CommandPalette,
+    symbol_picker: crate::dialogs::SymbolPicker,
+    reference_list: crate::dialogs::ReferenceList,
+    /// Places jumped from, for Back and Forward.
+    nav: NavHistory,
     /// The user confirmed running changes on production (one execution).
     production_confirmed: bool,
     /// Recently closed documents, for reopening (newest last).
@@ -170,6 +174,9 @@ impl PythiaApp {
             log: Vec::new(),
             connect_dialog: ConnectDialog::default(),
             palette: CommandPalette::default(),
+            symbol_picker: Default::default(),
+            reference_list: Default::default(),
+            nav: NavHistory::default(),
             production_confirmed: false,
             closed_docs: Vec::new(),
             file_dialog: None,
@@ -462,6 +469,7 @@ impl PythiaApp {
                 connection,
                 object,
                 member,
+                parameter,
             } => {
                 self.open(OpenRequest::Program { connection, object });
                 if let Some(DocKind::Program(w)) = self
@@ -469,7 +477,7 @@ impl PythiaApp {
                     .and_then(|id| self.docs.get_mut(&id))
                     .map(|d| &mut d.kind)
                 {
-                    w.goto_member(&member);
+                    w.goto_member(&member, parameter.as_deref());
                 }
             }
             OpenRequest::Object { connection, object } => {
@@ -738,12 +746,68 @@ impl PythiaApp {
         for (connection, action) in effects.object_actions {
             self.object_action(connection, action);
         }
+        if let (Some(id), Some((part, offset))) = (doc, effects.jumped_from) {
+            self.nav.record(Position {
+                doc: id,
+                part,
+                offset,
+            });
+        }
+        if let (Some(id), Some(references)) = (doc, effects.references) {
+            if references.is_empty() {
+                self.log("No references found");
+            } else {
+                self.reference_list.show(id, references);
+            }
+        }
         self.queued_commands.extend(effects.commands);
         if let (Some(block), Some(id)) = (effects.debug, doc) {
             self.start_debug(id, block);
         }
         for request in effects.open {
             self.open(request);
+        }
+    }
+
+    /// Remembers the focused editor's place before a jump.
+    fn record_jump(&mut self) {
+        if let Some(position) = self.current_position() {
+            self.nav.record(position);
+        }
+    }
+
+    fn current_position(&self) -> Option<Position> {
+        let doc = self.focused?;
+        let (part, offset) = self.docs.get(&doc)?.position()?;
+        Some(Position { doc, part, offset })
+    }
+
+    /// Back (or forward) to where a jump started, skipping closed windows.
+    fn navigate_history(&mut self, back: bool) {
+        loop {
+            let target = if back {
+                self.nav.back.pop()
+            } else {
+                self.nav.forward.pop()
+            };
+            let Some(target) = target else {
+                return;
+            };
+            if !self.docs.contains_key(&target.doc) {
+                continue;
+            }
+            if let Some(current) = self.current_position() {
+                if back {
+                    self.nav.forward.push(current);
+                } else {
+                    self.nav.back.push(current);
+                }
+            }
+            self.open_tab(Tab::Doc(target.doc));
+            if let Some(doc) = self.docs.get_mut(&target.doc) {
+                doc.goto_position(target.part, target.offset..target.offset);
+            }
+            return;
         }
     }
 
@@ -1210,6 +1274,42 @@ impl PythiaApp {
                     self.save_report = Some((String::new(), String::new(), text));
                 }
             }
+            Command::GoToDefinition | Command::PeekDefinition | Command::FindReferences => {
+                let request = match command {
+                    Command::GoToDefinition => crate::assist::Request::Definition,
+                    Command::PeekDefinition => crate::assist::Request::Peek,
+                    _ => crate::assist::Request::References,
+                };
+                if let Some(doc) = self.focused.and_then(|id| self.docs.get_mut(&id)) {
+                    doc.navigate(request);
+                }
+            }
+            Command::GoToSymbol => {
+                let symbols = self
+                    .focused
+                    .and_then(|id| self.docs.get(&id))
+                    .map(Document::symbols)
+                    .unwrap_or_default();
+                if symbols.is_empty() {
+                    self.log("No declarations to go to here");
+                } else {
+                    self.symbol_picker.show(symbols);
+                }
+            }
+            Command::SwitchSpecBody => {
+                if let Some(id) = self.focused
+                    && let Some(DocKind::Program(w)) = self.docs.get_mut(&id).map(|d| &mut d.kind)
+                    && let Some((part, offset)) = w.switch_part()
+                {
+                    self.nav.record(Position {
+                        doc: id,
+                        part,
+                        offset,
+                    });
+                }
+            }
+            Command::NavigateBack => self.navigate_history(true),
+            Command::NavigateForward => self.navigate_history(false),
             Command::RenameSymbol => {
                 let editor = match self
                     .focused
@@ -2395,6 +2495,28 @@ impl PythiaApp {
         if let Some(command) = self.palette.ui(ctx, &self.keymap) {
             commands.push(command);
         }
+        if let Some((part, range)) = self.symbol_picker.ui(ctx) {
+            self.record_jump();
+            if let Some(doc) = self.focused.and_then(|id| self.docs.get_mut(&id)) {
+                doc.goto_position(part, range);
+            }
+        }
+        match self.reference_list.ui(ctx) {
+            Some(crate::dialogs::ReferenceAction::Show { doc, part, range }) => {
+                // The place the list was opened from, once.
+                if !self.reference_list.jumped {
+                    self.reference_list.jumped = true;
+                    self.record_jump();
+                }
+                if let Some(d) = self.docs.get_mut(&doc) {
+                    d.goto_position(part, range);
+                }
+            }
+            Some(crate::dialogs::ReferenceAction::Cancel) if self.reference_list.jumped => {
+                self.navigate_history(true);
+            }
+            Some(crate::dialogs::ReferenceAction::Cancel) | None => {}
+        }
         match self.finder.ui(ctx) {
             Some(FinderAction::Search(pattern)) => {
                 if let Some(name) = self.current_connection() {
@@ -2481,6 +2603,8 @@ impl eframe::App for PythiaApp {
             || self.confirm.is_some()
             || self.about_open
             || self.palette.open
+            || self.symbol_picker.open
+            || self.reference_list.open
             || self.finder.open
             || self.history_dialog.open
             || self.settings_dialog.is_recording()
@@ -2495,6 +2619,21 @@ impl eframe::App for PythiaApp {
         } else {
             self.keymap.triggered(&ctx)
         };
+        // Mouse back and forward buttons.
+        if !modal_open {
+            let (back, forward) = ctx.input(|i| {
+                (
+                    i.pointer.button_pressed(egui::PointerButton::Extra1),
+                    i.pointer.button_pressed(egui::PointerButton::Extra2),
+                )
+            });
+            if back {
+                commands.push(Command::NavigateBack);
+            }
+            if forward {
+                commands.push(Command::NavigateForward);
+            }
+        }
 
         let mut report = None;
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui, &mut commands, &mut report));
@@ -2785,6 +2924,20 @@ impl PythiaApp {
 
     pub fn test_debug_mut(&mut self) -> &mut pythia_debugger::ui::DebugSession {
         &mut self.debug
+    }
+
+    /// Opens a program window with this source, without a connection.
+    pub fn test_program_with(&mut self, object: ObjectRef, spec: &str, body: &str) -> DocId {
+        let mut w = ProgramWindow::new(object);
+        for (part, text) in w.parts.iter_mut().zip([spec, body]) {
+            part.editor.set_text(text);
+            part.saved = text.to_owned();
+        }
+        self.add_doc(None, DocKind::Program(w))
+    }
+
+    pub fn test_reference_rows(&self) -> bool {
+        self.reference_list.open
     }
 
     /// The focused program window's active editor, if one is focused.
@@ -3146,6 +3299,36 @@ fn load_or_default<T: serde::de::DeserializeOwned + Default>(path: &std::path::P
         error!("{e:#}");
         T::default()
     })
+}
+
+/// A place in an editor: the document, its part and a byte offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Position {
+    doc: DocId,
+    part: usize,
+    offset: usize,
+}
+
+/// Places jumps started from (go to definition, symbols, references, …):
+/// Back returns there, Forward goes again.
+#[derive(Default)]
+struct NavHistory {
+    back: Vec<Position>,
+    forward: Vec<Position>,
+}
+
+impl NavHistory {
+    const LIMIT: usize = 100;
+
+    fn record(&mut self, position: Position) {
+        if self.back.last() != Some(&position) {
+            self.back.push(position);
+            if self.back.len() > Self::LIMIT {
+                self.back.remove(0);
+            }
+        }
+        self.forward.clear();
+    }
 }
 
 /// How much a toolbar button stands out.

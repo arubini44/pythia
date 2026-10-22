@@ -793,7 +793,8 @@ fn definition_in_sql() {
             owner: "HR".into(),
             name: "EMPLOYEES".into(),
             object_type: "TABLE".into(),
-            member: Some("SALARY".into())
+            member: Some("SALARY".into()),
+            parameter: None
         })
     );
     let _ = src;
@@ -807,7 +808,8 @@ fn definition_in_sql() {
             owner: "HR".into(),
             name: "EMP_PKG".into(),
             object_type: "PACKAGE".into(),
-            member: Some("GET_NAME".into())
+            member: Some("GET_NAME".into()),
+            parameter: None
         })
     );
     assert_eq!(
@@ -816,7 +818,8 @@ fn definition_in_sql() {
             owner: "HR".into(),
             name: "EMPLOYEES".into(),
             object_type: "TABLE".into(),
-            member: None
+            member: None,
+            parameter: None
         })
     );
 }
@@ -986,4 +989,155 @@ fn performance_20k_lines() {
         );
         assert!(parse.as_millis() < 100, "parse took {parse:?}");
     }
+}
+
+// ----- navigation in packages (#7) ---------------------------------------------
+
+const NAV_PKG: &str = "create or replace package nav_pkg as
+  -- Raises a salary by a percentage.
+  procedure raise(p_id in number, p_pct in number);
+  /* Raises a salary by an amount,
+     logged with a reason. */
+  procedure raise(p_id in number, p_amount in number, p_reason in varchar2);
+  g_count number; -- trailing, about g_count
+  g_limit number;
+end nav_pkg;
+/
+create or replace package body nav_pkg as
+  procedure log_change(p_id in number, p_note in varchar2 := null) is
+  begin
+    null;
+  end;
+
+  procedure raise(p_id in number, p_pct in number) is
+  begin
+    raise(p_id, p_pct, 'pct');
+    log_change(p_id => p_id);
+  end;
+
+  procedure raise(p_id in number, p_amount in number, p_reason in varchar2) is
+  begin
+    <<outer_loop>>
+    for i in 1 .. 3 loop
+      for j in 1 .. 3 loop
+        exit outer_loop when j = 2;
+        continue outer_loop;
+      end loop;
+    end loop outer_loop;
+    goto done;
+    <<done>>
+    null;
+    raise(p_id, 10);
+    nav_pkg.raise(p_id => p_id, p_amount => 1, p_reason => 'x');
+    emp_pkg.raise_salary(p_emp_id => p_id);
+  end;
+end nav_pkg;
+/
+";
+
+fn nav_def(needle: &str, n: usize) -> Option<Definition> {
+    let at = nth(NAV_PKG, needle, n).start + 1;
+    Analysis::new(NAV_PKG).definition(at, &hr()).target
+}
+
+#[test]
+fn labels_are_navigable() {
+    let label = nth(NAV_PKG, "outer_loop", 0);
+    for n in 1..=3 {
+        // exit …, continue …, end loop …
+        assert_eq!(
+            nav_def("outer_loop", n),
+            Some(Definition::Local(label.clone()))
+        );
+    }
+    assert_eq!(
+        nav_def("done;", 0),
+        Some(Definition::Local(nth(NAV_PKG, "done", 1)))
+    );
+    let at = nth(NAV_PKG, "outer_loop", 1).start;
+    let h = Analysis::new(NAV_PKG).hover(at, &hr()).unwrap();
+    assert_eq!(h.title, "label outer_loop");
+    let refs = Analysis::new(NAV_PKG).references(label.start);
+    assert_eq!(refs.len(), 4, "{refs:?}");
+}
+
+/// The name in the n-th occurrence of `needle`, which starts with it.
+fn name_in(needle: &str, n: usize, name: &str) -> std::ops::Range<usize> {
+    let start = nth(NAV_PKG, needle, n).start;
+    assert!(NAV_PKG[start..].starts_with(name));
+    start..start + name.len()
+}
+
+#[test]
+fn calls_resolve_to_the_overload_their_arguments_fit() {
+    // Occurrence 1 of each header is the body implementation.
+    let by_pct = name_in("raise(p_id in number, p_pct", 1, "raise");
+    let by_amount = name_in("raise(p_id in number, p_amount", 1, "raise");
+    assert_eq!(
+        nav_def("raise(p_id, p_pct, 'pct')", 0),
+        Some(Definition::Local(by_amount.clone()))
+    );
+    assert_eq!(
+        nav_def("raise(p_id, 10)", 0),
+        Some(Definition::Local(by_pct))
+    );
+    let at = nth(NAV_PKG, "nav_pkg.raise(p_id =>", 0).start + "nav_pkg.".len() + 1;
+    assert_eq!(
+        Analysis::new(NAV_PKG).definition(at, &hr()).target,
+        Some(Definition::Local(by_amount))
+    );
+}
+
+#[test]
+fn named_arguments_name_the_callee_parameter() {
+    // `log_change(p_id => p_id)`: the formal is log_change's p_id, the
+    // actual the enclosing procedure's.
+    let formal = nth(NAV_PKG, "p_id => p_id);", 0).start;
+    let param = nth(NAV_PKG, "log_change(p_id in number", 0).start + "log_change(".len();
+    let target = Analysis::new(NAV_PKG).definition(formal + 1, &hr()).target;
+    assert_eq!(target, Some(Definition::Local(param..param + 4)));
+    let actual = formal + "p_id => ".len();
+    let enclosing = name_in("raise(p_id in number, p_pct", 1, "raise").end + 1;
+    assert_eq!(
+        Analysis::new(NAV_PKG).definition(actual + 1, &hr()).target,
+        Some(Definition::Local(enclosing..enclosing + 4))
+    );
+    let h = Analysis::new(NAV_PKG).hover(formal + 1, &hr()).unwrap();
+    assert_eq!(h.title, "parameter p_id of log_change");
+    // A package in the database: its member, at the parameter.
+    let at = nth(NAV_PKG, "p_emp_id =>", 0).start + 1;
+    assert_eq!(
+        Analysis::new(NAV_PKG).definition(at, &hr()).target,
+        Some(Definition::Object {
+            owner: "HR".into(),
+            name: "EMP_PKG".into(),
+            object_type: "PACKAGE".into(),
+            member: Some("RAISE_SALARY".into()),
+            parameter: Some("P_EMP_ID".into()),
+        })
+    );
+}
+
+#[test]
+fn hover_shows_the_comment_above_a_declaration() {
+    // On the body implementations: the spec's comments.
+    let at = name_in("raise(p_id in number, p_pct", 1, "raise").start + 1;
+    let h = Analysis::new(NAV_PKG).hover(at, &hr()).unwrap();
+    assert!(
+        h.detail.starts_with("Raises a salary by a percentage.\n"),
+        "{}",
+        h.detail
+    );
+    let at = name_in("raise(p_id in number, p_amount", 1, "raise").start + 1;
+    let h = Analysis::new(NAV_PKG).hover(at, &hr()).unwrap();
+    assert!(
+        h.detail
+            .starts_with("Raises a salary by an amount,\nlogged with a reason.\n"),
+        "{}",
+        h.detail
+    );
+    // A trailing comment belongs to its own line, not the next declaration.
+    let at = nth(NAV_PKG, "g_limit", 0).start + 1;
+    let h = Analysis::new(NAV_PKG).hover(at, &hr()).unwrap();
+    assert_eq!(h.detail, "g_limit number");
 }

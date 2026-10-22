@@ -1920,6 +1920,107 @@ fn editor_context_menu() {
     conn.execute("drop table pythia_menu_t purge", &[]).unwrap();
 }
 
+/// Go to definition, Back/Forward, Switch Spec/Body, Go to Symbol and Find
+/// References in a package's program window, across its spec and body.
+#[test]
+fn navigation_across_spec_and_body() {
+    use crate::commands::Command;
+    let spec = "create or replace package nav_pkg as\n  -- The limit.\n  g_limit number := 10;\n  \
+                procedure raise(p_id number, p_pct number);\n  \
+                procedure raise(p_id number, p_amount number, p_reason varchar2);\nend nav_pkg;";
+    let body = "create or replace package body nav_pkg as\n  \
+                procedure raise(p_id number, p_pct number) is\n  begin\n    \
+                if p_pct > g_limit then\n      raise(p_id, p_pct, 'too much');\n    end if;\n  end;\n  \
+                procedure raise(p_id number, p_amount number, p_reason varchar2) is\n  begin\n    \
+                null;\n  end;\nend nav_pkg;";
+    let mut h = harness(true);
+    h.state_mut().test_program_with(
+        ObjectRef {
+            owner: "PYTHIA".into(),
+            name: "NAV_PKG".into(),
+            object_type: pythia_db::ObjectType::PackageBody,
+        },
+        spec,
+        body,
+    );
+    h.run_steps(3);
+    // (active part, selection or caret) of the program window.
+    let state = |h: &mut Ui| {
+        let w = h.state_mut().test_program();
+        let part = w.active;
+        let editor = w.active_editor().unwrap();
+        (
+            part,
+            editor
+                .selection()
+                .unwrap_or(editor.cursor()..editor.cursor()),
+        )
+    };
+    let place = |h: &mut Ui, part: usize, at: usize| {
+        h.state_mut().test_program().goto_position(part, at..at);
+        h.run_steps(2);
+    };
+    let run = |h: &mut Ui, command: Command| {
+        h.state_mut().test_command(command);
+        h.run_steps(3);
+    };
+
+    // A spec variable used in the body → its declaration in the spec.
+    let use_at = body.find("g_limit").unwrap() + 2;
+    place(&mut h, 1, use_at);
+    run(&mut h, Command::GoToDefinition);
+    let decl = spec.find("g_limit").unwrap();
+    assert_eq!(state(&mut h), (0, decl..decl + 7));
+    run(&mut h, Command::NavigateBack);
+    assert_eq!(state(&mut h), (1, use_at..use_at));
+    run(&mut h, Command::NavigateForward);
+    assert_eq!(state(&mut h).0, 0);
+
+    // Peek shows the declaration (and its comment) in place.
+    place(&mut h, 1, use_at);
+    run(&mut h, Command::PeekDefinition);
+    assert_eq!(state(&mut h), (1, use_at..use_at), "peeking doesn't move");
+    assert!(h.query_by_label_contains("spec, line 3").is_some());
+
+    // The overload the call's arguments fit.
+    let call = body.find("raise(p_id, p_pct, 'too much')").unwrap() + 1;
+    place(&mut h, 1, call);
+    run(&mut h, Command::GoToDefinition);
+    let second = body.rfind("procedure raise").unwrap() + "procedure ".len();
+    assert_eq!(state(&mut h), (1, second..second + 5));
+
+    // Switch to the spec at the same overload.
+    place(&mut h, 1, body.rfind("null;").unwrap());
+    run(&mut h, Command::SwitchSpecBody);
+    let in_spec = spec.rfind("procedure raise").unwrap() + "procedure ".len();
+    assert_eq!(state(&mut h), (0, in_spec..in_spec + 5));
+
+    // Go to Symbol lists both parts.
+    run(&mut h, Command::GoToSymbol);
+    assert!(h.query_by_label_contains("variable · Spec").is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    // Find References: in both parts, stepped through with the arrows;
+    // Escape goes back.
+    place(&mut h, 1, use_at);
+    run(&mut h, Command::FindReferences);
+    assert!(h.state().test_reference_rows());
+    assert!(
+        h.query_by_label_contains("if p_pct > g_limit then")
+            .is_some()
+    );
+    assert!(h.query_by_label_contains("g_limit number := 10;").is_some());
+    let first = state(&mut h);
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(2);
+    assert_ne!(state(&mut h), first, "stepping shows the next reference");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().test_reference_rows());
+    assert_eq!(state(&mut h), (1, use_at..use_at), "back where it started");
+}
+
 /// Commit and Rollback follow the focused window's transaction, and never
 /// open a session just to end nothing.
 #[test]

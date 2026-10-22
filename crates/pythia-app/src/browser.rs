@@ -1307,6 +1307,7 @@ impl Browser {
                 connection,
                 object,
                 member,
+                parameter: None,
             }),
             ObjectAction::Reveal(object) => self.reveal(object, effects),
             ObjectAction::Test(object, member) => {

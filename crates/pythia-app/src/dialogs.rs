@@ -759,6 +759,220 @@ fn popup_list(
     result
 }
 
+/// A declaration to jump to with Go to Symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolItem {
+    /// Name, indented by nesting.
+    pub label: String,
+    /// Kind, and the part ("Spec", "Body") where there are several.
+    pub detail: String,
+    pub part: usize,
+    /// The name in the part's text.
+    pub range: std::ops::Range<usize>,
+}
+
+/// The declarations of a text (subprograms, variables, cursors, types, …),
+/// nested ones indented.
+pub fn symbol_items(part: usize, text: &str, part_label: Option<&str>) -> Vec<SymbolItem> {
+    use pythia_lsp_core::{OutlineItem, OutlineKind as K};
+    fn walk(
+        items: &[OutlineItem],
+        depth: usize,
+        part: usize,
+        part_label: Option<&str>,
+        out: &mut Vec<SymbolItem>,
+    ) {
+        for item in items {
+            let kind = match item.kind {
+                K::Statement | K::Block => continue,
+                K::PackageSpec => "package",
+                K::PackageBody => "package body",
+                K::Procedure => "procedure",
+                K::Function => "function",
+                K::Trigger => "trigger",
+                K::Type | K::TypeDecl => "type",
+                K::TypeBody => "type body",
+                K::Variable => "variable",
+                K::Constant => "constant",
+                K::Cursor => "cursor",
+                K::Exception => "exception",
+            };
+            out.push(SymbolItem {
+                label: format!("{}{}", "    ".repeat(depth), item.name.to_lowercase()),
+                detail: match part_label {
+                    Some(p) => format!("{kind} · {p}"),
+                    None => kind.to_owned(),
+                },
+                part,
+                range: item.name_span.clone(),
+            });
+            walk(&item.children, depth + 1, part, part_label, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        &pythia_lsp_core::outline(text),
+        0,
+        part,
+        part_label,
+        &mut out,
+    );
+    out
+}
+
+/// Go to Symbol: a filterable list of the focused editor's declarations.
+#[derive(Default)]
+pub struct SymbolPicker {
+    pub open: bool,
+    query: String,
+    selected: usize,
+    items: Vec<SymbolItem>,
+}
+
+impl SymbolPicker {
+    pub fn show(&mut self, items: Vec<SymbolItem>) {
+        self.open = true;
+        self.query.clear();
+        self.selected = 0;
+        self.items = items;
+    }
+
+    /// The chosen declaration: (part, range).
+    pub fn ui(&mut self, ctx: &egui::Context) -> Option<(usize, std::ops::Range<usize>)> {
+        if !self.open {
+            return None;
+        }
+        // In source order, unless a query ranks them.
+        let mut matches: Vec<(i32, &SymbolItem)> = self
+            .items
+            .iter()
+            .filter_map(|item| fuzzy_score(&self.query, item.label.trim()).map(|s| (s, item)))
+            .collect();
+        if !self.query.trim().is_empty() {
+            matches.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        }
+        let rows: Vec<(String, String)> = matches
+            .iter()
+            .map(|(_, item)| (item.label.clone(), item.detail.clone()))
+            .collect();
+        let picked = popup_list(
+            ctx,
+            "symbol-picker",
+            "Go to symbol…",
+            &mut self.query,
+            &mut self.selected,
+            &rows,
+        );
+        match picked {
+            PopupResult::Picked(i) => {
+                self.open = false;
+                matches
+                    .get(i)
+                    .map(|(_, item)| (item.part, item.range.clone()))
+            }
+            PopupResult::Closed => {
+                self.open = false;
+                None
+            }
+            PopupResult::Open => None,
+        }
+    }
+}
+
+/// Find References: the found places of a document, stepped through with the
+/// arrow keys.
+#[derive(Default)]
+pub struct ReferenceList {
+    pub open: bool,
+    query: String,
+    selected: usize,
+    pub doc: Option<DocId>,
+    items: Vec<crate::documents::Reference>,
+    /// The selection shown last, to show a new one once.
+    shown: Option<usize>,
+    /// A reference was shown: the place the list was opened from is in the
+    /// navigation history.
+    pub jumped: bool,
+}
+
+pub enum ReferenceAction {
+    /// Show this reference (the selection moved, or it was picked).
+    Show {
+        doc: DocId,
+        part: usize,
+        range: std::ops::Range<usize>,
+    },
+    /// Closed with Escape: back to where the list was opened.
+    Cancel,
+}
+
+impl ReferenceList {
+    pub fn show(&mut self, doc: DocId, items: Vec<crate::documents::Reference>) {
+        self.open = true;
+        self.query.clear();
+        self.selected = 0;
+        self.shown = None;
+        self.jumped = false;
+        self.doc = Some(doc);
+        self.items = items;
+    }
+
+    pub fn ui(&mut self, ctx: &egui::Context) -> Option<ReferenceAction> {
+        let doc = self.doc.filter(|_| self.open)?;
+        // Before the list consumes it.
+        let escape = ctx.input(|i| i.key_pressed(Key::Escape));
+        let matches: Vec<&crate::documents::Reference> = self
+            .items
+            .iter()
+            .filter(|r| fuzzy_score(&self.query, &r.text).is_some())
+            .collect();
+        let rows: Vec<(String, String)> = matches
+            .iter()
+            .map(|r| {
+                let place = match r.part_label {
+                    Some(p) => format!("{p} {}", r.line),
+                    None => format!("line {}", r.line),
+                };
+                (r.text.clone(), place)
+            })
+            .collect();
+        let hint = format!(
+            "{} reference{} to {}, ↑↓ to step through",
+            self.items.len(),
+            if self.items.len() == 1 { "" } else { "s" },
+            self.items.first().map_or("", |r| r.word.as_str())
+        );
+        let picked = popup_list(
+            ctx,
+            "reference-list",
+            &hint,
+            &mut self.query,
+            &mut self.selected,
+            &rows,
+        );
+        let show = |r: &crate::documents::Reference| ReferenceAction::Show {
+            doc,
+            part: r.part,
+            range: r.range.clone(),
+        };
+        match picked {
+            PopupResult::Picked(i) => {
+                self.open = false;
+                matches.get(i).map(|r| show(r))
+            }
+            PopupResult::Closed => {
+                self.open = false;
+                escape.then_some(ReferenceAction::Cancel)
+            }
+            PopupResult::Open if self.shown != Some(self.selected) && !matches.is_empty() => {
+                self.shown = Some(self.selected);
+                matches.get(self.selected).map(|r| show(r))
+            }
+            PopupResult::Open => None,
+        }
+    }
+}
+
 /// Quick object finder across all visible schemas.
 #[derive(Default)]
 pub struct ObjectFinder {

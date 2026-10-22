@@ -82,6 +82,49 @@ pub struct Effects {
     pub object_actions: Vec<(String, crate::browser::ObjectAction)>,
     /// App commands to run (e.g. Format from an editor's context menu).
     pub commands: Vec<crate::commands::Command>,
+    /// The editor jumped (go to definition, …) from this place: (part,
+    /// byte offset), for going back.
+    pub jumped_from: Option<(usize, usize)>,
+    /// References found in the document, to list.
+    pub references: Option<Vec<Reference>>,
+}
+
+/// A found reference in a document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    /// Part of a program window (0 elsewhere).
+    pub part: usize,
+    pub range: std::ops::Range<usize>,
+    /// 1-based line and its text.
+    pub line: usize,
+    pub text: String,
+    /// "Spec", "Body", or none for a single text.
+    pub part_label: Option<&'static str>,
+    /// The name referred to.
+    pub word: String,
+}
+
+impl Reference {
+    pub fn new(
+        part: usize,
+        range: std::ops::Range<usize>,
+        source: &str,
+        part_label: Option<&'static str>,
+    ) -> Self {
+        let start = range.start.min(source.len());
+        let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = source[start..]
+            .find('\n')
+            .map_or(source.len(), |i| start + i);
+        Self {
+            part,
+            line: source[..start].matches('\n').count() + 1,
+            text: source[line_start..line_end].trim().to_owned(),
+            word: source.get(range.clone()).unwrap_or_default().to_owned(),
+            range,
+            part_label,
+        }
+    }
 }
 
 impl Effects {
@@ -100,6 +143,8 @@ impl Effects {
         self.breakpoints.extend(other.breakpoints);
         self.object_actions.extend(other.object_actions);
         self.commands.extend(other.commands);
+        self.jumped_from = other.jumped_from.or(self.jumped_from.take());
+        self.references = other.references.or(self.references.take());
     }
 }
 
@@ -146,6 +191,8 @@ pub enum OpenRequest {
         connection: String,
         object: ObjectRef,
         member: String,
+        /// Select this parameter of the member (named notation).
+        parameter: Option<String>,
     },
     /// Insert text at the cursor of the focused SQL window (or a new one).
     InsertText { text: String },
@@ -262,6 +309,42 @@ impl Document {
             DocKind::TableEditor(t) => t.is_dirty(),
             DocKind::ObjectEditor(e) => e.is_dirty(),
             _ => false,
+        }
+    }
+
+    /// Asks the editor for navigation at its caret (SQL and program windows).
+    pub fn navigate(&mut self, request: crate::assist::Request) {
+        match &mut self.kind {
+            DocKind::Sql(w) => w.navigate(request),
+            DocKind::Program(w) => w.navigate(request),
+            _ => {}
+        }
+    }
+
+    /// The editor part and caret, for navigation history.
+    pub fn position(&self) -> Option<(usize, usize)> {
+        match &self.kind {
+            DocKind::Sql(w) => Some((0, w.editor.cursor())),
+            DocKind::Program(w) => w.position(),
+            _ => None,
+        }
+    }
+
+    /// Shows a range of an editor part.
+    pub fn goto_position(&mut self, part: usize, range: std::ops::Range<usize>) {
+        match &mut self.kind {
+            DocKind::Sql(w) => w.editor.select(range),
+            DocKind::Program(w) => w.goto_position(part, range),
+            _ => {}
+        }
+    }
+
+    /// Declarations to jump to with Go to Symbol.
+    pub fn symbols(&self) -> Vec<crate::dialogs::SymbolItem> {
+        match &self.kind {
+            DocKind::Sql(w) => w.symbols(),
+            DocKind::Program(w) => w.symbols(),
+            _ => Vec::new(),
         }
     }
 

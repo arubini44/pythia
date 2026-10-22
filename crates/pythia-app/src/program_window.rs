@@ -47,8 +47,8 @@ struct State {
     message: Option<(bool, String)>,
     /// Line to show once the part's source has loaded: (part, line).
     pending_goto: Option<(usize, usize)>,
-    /// Subprogram to show once all parts have loaded.
-    pending_member: Option<String>,
+    /// Subprogram (and parameter) to show once all parts have loaded.
+    pending_member: Option<(String, Option<String>)>,
     /// LAST_DDL_TIME of each part when loaded or last compiled here.
     ddl_times: HashMap<usize, Option<String>>,
     /// Requests reading LAST_DDL_TIME: id → (part, purpose).
@@ -109,21 +109,21 @@ impl ProgramWindow {
 
     /// Shows a subprogram: its implementation in the body, else its
     /// declaration in the spec (now, or once the source has loaded).
-    pub fn goto_member(&mut self, member: &str) {
-        self.state.pending_member = Some(member.to_owned());
+    pub fn goto_member(&mut self, member: &str, parameter: Option<&str>) {
+        self.state.pending_member = Some((member.to_owned(), parameter.map(str::to_owned)));
         if self.state.loading.is_empty() {
             self.show_member();
         }
     }
 
     fn show_member(&mut self) {
-        let Some(member) = self.state.pending_member.take() else {
+        let Some((member, parameter)) = self.state.pending_member.take() else {
             return;
         };
         // Bodies come after specs; look there first.
         for i in (0..self.parts.len()).rev() {
             let part = &mut self.parts[i];
-            if let Some(span) = member_span(part.editor.text(), &member) {
+            if let Some(span) = member_span(part.editor.text(), &member, parameter.as_deref()) {
                 self.active = i;
                 part.editor.select(span);
                 return;
@@ -547,6 +547,29 @@ impl ProgramWindow {
             });
             ui.add_space(4.0);
         }
+        // The other part of a package or type: its declarations are known
+        // here, and jumps and references can lead there.
+        let companion = self.companion_of(self.active);
+        match companion {
+            Some(other) => {
+                let active = self.active;
+                let (low, high) = self.parts.split_at_mut(active.max(other));
+                let (this, that) = if other < active {
+                    (&mut high[0], &low[other])
+                } else {
+                    (&mut low[active], &high[0])
+                };
+                this.assist
+                    .set_companion(Some((that.editor.revision(), other < active)), || {
+                        that.editor.text().to_owned()
+                    });
+            }
+            None => {
+                if let Some(part) = self.parts.get_mut(self.active) {
+                    part.assist.set_companion(None, String::new);
+                }
+            }
+        }
         let Some(part) = self.parts.get_mut(self.active) else {
             return effects;
         };
@@ -631,7 +654,101 @@ impl ProgramWindow {
                 part.editor.set_debug_lines(&lines, current);
             }
         });
+        let (from, jump, references) = (
+            part.assist.take_jumped_from(),
+            part.assist.take_companion_jump(),
+            part.assist.take_references(),
+        );
+        let active = self.active;
+        if let Some(from) = from {
+            effects.jumped_from = Some((active, from));
+        }
+        if let (Some(range), Some(other)) = (jump, companion) {
+            self.active = other;
+            self.parts[other].editor.select(range);
+        }
+        if let Some(places) = references {
+            effects.references = Some(
+                places
+                    .into_iter()
+                    .filter_map(|place| {
+                        let (i, range) = match place {
+                            crate::assist::Place::Here(r) => (active, r),
+                            crate::assist::Place::Companion(r) => (companion?, r),
+                        };
+                        let part = &self.parts[i];
+                        Some(crate::documents::Reference::new(
+                            i,
+                            range,
+                            part.editor.text(),
+                            Some(part.label()),
+                        ))
+                    })
+                    .collect(),
+            );
+        }
         effects
+    }
+
+    /// Asks the active part's editor for navigation at its caret.
+    pub fn navigate(&mut self, request: crate::assist::Request) {
+        if let Some(part) = self.parts.get_mut(self.active) {
+            let at = part.editor.cursor();
+            part.assist.request(request, at);
+        }
+    }
+
+    /// Declarations of all parts, for Go to Symbol.
+    pub fn symbols(&self) -> Vec<crate::dialogs::SymbolItem> {
+        let several = self.parts.len() > 1;
+        self.parts
+            .iter()
+            .enumerate()
+            .flat_map(|(i, p)| {
+                crate::dialogs::symbol_items(i, p.editor.text(), several.then(|| p.label()))
+            })
+            .collect()
+    }
+
+    /// Shows the other part, at the counterpart of the subprogram around the
+    /// caret. Returns where it jumped from.
+    pub fn switch_part(&mut self) -> Option<(usize, usize)> {
+        let other = self.companion_of(self.active)?;
+        let from = self.position()?;
+        let here = &self.parts[self.active];
+        let there = subprograms(self.parts[other].editor.text());
+        // Innermost first; a local subprogram of the body has none.
+        let target = enclosing_subprograms(here.editor.text(), here.editor.cursor())
+            .into_iter()
+            .rev()
+            .find_map(|(name, nth)| {
+                let same: Vec<_> = there.iter().filter(|(n, _)| *n == name).collect();
+                same.get(nth).or(same.first()).map(|(_, span)| span.clone())
+            });
+        self.active = other;
+        if let Some(span) = target {
+            self.parts[other].editor.select(span);
+        }
+        Some(from)
+    }
+
+    /// The part a part's declarations pair with: spec ↔ body.
+    fn companion_of(&self, part: usize) -> Option<usize> {
+        (self.parts.len() == 2).then_some(1 - part.min(1))
+    }
+
+    /// Shows a place of a part (navigation history, reference lists).
+    pub fn goto_position(&mut self, part: usize, range: std::ops::Range<usize>) {
+        if let Some(p) = self.parts.get_mut(part) {
+            self.active = part;
+            p.editor.select(range);
+        }
+    }
+
+    /// The active part and caret, for navigation history.
+    pub fn position(&self) -> Option<(usize, usize)> {
+        let part = self.parts.get(self.active)?;
+        Some((self.active, part.editor.cursor()))
     }
 }
 
@@ -646,26 +763,110 @@ impl Part {
         }
     }
 
+    /// "Spec" or "Body" (or "Source" for a single unit).
+    fn label(&self) -> &'static str {
+        match self.object_type {
+            ObjectType::PackageBody | ObjectType::TypeBody => "Body",
+            ObjectType::Package | ObjectType::Type => "Spec",
+            _ => "Source",
+        }
+    }
+
     fn is_dirty(&self) -> bool {
         self.editor.text() != self.saved
     }
 }
 
-/// The name of the declaration `member` (a subprogram, variable, type, …)
-/// in `text`.
-fn member_span(text: &str, member: &str) -> Option<std::ops::Range<usize>> {
+/// Procedures and functions of a text with their name spans, in order
+/// (nested ones too), names upper-cased.
+fn subprograms(text: &str) -> Vec<(String, std::ops::Range<usize>)> {
+    subprogram_items(text)
+        .into_iter()
+        .map(|(name, _, name_span)| (name, name_span))
+        .collect()
+}
+
+fn subprogram_items(text: &str) -> Vec<(String, std::ops::Range<usize>, std::ops::Range<usize>)> {
     use pythia_lsp_core::{OutlineItem, OutlineKind};
-    fn find(items: &[OutlineItem], member: &str) -> Option<std::ops::Range<usize>> {
-        items.iter().find_map(|item| {
+    fn walk(
+        items: &[OutlineItem],
+        out: &mut Vec<(String, std::ops::Range<usize>, std::ops::Range<usize>)>,
+    ) {
+        for item in items {
+            if matches!(item.kind, OutlineKind::Procedure | OutlineKind::Function) {
+                out.push((
+                    item.name.to_uppercase(),
+                    item.span.clone(),
+                    item.name_span.clone(),
+                ));
+            }
+            walk(&item.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&pythia_lsp_core::outline(text), &mut out);
+    out
+}
+
+/// The subprograms around `offset`, outermost first: (name, which overload
+/// of that name it is).
+fn enclosing_subprograms(text: &str, offset: usize) -> Vec<(String, usize)> {
+    let items = subprogram_items(text);
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, span, _))| span.start <= offset && offset <= span.end)
+        .map(|(i, (name, _, _))| {
+            let nth = items[..i].iter().filter(|(n, _, _)| n == name).count();
+            (name.clone(), nth)
+        })
+        .collect()
+}
+
+/// The name of the declaration `member` (a subprogram, variable, type, …)
+/// in `text`, or of its `parameter`: in the first overload that has it.
+fn member_span(
+    text: &str,
+    member: &str,
+    parameter: Option<&str>,
+) -> Option<std::ops::Range<usize>> {
+    use pythia_lsp_core::{OutlineItem, OutlineKind};
+    fn collect(items: &[OutlineItem], member: &str, out: &mut Vec<(usize, usize, usize)>) {
+        for item in items {
             let declaration = !matches!(item.kind, OutlineKind::Statement | OutlineKind::Block);
             if declaration && item.name.eq_ignore_ascii_case(member) {
-                Some(item.name_span.clone())
-            } else {
-                find(&item.children, member)
+                out.push((item.name_span.start, item.name_span.end, item.span.end));
             }
-        })
+            collect(&item.children, member, out);
+        }
     }
-    find(&pythia_lsp_core::outline(text), member)
+    let mut found = Vec::new();
+    collect(&pythia_lsp_core::outline(text), member, &mut found);
+    if let Some(parameter) = parameter {
+        // The first mention after the name is in the parameter list.
+        for &(_, name_end, end) in &found {
+            if let Some(at) = find_word(&text[name_end..end.min(text.len())], parameter) {
+                return Some(name_end + at..name_end + at + parameter.len());
+            }
+        }
+    }
+    found.first().map(|&(start, end, _)| start..end)
+}
+
+/// Byte offset of the first whole-word, case-insensitive `word` in `text`.
+fn find_word(text: &str, word: &str) -> Option<usize> {
+    let is_ident = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '#');
+    let upper = text.to_uppercase();
+    let word = word.to_uppercase();
+    // Upper-casing keeps the byte offsets of ASCII identifiers.
+    (upper.len() == text.len())
+        .then(|| {
+            upper.match_indices(&word).map(|(i, _)| i).find(|&i| {
+                !text[..i].chars().next_back().is_some_and(is_ident)
+                    && !text[i + word.len()..].chars().next().is_some_and(is_ident)
+            })
+        })
+        .flatten()
 }
 
 /// The debugger's name for a program window part.
@@ -760,6 +961,44 @@ fn markers(errors: &[CompileError]) -> Vec<Marker> {
 
 #[cfg(test)]
 mod tests {
+    use super::{enclosing_subprograms, member_span, subprograms};
+
+    #[test]
+    fn subprograms_around_the_caret() {
+        let body = "create or replace package body p as\n  \
+                    procedure a(x number) is\n    procedure inner is begin null; end;\n  \
+                    begin inner; end;\n  procedure a is begin null; end;\nend;";
+        let at = body.find("begin inner").unwrap();
+        assert_eq!(enclosing_subprograms(body, at), [("A".to_owned(), 0)]);
+        let at = body.find("begin null; end;\nend").unwrap();
+        assert_eq!(enclosing_subprograms(body, at), [("A".to_owned(), 1)]);
+        let at = body.find("null; end;\n  begin").unwrap();
+        assert_eq!(
+            enclosing_subprograms(body, at),
+            [("A".to_owned(), 0), ("INNER".to_owned(), 0)]
+        );
+        let names: Vec<String> = subprograms(body).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["A", "INNER", "A"]);
+    }
+
+    #[test]
+    fn members_and_their_parameters() {
+        let body = "create or replace package body p as\n  g_x number;\n  \
+                    procedure raise(p_id number, p_pct number) is\n  begin null; end;\n  \
+                    procedure raise(p_id number, p_amount number) is\n  begin null; end;\nend;";
+        let first = body.find("raise").unwrap();
+        assert_eq!(member_span(body, "RAISE", None), Some(first..first + 5));
+        // The overload that has the parameter.
+        let amount = body.find("p_amount").unwrap();
+        assert_eq!(
+            member_span(body, "raise", Some("P_AMOUNT")),
+            Some(amount..amount + 8)
+        );
+        let x = body.find("g_x").unwrap();
+        assert_eq!(member_span(body, "G_X", None), Some(x..x + 3));
+        assert_eq!(member_span(body, "nope", None), None);
+    }
+
     use super::*;
 
     #[test]

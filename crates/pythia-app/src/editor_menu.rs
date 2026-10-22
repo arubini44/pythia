@@ -5,7 +5,7 @@
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use pythia_ui::icons::Icon;
 
-use crate::assist::{Assist, ContextTarget};
+use crate::assist::{Assist, ContextTarget, Request};
 use crate::browser::{MenuOptions, object_menu};
 use crate::commands::{Command, Keymap};
 use crate::documents::{DocContext, Effects};
@@ -57,13 +57,17 @@ pub fn show(
                     ui.separator();
                 }
             }
-            Some((offset, ContextTarget::Local(range))) => {
+            Some((offset, ContextTarget::Local(_))) => {
                 if ui.button("Go to declaration").clicked() {
-                    editor.select(range);
+                    assist.request(Request::Definition, offset);
+                    ui.close();
+                }
+                if ui.button("Peek declaration").clicked() {
+                    assist.request(Request::Peek, offset);
                     ui.close();
                 }
                 if ui.button("Find references").clicked() {
-                    assist.references(editor, offset);
+                    assist.request(Request::References, offset);
                     ui.close();
                 }
                 ui.separator();
@@ -76,6 +80,24 @@ pub fn show(
             ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut))
                 .clicked()
         };
+        let keymap = Keymap::with_overrides(cx.settings.keymap, &cx.settings.keybindings);
+        let mut command = |ui: &mut egui::Ui, command: Command| {
+            if item(
+                ui,
+                command.short_label(),
+                keymap.shortcut_text(ui.ctx(), command),
+                true,
+            ) {
+                effects.commands.push(command);
+                ui.close();
+            }
+        };
+        command(ui, Command::GoToSymbol);
+        if assist.companion_is_spec().is_some() {
+            command(ui, Command::SwitchSpecBody);
+        }
+        ui.separator();
+
         if item(ui, "Cut", shortcut(Key::X), selected) {
             if let Some(range) = editor.selection() {
                 ui.ctx().copy_text(editor.text()[range].to_owned());
@@ -106,16 +128,7 @@ pub fn show(
             editor.toggle_comment(ui.input(|i| i.time));
             ui.close();
         }
-        let keymap = Keymap::with_overrides(cx.settings.keymap, &cx.settings.keybindings);
-        if item(
-            ui,
-            Command::Format.short_label(),
-            keymap.shortcut_text(ui.ctx(), Command::Format),
-            true,
-        ) {
-            effects.commands.push(Command::Format);
-            ui.close();
-        }
+        command(ui, Command::Format);
     });
     if menu.is_some() {
         // The word's hover would cover the menu.

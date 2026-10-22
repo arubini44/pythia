@@ -336,6 +336,52 @@ fn kind_label(kind: SymbolKind) -> &'static str {
     }
 }
 
+/// The comment right above a declaration starting at `start` (no blank
+/// line between), without comment markers: how packages document their API.
+/// Comments at the end of a code line belong to that line, not below.
+fn doc_comment(sema: &Sema, start: usize) -> Option<String> {
+    let tokens = &sema.tokens[..sema.tokens.partition_point(|t| t.span.end <= start)];
+    // Whether the token at `i` is the first thing on its line.
+    let starts_line = |i: usize| {
+        tokens[..i]
+            .iter()
+            .rev()
+            .find(|t| t.kind != TokenKind::Whitespace)
+            .is_none_or(|t| t.kind == TokenKind::Newline)
+    };
+    let mut lines: Vec<String> = Vec::new();
+    let mut newlines = 0;
+    for (i, t) in tokens.iter().enumerate().rev() {
+        match t.kind {
+            TokenKind::Whitespace => {}
+            TokenKind::Newline => {
+                newlines += 1;
+                if newlines > 1 {
+                    break;
+                }
+            }
+            TokenKind::LineComment | TokenKind::BlockComment if starts_line(i) => {
+                newlines = 0;
+                let text = sema.text(&t.span);
+                let text = if t.kind == TokenKind::LineComment {
+                    text.trim_start_matches('-')
+                } else {
+                    text.trim_start_matches("/*").trim_end_matches("*/")
+                };
+                for line in text.lines().rev() {
+                    let line = line.trim().trim_start_matches('*').trim();
+                    if !line.is_empty() {
+                        lines.push(line.to_owned());
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    lines.reverse();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// The declaration text, shortened to its first lines.
 fn declaration_text(sema: &Sema, s: &Symbol) -> String {
     let end = s.body.map_or(s.span.end, |b| {
@@ -361,6 +407,15 @@ fn describe(sema: &Sema, resolved: &Resolved) -> (String, String) {
             let s = sema.symbol(*r);
             let title = format!("{} {}", kind_label(s.kind), sema.text(&s.name.span));
             let mut detail = declaration_text(sema, s);
+            // The comment documenting it, at the declaration or (for a body
+            // implementation) at the spec declaration.
+            let documented = std::iter::once(*r).chain(sema.counterpart(*r));
+            if let Some(doc) = documented
+                .filter_map(|d| doc_comment(sema, sema.symbol(d).span.start))
+                .next()
+            {
+                detail = format!("{doc}\n{detail}");
+            }
             if s.kind == SymbolKind::LoopIndex {
                 if let Some(q) = s.query {
                     let cols: Vec<String> = sema
@@ -465,9 +520,43 @@ fn describe(sema: &Sema, resolved: &Resolved) -> (String, String) {
             let mut lines = Vec::new();
             for s in scope.symbols.iter().filter(|s| &s.name.name == name) {
                 title = format!("{} {pkg}.{}", kind_label(s.kind), sema.text(&s.name.span));
+                if let Some(doc) = doc_comment(sema, s.span.start) {
+                    lines.push(doc);
+                }
                 lines.push(declaration_text(sema, s));
             }
             (title, lines.join("\n"))
+        }
+        Resolved::Parameter { subprogram, index } => {
+            let s = sema.symbol(*subprogram);
+            let p = &s.params[*index];
+            (
+                format!(
+                    "parameter {} of {}",
+                    sema.text(&p.name.span),
+                    sema.text(&s.name.span)
+                ),
+                sema.text(&p.span).to_owned(),
+            )
+        }
+        Resolved::CatalogParameter {
+            object,
+            member,
+            param,
+        } => {
+            let of = match member {
+                Some(m) => format!("{}.{}.{m}", object.owner, object.name),
+                None => format!("{}.{}", object.owner, object.name),
+            };
+            (
+                format!("parameter {} of {of}", param.name.to_lowercase()),
+                format!(
+                    "{} {} {}",
+                    param.name.to_lowercase(),
+                    param.mode.label(),
+                    param.data_type
+                ),
+            )
         }
         Resolved::Builtin(b) => (
             format!("function {}", b.name),
@@ -490,6 +579,8 @@ pub enum Definition {
         name: String,
         object_type: String,
         member: Option<String>,
+        /// A parameter of `member` (or of the object itself).
+        parameter: Option<String>,
     },
 }
 
@@ -544,6 +635,7 @@ pub(crate) fn definition(sema: &Sema, offset: usize) -> Option<Definition> {
                 name: o.name,
                 object_type: o.object_type,
                 member: Some(f.name),
+                parameter: None,
             })
         }
         Resolved::Object(o) => Some(Definition::Object {
@@ -551,23 +643,49 @@ pub(crate) fn definition(sema: &Sema, offset: usize) -> Option<Definition> {
             name: o.name,
             object_type: o.object_type,
             member: None,
+            parameter: None,
         }),
         Resolved::Member { object, name, .. } => Some(Definition::Object {
             owner: object.owner,
             name: object.name,
             object_type: object.object_type,
             member: Some(name),
+            parameter: None,
+        }),
+        Resolved::Parameter { subprogram, index } => {
+            // The implementation's parameter, where there is one.
+            let s = sema.symbol(subprogram);
+            let target = match sema.counterpart(subprogram) {
+                Some(c) if s.forward => sema.symbol(c),
+                _ => s,
+            };
+            let p = target.params.get(index).unwrap_or(&s.params[index]);
+            Some(Definition::Local(p.name.span.clone()))
+        }
+        Resolved::CatalogParameter {
+            object,
+            member,
+            param,
+        } => Some(Definition::Object {
+            owner: object.owner,
+            name: object.name,
+            object_type: object.object_type,
+            member,
+            parameter: Some(param.name),
         }),
         Resolved::LocalMember { package, name } => {
             let scope = sema.ast.scope(package);
-            let r = scope
-                .symbols
-                .iter()
-                .position(|s| s.name.name == name)
+            let candidates: Vec<SymRef> = (0..scope.symbols.len())
+                .filter(|&index| scope.symbols[index].name.name == name)
                 .map(|index| SymRef {
                     scope: package,
                     index,
-                })?;
+                })
+                .collect();
+            let r = match sema.token_at(span.start) {
+                Some(i) => sema.pick_overload(&candidates, i)?,
+                None => *candidates.first()?,
+            };
             // Prefer the implementation in the body.
             let target = if sema.symbol(r).forward {
                 sema.counterpart(r).unwrap_or(r)
