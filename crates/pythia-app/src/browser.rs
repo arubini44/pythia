@@ -45,16 +45,28 @@ enum Section {
     Recent,
     Users,
     Roles,
+    Profiles,
 }
 
 impl Section {
-    /// The users or roles a section lists.
+    /// Sections listing the database's own objects, in display order.
+    const DATABASE: [Section; 3] = [Section::Users, Section::Roles, Section::Profiles];
+
+    /// The users, roles or profiles a section lists.
     fn accounts(self) -> Option<ObjectType> {
         match self {
             Section::Users => Some(ObjectType::User),
             Section::Roles => Some(ObjectType::Role),
+            Section::Profiles => Some(ObjectType::Profile),
             Section::Favorites | Section::Recent => None,
         }
+    }
+
+    /// The section listing objects of a type.
+    fn listing(object_type: ObjectType) -> Option<Section> {
+        Section::DATABASE
+            .into_iter()
+            .find(|s| s.accounts() == Some(object_type))
     }
 }
 
@@ -401,7 +413,7 @@ impl Browser {
         );
     }
 
-    /// Loads the users or roles of the database.
+    /// Loads the users, roles or profiles of the database.
     fn load_accounts(&mut self, effects: &mut Effects, object_type: ObjectType) {
         self.accounts.insert(object_type, Loaded::Loading);
         let id = request_id();
@@ -477,16 +489,12 @@ impl Browser {
     /// as it is now and shows it.
     pub fn show_changed(&mut self, object: ObjectRef) -> Effects {
         let mut effects = Effects::default();
-        match object.object_type {
-            t @ (ObjectType::User | ObjectType::Role) => {
-                self.load_accounts(&mut effects, t);
-                let section = match t {
-                    ObjectType::User => Section::Users,
-                    _ => Section::Roles,
-                };
+        match Section::listing(object.object_type) {
+            Some(section) => {
+                self.load_accounts(&mut effects, object.object_type);
                 self.expanded.insert(Node::Section(section));
             }
-            _ => {
+            None => {
                 self.refresh(&mut effects);
                 self.reveal(object, &mut effects);
             }
@@ -976,7 +984,7 @@ impl Browser {
                 }
             }
         }
-        for section in [Section::Users, Section::Roles] {
+        for section in Section::DATABASE {
             let Some(object_type) = section.accounts() else {
                 continue;
             };
@@ -1268,6 +1276,7 @@ impl Browser {
                         Section::Recent => (Icon::History, "Recent"),
                         Section::Users => (Icon::Schema, "Users"),
                         Section::Roles => (Icon::Lock, "Roles"),
+                        Section::Profiles => (Icon::Settings, "Profiles"),
                     };
                     ui.add(icon.sized(ui, small));
                     let r = ui
@@ -1568,8 +1577,14 @@ impl Browser {
                 object.object_type.dictionary_name().to_lowercase(),
                 object.qualified()
             ));
-            if object.object_type == ObjectType::User {
-                ui.weak("A user who owns objects isn't dropped (that needs CASCADE).");
+            match object.object_type {
+                ObjectType::User => {
+                    ui.weak("A user who owns objects isn't dropped (that needs CASCADE).");
+                }
+                ObjectType::Profile => {
+                    ui.weak("Users with this profile get the DEFAULT profile.");
+                }
+                _ => {}
             }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -1659,7 +1674,7 @@ fn group_menu(ui: &mut Ui, table: &ObjectRef, group: Group, actions: &mut Vec<Ob
     }
 }
 
-/// The context menu of a user or role.
+/// The context menu of a user, role or profile.
 fn account_menu(ui: &mut Ui, account: &ObjectRef, actions: &mut Vec<ObjectAction>) {
     let kind = account.object_type.dictionary_name().to_lowercase();
     let mut item = |ui: &mut Ui, label: &str, action: ObjectAction| {
@@ -1687,12 +1702,16 @@ fn account_menu(ui: &mut Ui, account: &ObjectRef, actions: &mut Vec<ObjectAction
     );
     ui.separator();
     item(ui, "Copy name", ObjectAction::CopyName(account.clone()));
-    ui.separator();
-    item(ui, "Drop…", ObjectAction::Drop(account.clone()));
+    // The DEFAULT profile can't be dropped.
+    if !(account.object_type == ObjectType::Profile && account.name == "DEFAULT") {
+        ui.separator();
+        item(ui, "Drop…", ObjectAction::Drop(account.clone()));
+    }
 }
 
-/// Names of the database's users, or of its roles (all of them with
-/// catalog access, else those granted to the session's user).
+/// Names of the database's users, of its roles (all of them with catalog
+/// access, else those granted to the session's user), or of its profiles
+/// (with catalog access).
 fn account_names(
     conn: &pythia_db::oracle::Connection,
     object_type: ObjectType,
@@ -1706,6 +1725,8 @@ fn account_names(
     };
     match object_type {
         ObjectType::User => read("select username from all_users order by username"),
+        ObjectType::Profile => read("select distinct profile from dba_profiles order by profile")
+            .map_err(|_| pythia_db::DbError::new("Listing profiles needs access to DBA_PROFILES")),
         _ => read("select role from dba_roles order by role")
             .or_else(|_| read("select granted_role from user_role_privs order by granted_role")),
     }
@@ -1718,6 +1739,8 @@ fn drop_sql(o: &ObjectRef) -> String {
     match (o.owner.as_str(), o.object_type) {
         ("PUBLIC", _) => format!("drop public {kind} {}", quote_ident(&o.name)),
         (_, ObjectType::DatabaseLink) => format!("drop {kind} {}", quote_ident(&o.name)),
+        // Users with the profile get DEFAULT.
+        (_, ObjectType::Profile) => format!("drop {kind} {} cascade", o.qualified()),
         _ => format!("drop {kind} {}", o.qualified()),
     }
 }

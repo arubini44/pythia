@@ -56,12 +56,13 @@ for Linux, Windows and macOS.
 - Create objects from the browser's right-click menu (or File → New
   Object): a table builder (columns with a type picker, primary and
   foreign keys, checks, indexes, identity columns, range, interval, list
-  or hash partitioning, temporary tables, a copy of another table), and forms for views, materialized views, sequences,
-  synonyms, indexes, database links, users and roles, with a preview of the
+  or hash partitioning, temporary tables, a copy of another table), and
+  forms for views, materialized views, sequences, synonyms, indexes,
+  database links, users, roles and profiles, with a preview of the
   generated DDL. Triggers, procedures, functions, packages and types start
   from a form that writes their first source for a program window.
 - Form editors for existing sequences, views, materialized views, synonyms,
-  indexes, database links, users, roles and grants.
+  indexes, database links, users, roles, profiles and grants.
 - Program windows with spec and body, compile with clickable errors
   (gutter markers and squiggles), unsaved-change tracking, save to file.
 - **Test…** generates a ready-to-run block for any procedure or function

@@ -30,10 +30,11 @@ pub enum ObjectType {
     Job,
     Library,
     Directory,
-    /// Users and roles aren't schema objects: their `ObjectRef` has an empty
-    /// owner.
+    /// Users, roles and profiles aren't schema objects: their `ObjectRef`
+    /// has an empty owner.
     User,
     Role,
+    Profile,
 }
 
 impl ObjectType {
@@ -82,6 +83,7 @@ impl ObjectType {
             ObjectType::Directory => "DIRECTORY",
             ObjectType::User => "USER",
             ObjectType::Role => "ROLE",
+            ObjectType::Profile => "PROFILE",
         }
     }
 
@@ -113,6 +115,7 @@ impl ObjectType {
         ObjectType::Directory,
         ObjectType::User,
         ObjectType::Role,
+        ObjectType::Profile,
     ];
 
     /// Folder label in the object browser.
@@ -138,7 +141,18 @@ impl ObjectType {
             ObjectType::Directory => "Directories",
             ObjectType::User => "Users",
             ObjectType::Role => "Roles",
+            ObjectType::Profile => "Profiles",
         }
+    }
+
+    /// Objects that belong to the database rather than a schema (the
+    /// browser lists them in sections of their own; their `ObjectRef`
+    /// has an empty owner).
+    pub fn is_database_object(self) -> bool {
+        matches!(
+            self,
+            ObjectType::User | ObjectType::Role | ObjectType::Profile | ObjectType::Directory
+        )
     }
 
     /// Stored PL/SQL (or Java) source that can be opened in a program window.

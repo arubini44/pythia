@@ -2412,6 +2412,40 @@ create table pythia_nof_items (id number primary key, label varchar2(40), price 
     assert_eq!(h.state().test_focused_title().as_deref(), Some("New user"));
     let role = open(&mut h, "", ObjectType::Role, None);
     assert_eq!(role, Err("Enter a name".into()));
+    let new_profile = open(&mut h, "", ObjectType::Profile, None);
+    assert_eq!(new_profile, Err("Enter a name".into()));
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d
+            .downcast_mut::<crate::object_editor::ProfileDef>()
+            .unwrap();
+        d.name = "app_users".into();
+        for l in &mut d.limits {
+            match l.resource.as_str() {
+                "FAILED_LOGIN_ATTEMPTS" => l.value = "5".into(),
+                "PASSWORD_LIFE_TIME" => l.value = "90".into(),
+                "SESSIONS_PER_USER" => l.value = "2".into(),
+                _ => {}
+            }
+        }
+    });
+    h.run_steps(3);
+    save(&mut h, "new-profile");
+    let s = h
+        .state_mut()
+        .test_object_editor()
+        .statements_for_test()
+        .unwrap();
+    assert_eq!(
+        s,
+        [
+            "create profile APP_USERS limit\n  failed_login_attempts 5\n  \
+          password_life_time 90\n  sessions_per_user 2"
+        ]
+    );
+    assert_eq!(
+        h.state().test_focused_title().as_deref(),
+        Some("New profile")
+    );
     let ty = open(&mut h, "PYTHIA", ObjectType::Type, None);
     assert_eq!(ty, Err("Enter a name".into()));
     let procedure = open(&mut h, "PYTHIA", ObjectType::Procedure, None);
@@ -2486,6 +2520,25 @@ create table pythia_bnm_t (id number primary key);"
     assert!(h.query_by_label("Show schema").is_some());
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
+    // So are profiles; DEFAULT can't be dropped.
+    h.state_mut().test_browser().set_filter("DEFAULT");
+    h.run_steps(2);
+    h.get_by_label("Profiles").click();
+    h.run_steps(2);
+    wait_until(&mut h, "profiles", |app| !app.test_browser_loading());
+    h.get_by_label("default").click_secondary();
+    h.run_steps(2);
+    assert!(h.query_by_label("New profile…").is_some());
+    assert!(h.query_by_label("Drop…").is_none());
+    h.get_by_label("Edit profile…").click();
+    h.run_steps(2);
+    wait_until(&mut h, "profile form", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    assert_eq!(
+        h.state().test_focused_title().as_deref(),
+        Some("default (profile)")
+    );
+    save(&mut h, "edit-default-profile");
 
     h.state_mut().test_browser().set_filter("PYTHIA_BNM");
     h.run_steps(2);

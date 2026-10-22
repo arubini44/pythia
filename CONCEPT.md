@@ -235,12 +235,12 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.10 Object Browser / Code Browser (M3)
 
 - [x] Tree: connection → schema → object type → objects
-- [x] Object types: tables, views, materialized views, sequences, synonyms, packages, procedures, functions, types, triggers, indexes, constraints, DB links, jobs/scheduler, queues, directories, users, roles, profiles (no constraints, queues, directories or profiles folders)
+- [x] Object types: tables, views, materialized views, sequences, synonyms, packages, procedures, functions, types, triggers, indexes, constraints, DB links, jobs/scheduler, queues, directories, users, roles, profiles (no constraints, queues or directories folders)
 - [x] "My objects" / all schemas / filter by schema
 - [x] Filters: name pattern, status (invalid), modified since, custom saved filters (no saved filters)
 - [x] Invalid objects highlighted
 - [x] Context menu: view, edit, compile, drop, rename, describe, query data, generate DDL, copy name, grant (no rename)
-- [x] New objects from the context menu (folders, objects, a table's indexes/constraints/triggers, users and roles) and File → New Object
+- [x] New objects from the context menu (folders, objects, a table's indexes/constraints/triggers, users, roles and profiles) and File → New Object
 - [x] Expand table → columns, indexes, constraints, triggers, FKs, references-by
 - [x] Expand package → procedures/functions with parameters (members from the dictionary)
 - [x] Dependencies view (uses / used by)

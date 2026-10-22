@@ -7,6 +7,11 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Profiles (#41), listed in the object browser below users and roles,
+  with New profile…, Edit profile… and Drop…. The form sets each password
+  and resource limit to default, unlimited or a value, says what default
+  stands for and lists the users with the profile; a change alters the
+  limits that changed. Dropping a profile gives its users DEFAULT.
 - Type form: methods (member and static procedures and functions,
   constructors, a map or order method) and "not instantiable". A type with
   methods opens with its body too, a stub per method (#40).

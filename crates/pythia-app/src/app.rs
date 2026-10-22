@@ -1773,7 +1773,7 @@ impl PythiaApp {
             return;
         };
         let owner = match object_type {
-            ObjectType::User | ObjectType::Role => String::new(),
+            t if t.is_database_object() => String::new(),
             _ => self
                 .browser
                 .schema()
@@ -1819,7 +1819,8 @@ impl PythiaApp {
             | Command::NewType
             | Command::NewDatabaseLink
             | Command::NewUser
-            | Command::NewRole => {
+            | Command::NewRole
+            | Command::NewProfile => {
                 if let Some((_, object_type)) =
                     Command::NEW_OBJECTS.iter().find(|(c, _)| *c == command)
                 {

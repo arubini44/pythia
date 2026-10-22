@@ -11,6 +11,7 @@ mod db_link;
 mod grants;
 mod index;
 mod mview;
+mod profile;
 mod program;
 mod sequence;
 mod synonym;
@@ -22,6 +23,8 @@ mod view;
 pub use account::AccountDef;
 #[cfg(test)]
 pub use db_link::LinkDef;
+#[cfg(test)]
+pub use profile::ProfileDef;
 #[cfg(test)]
 pub use program::{Mode, Param, ProgramDef, Subprogram};
 #[cfg(test)]
@@ -96,6 +99,7 @@ pub fn has_editor(t: ObjectType) -> bool {
             | ObjectType::DatabaseLink
             | ObjectType::User
             | ObjectType::Role
+            | ObjectType::Profile
     )
 }
 
@@ -138,6 +142,7 @@ enum Form {
     Index(index::IndexDef),
     DatabaseLink(db_link::LinkDef),
     Account(account::AccountDef),
+    Profile(profile::ProfileDef),
     Grants(grants::GrantsDef),
     Program(program::ProgramDef),
     Type(type_def::TypeDef),
@@ -155,6 +160,7 @@ impl Form {
             Form::Index(d) => ident(&d.name),
             Form::DatabaseLink(d) => ident(&d.name),
             Form::Account(d) => ident(&d.name),
+            Form::Profile(d) => ident(&d.name),
             Form::Program(d) => ident(&d.name),
             Form::Type(d) => ident(&d.name),
             Form::Trigger(d) => ident(&d.effective_name()),
@@ -163,12 +169,12 @@ impl Form {
     }
 
     /// Who owns the object: the editor's schema, except for public
-    /// synonyms and links (PUBLIC) and users and roles (nobody).
+    /// synonyms and links (PUBLIC) and users, roles and profiles (nobody).
     fn owner<'a>(&self, schema: &'a str) -> &'a str {
         match self {
             Form::Synonym(d) if d.public => "PUBLIC",
             Form::DatabaseLink(d) if d.public => "PUBLIC",
-            Form::Account(_) => "",
+            Form::Account(_) | Form::Profile(_) => "",
             _ => schema,
         }
     }
@@ -220,6 +226,8 @@ pub struct Lists {
     pub privileges: Vec<String>,
     /// The session's system privileges, to say what's missing.
     pub session_privileges: Vec<String>,
+    /// Password verify functions (owned by SYS).
+    pub verify_functions: Vec<String>,
     /// Objects of the edited type in the schema, to warn before a new
     /// PL/SQL unit replaces one (`CREATE OR REPLACE`).
     pub existing: Vec<String>,
@@ -243,6 +251,7 @@ struct BaseLists {
     roles: Vec<String>,
     privileges: Vec<String>,
     session_privileges: Vec<String>,
+    verify_functions: Vec<String>,
     existing: Vec<String>,
 }
 
@@ -346,6 +355,7 @@ impl ObjectEditor {
             Form::Index(d) => f(d),
             Form::DatabaseLink(d) => f(d),
             Form::Account(d) => f(d),
+            Form::Profile(d) => f(d),
             Form::Grants(d) => f(d),
             Form::Program(d) => f(d),
             Form::Type(d) => f(d),
@@ -409,6 +419,7 @@ impl ObjectEditor {
                     lists.roles = base.roles;
                     lists.privileges = base.privileges;
                     lists.session_privileges = base.session_privileges;
+                    lists.verify_functions = base.verify_functions;
                     lists.existing = base.existing;
                 }
                 Ok(Err(_)) => self.state.load_error = Some("unexpected result".into()),
@@ -553,6 +564,13 @@ impl ObjectEditor {
                     _ => None,
                 });
                 account::statements(o, d)
+            }
+            (o, Form::Profile(d)) => {
+                let o = o.and_then(|f| match f {
+                    Form::Profile(p) => Some(p),
+                    _ => None,
+                });
+                profile::statements(o, d)
             }
             (o, Form::Grants(d)) => {
                 let empty = grants::GrantsDef::default();
@@ -838,6 +856,7 @@ impl ObjectEditor {
                                 });
                                 account::ui(ui, def, original, lists)
                             }
+                            Form::Profile(def) => profile::ui(ui, def, existing, lists),
                             Form::Grants(def) => grants::ui(ui, def, lists),
                             Form::Program(def) => program::ui(ui, def),
                             Form::Type(def) => type_def::ui(ui, def),
@@ -945,6 +964,7 @@ fn new_form(conn: &Connection, target: &EditTarget) -> Result<Form, DbError> {
         }),
         ObjectType::User => Form::Account(account::AccountDef::new_user()),
         ObjectType::Role => Form::Account(account::AccountDef::new_role()),
+        ObjectType::Profile => Form::Profile(profile::new_def(conn)),
         t @ (ObjectType::Procedure | ObjectType::Function | ObjectType::Package) => {
             Form::Program(program::ProgramDef::new(*t))
         }
@@ -1017,6 +1037,7 @@ fn load(conn: &Connection, target: &EditTarget) -> Result<Loaded, DbError> {
             )?;
         }
         ObjectType::User | ObjectType::Role => account::lists(conn, &mut base)?,
+        ObjectType::Profile => profile::lists(conn, &mut base)?,
         _ => {}
     }
     if let EditTarget::New { object_type, .. } = target
@@ -1048,6 +1069,7 @@ fn load(conn: &Connection, target: &EditTarget) -> Result<Loaded, DbError> {
             ObjectType::DatabaseLink => Form::DatabaseLink(db_link::load(conn, owner, &o.name)?),
             ObjectType::User => Form::Account(account::load_user(conn, &o.name)?),
             ObjectType::Role => Form::Account(account::load_role(conn, &o.name)?),
+            ObjectType::Profile => Form::Profile(profile::load(conn, &o.name)?),
             t => {
                 return Err(DbError::new(format!(
                     "No editor for {}",
@@ -1406,6 +1428,10 @@ mod tests {
             conn.execute(s, &[]).unwrap();
         }
     }
+    /// One test at a time creates and drops users, roles and profiles:
+    /// in parallel, that DDL deadlocks in the dictionary (ORA-00060).
+    static ACCOUNTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn connect(var: &str) -> Option<(Connection, String)> {
         let spec = std::env::var(var).ok()?;
         let (cred, db) = spec.rsplit_once('@').unwrap();
@@ -1752,6 +1778,7 @@ mod tests {
         let Some((conn, _)) = connect("PYTHIA_TEST_DB_DBA") else {
             return;
         };
+        let _accounts = ACCOUNTS.lock().unwrap_or_else(|e| e.into_inner());
         let cleanup = "begin
                for u in (select username from dba_users where username = 'PYTHIA_OB_USER') loop
                  execute immediate 'drop user pythia_ob_user cascade';
@@ -1869,6 +1896,100 @@ mod tests {
         assert_eq!(reloaded.objects, edited.objects);
         assert_eq!(
             account::statements(Some(&reloaded), &reloaded),
+            Ok(Vec::new())
+        );
+        conn.execute(cleanup, &[]).unwrap();
+    }
+
+    /// Profiles through the profile form's SQL (needs a DBA).
+    #[test]
+    fn creates_live_profiles() {
+        let Some((conn, _)) = connect("PYTHIA_TEST_DB_DBA") else {
+            return;
+        };
+        let _accounts = ACCOUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let cleanup = "begin
+               for u in (select username from dba_users where username = 'PYTHIA_OB_PUSER') loop
+                 execute immediate 'drop user pythia_ob_puser cascade';
+               end loop;
+               for p in (select distinct profile from dba_profiles
+                          where profile = 'PYTHIA_OB_PROFILE') loop
+                 execute immediate 'drop profile pythia_ob_profile cascade';
+               end loop;
+             end;";
+        conn.execute(cleanup, &[]).unwrap();
+        let run = |statements: Vec<String>| {
+            apply(&conn, &statements, None).unwrap_or_else(|e| {
+                panic!("{}: {}", e.statement, e.error);
+            })
+        };
+        let mut base = BaseLists::default();
+        profile::lists(&conn, &mut base).unwrap();
+        assert!(
+            base.session_privileges
+                .iter()
+                .any(|p| p == "CREATE PROFILE")
+        );
+
+        let mut def = profile::new_def(&conn);
+        assert!(def.limits.iter().all(|l| l.value == "default"));
+        let names: Vec<&str> = def.limits.iter().map(|l| l.resource.as_str()).collect();
+        assert_eq!(names[0], "FAILED_LOGIN_ATTEMPTS", "password limits first");
+        assert!(names.contains(&"SESSIONS_PER_USER"));
+        def.name = "pythia_ob_profile".into();
+        let set = |def: &mut profile::ProfileDef, resource: &str, value: &str| {
+            def.limits
+                .iter_mut()
+                .find(|l| l.resource == resource)
+                .unwrap()
+                .value = value.into();
+        };
+        set(&mut def, "FAILED_LOGIN_ATTEMPTS", "4");
+        set(&mut def, "PASSWORD_LOCK_TIME", "1/24");
+        set(&mut def, "SESSIONS_PER_USER", "3");
+        set(&mut def, "PRIVATE_SGA", "64K");
+        if let Some(f) = base.verify_functions.first() {
+            set(&mut def, "PASSWORD_VERIFY_FUNCTION", &f.to_lowercase());
+        }
+        run(profile::statements(None, &def).unwrap());
+        let loaded = profile::load(&conn, "PYTHIA_OB_PROFILE").unwrap();
+        let value = |def: &profile::ProfileDef, resource: &str| {
+            def.limits
+                .iter()
+                .find(|l| l.resource == resource)
+                .unwrap()
+                .value
+                .clone()
+        };
+        assert_eq!(value(&loaded, "FAILED_LOGIN_ATTEMPTS"), "4");
+        assert!(value(&loaded, "PASSWORD_LOCK_TIME").starts_with("0.04"));
+        assert_eq!(value(&loaded, "SESSIONS_PER_USER"), "3");
+        assert_eq!(value(&loaded, "PRIVATE_SGA"), "65536");
+        assert_eq!(value(&loaded, "IDLE_TIME"), "default");
+        if let Some(f) = base.verify_functions.first() {
+            assert_eq!(value(&loaded, "PASSWORD_VERIFY_FUNCTION"), *f);
+        }
+        assert!(loaded.users.is_empty());
+        // Nothing to do on the loaded profile.
+        assert_eq!(profile::statements(Some(&loaded), &loaded), Ok(Vec::new()));
+
+        let mut edited = loaded.clone();
+        set(&mut edited, "FAILED_LOGIN_ATTEMPTS", "default");
+        set(&mut edited, "IDLE_TIME", "30");
+        set(&mut edited, "PASSWORD_VERIFY_FUNCTION", "null");
+        run(profile::statements(Some(&loaded), &edited).unwrap());
+        conn.execute(
+            "create user pythia_ob_puser identified by \"Pythia_ob_1\" profile pythia_ob_profile",
+            &[],
+        )
+        .unwrap();
+        let reloaded = profile::load(&conn, "PYTHIA_OB_PROFILE").unwrap();
+        assert_eq!(value(&reloaded, "FAILED_LOGIN_ATTEMPTS"), "default");
+        assert_eq!(value(&reloaded, "IDLE_TIME"), "30");
+        assert_eq!(value(&reloaded, "PASSWORD_VERIFY_FUNCTION"), "null");
+        assert_eq!(reloaded.users, ["PYTHIA_OB_PUSER"]);
+        assert_eq!(
+            profile::statements(Some(&reloaded), &reloaded),
             Ok(Vec::new())
         );
         conn.execute(cleanup, &[]).unwrap();

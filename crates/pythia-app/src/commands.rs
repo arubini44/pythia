@@ -53,6 +53,7 @@ commands! {
     NewDatabaseLink => "New: Database Link…",
     NewUser => "New: User…",
     NewRole => "New: Role…",
+    NewProfile => "New: Profile…",
     OpenFile => "File: Open…",
     SaveFile => "File: Save",
     SaveFileAs => "File: Save As…",
@@ -153,6 +154,7 @@ impl Command {
         ),
         (Command::NewUser, pythia_db::ObjectType::User),
         (Command::NewRole, pythia_db::ObjectType::Role),
+        (Command::NewProfile, pythia_db::ObjectType::Profile),
     ];
 
     /// Label without the category prefix, for menus.

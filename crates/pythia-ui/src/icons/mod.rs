@@ -186,6 +186,7 @@ impl Icon {
             "LIBRARY" => Icon::Package,
             "USER" | "SCHEMA" => Icon::Schema,
             "ROLE" => Icon::Lock,
+            "PROFILE" => Icon::Settings,
             "COLUMN" => Icon::Column,
             "CONSTRAINT" => Icon::Constraint,
             _ => return None,
