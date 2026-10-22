@@ -445,6 +445,17 @@ fn debugger(ui: &mut Ui, s: &mut Settings) {
             );
         },
     );
+    row(
+        ui,
+        "Compile with debug information",
+        "Program windows compile with debug information, so Step into can enter their units \
+         without a breakpoint there. Oracle runs such code less optimized: keep it off for \
+         shared and production databases. Units with breakpoints get debug information before \
+         a debug run either way.",
+        |ui| {
+            ui.checkbox(&mut s.compile_debug_info, "");
+        },
+    );
 }
 
 const FORMAT_SAMPLE: &str = "select e.employee_id, e.last_name as name, d.department_name as dept from employees e join departments d on d.department_id = e.department_id where e.salary > 1000 and e.hire_date > sysdate - 30;\n\ncreate or replace procedure raise(p_id in number, p_pct in number default 5) is\n  l_old number; l_new_salary number;\nbegin\n  select salary into l_old from employees where employee_id = p_id;\n  l_new_salary := l_old * (1 + p_pct / 100);\n  if l_new_salary > 10000 then raise_application_error(-20001, 'too much'); end if;\nend;\n/\n";

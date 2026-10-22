@@ -89,6 +89,7 @@ create or replace package dbgx_types as
   type t_rates is table of number index by varchar2(30);
   c_vat constant number := 0.081;
   g_trace boolean := true;
+  g_note varchar2(100);
   e_credit exception;
   pragma exception_init(e_credit, -20010);
 end;
@@ -212,7 +213,7 @@ create or replace package body dbgx_orders_api as
 
   procedure process_all(p_processed out pls_integer) is
   begin
-    dbgx_types.g_trace := true;
+    dbgx_types.g_trace := true; -- @process_all_trace
     for o in (select id from dbgx_orders order by id) loop -- @process_all
       process(o.id); -- @process_all_call
     end loop;

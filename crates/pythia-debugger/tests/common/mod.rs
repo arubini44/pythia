@@ -32,6 +32,8 @@ pub struct Stop {
     pub unit: Unit,
     pub line: Option<u32>,
     pub stack: Vec<Frame>,
+    /// The frame `variables` and `watches` belong to.
+    pub frame: usize,
     pub variables: Vec<Variable>,
     pub watches: Vec<Watch>,
     pub exception: Option<String>,
@@ -44,6 +46,8 @@ pub struct Harness {
     pub hits: RefCell<BTreeMap<Breakpoint, u32>>,
     /// Where each breakpoint was bound (or why not), as reported so far.
     pub bound: RefCell<BTreeMap<Breakpoint, Result<u32, String>>>,
+    /// Units step into went over, as reported so far.
+    pub stepped_over: RefCell<Vec<Unit>>,
 }
 
 impl Harness {
@@ -58,6 +62,7 @@ impl Harness {
             wake,
             hits: RefCell::default(),
             bound: RefCell::default(),
+            stepped_over: RefCell::default(),
         }
     }
 
@@ -81,6 +86,9 @@ impl Harness {
                     } => {
                         let entry = line.ok_or_else(|| error.clone().unwrap_or_default());
                         self.bound.borrow_mut().insert(breakpoint.clone(), entry);
+                    }
+                    DebugEvent::SteppedOver(units) => {
+                        self.stepped_over.borrow_mut().extend(units.iter().cloned());
                     }
                     _ => {}
                 }
@@ -115,6 +123,7 @@ impl Harness {
                     location,
                     variables,
                     stack,
+                    frame,
                     watches,
                     exception,
                 } => {
@@ -123,12 +132,33 @@ impl Harness {
                         unit: location.unit,
                         line: location.line,
                         stack,
+                        frame,
                         variables,
                         watches,
                         exception,
                     });
                 }
                 DebugEvent::Terminated => return None,
+                DebugEvent::Error(e) => panic!("debugger error: {e}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Selects a frame of the stopped thread: its variables and watches.
+    pub fn select(&self, frame: usize) -> (Vec<Variable>, Vec<Watch>) {
+        self.send(DebugCommand::SelectFrame(frame));
+        loop {
+            match self.next() {
+                DebugEvent::FrameSelected {
+                    frame: selected,
+                    variables,
+                    watches,
+                } => {
+                    assert_eq!(selected, frame);
+                    return (variables, watches);
+                }
+                DebugEvent::Terminated => panic!("terminated while selecting a frame"),
                 DebugEvent::Error(e) => panic!("debugger error: {e}"),
                 _ => {}
             }

@@ -347,12 +347,39 @@ fn order_processing_walkthrough() {
     assert_eq!(watch(w, "dbgx_types.c_vat"), Ok(Some(".081".into())));
     assert_eq!(watch(w, "dbgx_types.g_trace"), Ok(Some("true".into())));
 
+    // The callers' frames have their own variables, and watches are
+    // evaluated in the selected frame.
+    assert_eq!(stop.frame, 0);
+    let (v, w) = h.select(3);
+    assert_eq!(methods(&stop)[3], "BLOCK");
+    assert_eq!(val(&v, "L_COUNT"), None);
+    assert!(watch(&w, "l_order.customer.name").is_err());
+    let (v, w) = h.select(1);
+    assert_eq!(val(&v, "P_ID"), Some("10"));
+    assert_eq!(val(&v, "L_TOTAL"), Some("0"));
+    assert_eq!(val(&v, "L_DISCOUNT"), None);
+    assert_eq!(
+        val(&v, "L_ORDER.CUSTOMER.NAME"),
+        None,
+        "load_order hasn't returned yet"
+    );
+    assert_eq!(watch(&w, "l_order.customer.name"), Ok(None));
+    assert_eq!(watch(&w, "g_processed"), Ok(Some("0".into())));
+    assert_eq!(watch(&w, "dbgx_types.c_vat"), Ok(Some(".081".into())));
+
     // Step over the end of load_order: back in process, which now has it.
+    // A new stop selects the innermost frame again.
     h.send(DebugCommand::StepOver);
     let (stop, _) = h.stop_full();
     assert_eq!(
         (stop.reason, stop.line),
         (StopReason::Step, Some(load_done.line + 1))
+    );
+    assert_eq!(stop.frame, 0);
+    assert_eq!(methods(&stop)[0], "LOAD_ORDER");
+    assert_eq!(
+        watch(&stop.watches, "l_order.customer.name"),
+        Ok(Some("ACME".into()))
     );
     h.send(DebugCommand::StepOver);
     let (stop, _) = h.stop_full();
@@ -408,7 +435,15 @@ fn order_processing_walkthrough() {
     );
     assert!(
         watch(&stop.watches, "l_order.customer.name").is_err(),
-        "only the innermost frame's variables"
+        "a variable of process, not of line_amount"
+    );
+    let (v, w) = h.select(1);
+    assert_eq!(val(&v, "L_ORDER.CUSTOMER.NAME"), Some("ACME"));
+    assert_eq!(watch(&w, "l_order.customer.name"), Ok(Some("ACME".into())));
+    assert_eq!(
+        watch(&w, "dbgx_pricing.g_calls"),
+        Ok(Some("0".into())),
+        "another package's globals from any frame"
     );
     // Step until the line's amount is assigned back in process.
     while stop.line != Some(s.at("process_sum").line) {
@@ -418,6 +453,7 @@ fn order_processing_walkthrough() {
         eprintln!("  {}", s.describe(&stop));
     }
     assert_eq!(methods(&stop)[0], "PROCESS");
+    assert_eq!(stop.frame, 0);
     assert_eq!(
         val(&stop.variables, "L_ORDER.LINES.(1).AMOUNT"),
         Some("99.9")
@@ -570,6 +606,21 @@ fn order_processing_walkthrough() {
         Some(&1),
         "levels 1 and 2 didn't count"
     );
+    // Each level of the recursion has its own values; a watch added while
+    // a caller is selected is evaluated there.
+    let (v, _) = h.select(2);
+    assert_eq!(val(&v, "P_LEVEL"), Some("1"));
+    assert_eq!(val(&v, "P_AMOUNT"), Some("249.75"));
+    let (v, _) = h.select(1);
+    assert_eq!(val(&v, "P_LEVEL"), Some("2"));
+    assert_eq!(val(&v, "L_RATE"), Some(".02"));
+    h.send(DebugCommand::SetWatches(vec![
+        "p_level".into(),
+        "g_calls".into(),
+    ]));
+    let w = h.watches();
+    assert_eq!(watch(&w, "p_level"), Ok(Some("2".into())));
+    assert_eq!(watch(&w, "g_calls"), Ok(Some("5".into())));
     // Out of the innermost call: the caller's own values.
     h.send(DebugCommand::StepOut);
     let (stop, _) = h.stop_full();
@@ -697,7 +748,133 @@ fn step_into_code_without_debug_info() {
     let (stop, _) = h.stop_full();
     assert_eq!(methods(&stop)[0], "PROCESS", "{}", s.describe(&stop));
     assert_eq!(stop.line, Some(s.at("process_sum").line));
+    // The body was loaded during the step: the debugger says why the step
+    // didn't go in.
+    assert_eq!(*h.stepped_over.borrow(), [body]);
     h.send(DebugCommand::ClearBreakpoint(call));
+    h.send(DebugCommand::Resume);
+    h.until_terminated();
+    target.join().unwrap().expect("target ran to completion");
+}
+
+/// The compiler messages of a unit, as `ALL_ERRORS` has them.
+fn messages(conn: &Connection, unit: &Unit) -> Vec<String> {
+    conn.query_as::<String>(
+        "select text from user_errors where name = :1 and type = :2 order by sequence",
+        &[&unit.name, &unit.unit_type.dictionary_name()],
+    )
+    .unwrap()
+    .collect::<Result<_, _>>()
+    .unwrap()
+}
+
+/// What program windows do with "Compile with debug information": the
+/// `CREATE` runs with `PLSQL_DEBUG` on, and the unit then has debug
+/// information, no new compiler messages but Oracle's notes about the
+/// option, and can be stepped into.
+#[test]
+fn step_into_unit_compiled_with_debug_information() {
+    let Some((_lock, conn, s)) = setup() else {
+        return;
+    };
+    let body = Unit::new(OWNER, "DBGX_PRICING", UnitType::PackageBody);
+    let source = s.sources[&body].clone();
+    // All warnings on, to see every message.
+    conn.execute("alter session set plsql_warnings = 'ENABLE:ALL'", &[])
+        .unwrap();
+    conn.execute(&source, &[]).unwrap();
+    assert!(!target::has_debug_info(&conn, &body).unwrap());
+    let plain = messages(&conn, &body);
+    let previous = target::set_compile_debug(&conn, true).unwrap();
+    assert!(!previous);
+    conn.execute(&source, &[]).unwrap();
+    assert!(target::set_compile_debug(&conn, previous).unwrap());
+    assert!(target::has_debug_info(&conn, &body).unwrap());
+    let debug = messages(&conn, &body);
+    eprintln!("plain: {plain:?}\ndebug: {debug:?}");
+    let new: Vec<&String> = debug.iter().filter(|m| !plain.contains(m)).collect();
+    assert!(!new.is_empty(), "Oracle notes PLSQL_DEBUG");
+    assert!(
+        new.iter().all(|m| target::is_debug_notice(m)),
+        "only notes about the option: {new:?}"
+    );
+    assert!(
+        debug.iter().all(|m| m.starts_with("PLW-")),
+        "no errors: {debug:?}"
+    );
+    // The session compiles without debug information again.
+    let setting: String = conn
+        .query_row_as(
+            "select value from v$parameter where name = 'plsql_debug'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(setting, "FALSE");
+
+    let h = Harness::new();
+    let call = s.at("process_line");
+    h.send(DebugCommand::SetBreakpoint(call.clone()));
+    let target = run_target(h.debugger.port(), RUN);
+    let (stop, _) = h.stop_full();
+    assert_eq!(stop.line, Some(call.line));
+    h.send(DebugCommand::StepInto);
+    let (stop, _) = h.stop_full();
+    eprintln!("{}", s.describe(&stop));
+    assert_eq!(stop.unit, body);
+    assert_eq!(methods(&stop)[..2], ["<clinit>", "PROCESS"]);
+    assert!(h.stepped_over.borrow().is_empty());
+    h.send(DebugCommand::ClearBreakpoint(call));
+    h.send(DebugCommand::Resume);
+    h.until_terminated();
+    target.join().unwrap().expect("target ran to completion");
+}
+
+/// Globals of a package the session hasn't instantiated yet have no values
+/// (Oracle's agent has no objects for them): the debugger says so instead
+/// of showing NULL. Once instantiated, NULL is NULL.
+#[test]
+fn globals_of_a_package_not_instantiated_yet() {
+    let Some((_lock, _conn, s)) = setup() else {
+        return;
+    };
+    let h = Harness::new();
+    let trace = s.at("process_all_trace");
+    h.send(DebugCommand::SetBreakpoint(trace.clone()));
+    h.send(DebugCommand::SetWatches(vec![
+        "dbgx_types.c_vat".into(),
+        "dbgx_types.g_trace".into(),
+        "dbgx_types.g_note".into(),
+        "dbgx_pricing.g_calls".into(),
+    ]));
+    let target = run_target(h.debugger.port(), RUN);
+    let (stop, _) = h.stop_full();
+    assert_eq!(stop.line, Some(trace.line));
+    // Loaded for its types, but nothing has used it yet.
+    for expression in [
+        "dbgx_types.c_vat",
+        "dbgx_types.g_trace",
+        "dbgx_types.g_note",
+    ] {
+        let error = watch(&stop.watches, expression).unwrap_err();
+        assert!(
+            error.starts_with("dbgx_types isn't instantiated in this session yet"),
+            "{expression}: {error}"
+        );
+    }
+    let error = watch(&stop.watches, "dbgx_pricing.g_calls").unwrap_err();
+    assert!(error.contains("isn't loaded yet"), "{error}");
+    h.send(DebugCommand::StepOver);
+    let (stop, _) = h.stop_full();
+    assert_eq!(
+        watch(&stop.watches, "dbgx_types.c_vat"),
+        Ok(Some(".081".into()))
+    );
+    assert_eq!(
+        watch(&stop.watches, "dbgx_types.g_trace"),
+        Ok(Some("true".into()))
+    );
+    assert_eq!(watch(&stop.watches, "dbgx_types.g_note"), Ok(None));
+    h.send(DebugCommand::ClearBreakpoint(trace));
     h.send(DebugCommand::Resume);
     h.until_terminated();
     target.join().unwrap().expect("target ran to completion");

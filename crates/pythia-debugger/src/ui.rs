@@ -78,6 +78,9 @@ pub struct DebugSession {
     /// Line a breakpoint actually bound to (or an error), per breakpoint.
     bound: BTreeMap<Breakpoint, Result<u32, String>>,
     pub stack: Vec<Frame>,
+    /// The selected call stack frame: `variables`, the watches and hover
+    /// values are its. Every stop selects the innermost frame with source.
+    pub frame: usize,
     pub variables: Vec<Variable>,
     /// Watched expressions, kept across sessions, and their last values.
     pub watches: Vec<String>,
@@ -115,6 +118,7 @@ impl DebugSession {
     ) -> Vec<DebugAction> {
         self.stop();
         self.stack.clear();
+        self.frame = 0;
         self.variables.clear();
         self.watch_values.clear();
         self.exception = None;
@@ -258,10 +262,30 @@ impl DebugSession {
         if !self.is_suspended() {
             return None;
         }
+        self.stack.get(self.execution_frame())
+    }
+
+    /// Index of [`Self::current_frame`] in the stack.
+    fn execution_frame(&self) -> usize {
         self.stack
             .iter()
-            .find(|f| f.location.line.is_some())
-            .or(self.stack.first())
+            .position(|f| f.location.line.is_some())
+            .unwrap_or(0)
+    }
+
+    /// Selects a call stack frame while suspended: its variables are shown
+    /// and watches and hover values come from it (the debugger reports
+    /// them). Returns where to show its source.
+    pub fn select_frame(&mut self, index: usize) -> Option<DebugAction> {
+        let location = self.stack.get(index)?.location.clone();
+        if self.is_suspended() && index != self.frame {
+            self.frame = index;
+            // Not the previous frame's values meanwhile.
+            self.variables.clear();
+            self.watch_values.clear();
+            self.command(DebugCommand::SelectFrame(index));
+        }
+        Some(DebugAction::ShowLocation(location))
     }
 
     /// Enabled breakpoint lines and the current execution line for a unit,
@@ -280,15 +304,16 @@ impl DebugSession {
         (lines, current)
     }
 
-    /// The value of `expression` (a variable, `record.field`, …) while
-    /// stopped in `unit`, as hover text. Anonymous blocks match any block.
+    /// The value of `expression` (a variable, `record.field`, …) while the
+    /// selected frame is in `unit`, as hover text. Anonymous blocks match
+    /// any block.
     pub fn hover(&self, unit: &Unit, expression: &str) -> Option<(String, String)> {
         if !self.is_suspended() {
             return None;
         }
-        let top = &self.stack.first()?.location.unit;
-        let same =
-            top == unit || (top.unit_type == UnitType::Block && unit.unit_type == UnitType::Block);
+        let selected = &self.stack.get(self.frame)?.location.unit;
+        let same = selected == unit
+            || (selected.unit_type == UnitType::Block && unit.unit_type == UnitType::Block);
         if !same {
             return None;
         }
@@ -316,69 +341,94 @@ impl DebugSession {
             events.push(e);
         }
         for event in events {
-            match event {
-                DebugEvent::Listening { .. } => {}
-                DebugEvent::Connected { version } => {
-                    self.state = State::Running;
-                    self.log.push(format!("Connected: {version}"));
-                }
-                DebugEvent::BreakpointBound {
-                    breakpoint,
-                    line,
-                    error,
-                } => {
-                    let entry = match (line, error) {
-                        (Some(l), _) => Ok(l),
-                        (None, e) => Err(e.unwrap_or_else(|| "not set".into())),
-                    };
-                    if let Err(e) = &entry {
-                        self.log.push(format!(
-                            "Breakpoint at {} line {}: {e}",
-                            breakpoint.unit, breakpoint.line
-                        ));
-                    }
-                    self.bound.insert(breakpoint, entry);
-                }
-                DebugEvent::BreakpointHit { breakpoint, hits } => {
-                    self.hits.insert(breakpoint, hits);
-                }
-                DebugEvent::Suspended {
-                    reason,
-                    location,
-                    stack,
-                    variables,
-                    watches,
-                    exception,
-                } => {
-                    self.state = State::Suspended { reason };
-                    self.stack = stack;
-                    self.variables = variables;
-                    self.watch_values = watches;
-                    if let Some(e) = &exception {
-                        self.log.push(format!("Exception: {e}"));
-                    }
-                    self.exception = exception;
-                    let shown = self.current_frame().map(|f| f.location.clone());
-                    actions.push(DebugAction::ShowLocation(shown.unwrap_or(location)));
-                }
-                DebugEvent::Watches(values) => self.watch_values = values,
-                DebugEvent::Resumed => {
-                    if !self.is_suspended() {
-                        self.state = State::Running;
-                    }
-                }
-                DebugEvent::Terminated => {
-                    self.state = State::Finished;
-                    self.debugger = None;
-                    self.stack.clear();
-                    self.exception = None;
-                    self.log.push("Debug session ended".into());
-                    actions.push(DebugAction::Finished);
-                }
-                DebugEvent::Error(e) => self.log.push(e),
-            }
+            self.on_event(event, &mut actions);
         }
         actions
+    }
+
+    fn on_event(&mut self, event: DebugEvent, actions: &mut Vec<DebugAction>) {
+        match event {
+            DebugEvent::Listening { .. } => {}
+            DebugEvent::Connected { version } => {
+                self.state = State::Running;
+                self.log.push(format!("Connected: {version}"));
+            }
+            DebugEvent::BreakpointBound {
+                breakpoint,
+                line,
+                error,
+            } => {
+                let entry = match (line, error) {
+                    (Some(l), _) => Ok(l),
+                    (None, e) => Err(e.unwrap_or_else(|| "not set".into())),
+                };
+                if let Err(e) = &entry {
+                    self.log.push(format!(
+                        "Breakpoint at {} line {}: {e}",
+                        breakpoint.unit, breakpoint.line
+                    ));
+                }
+                self.bound.insert(breakpoint, entry);
+            }
+            DebugEvent::BreakpointHit { breakpoint, hits } => {
+                self.hits.insert(breakpoint, hits);
+            }
+            DebugEvent::Suspended {
+                reason,
+                location,
+                stack,
+                frame,
+                variables,
+                watches,
+                exception,
+            } => {
+                self.state = State::Suspended { reason };
+                self.stack = stack;
+                self.frame = frame;
+                self.variables = variables;
+                self.watch_values = watches;
+                if let Some(e) = &exception {
+                    self.log.push(format!("Exception: {e}"));
+                }
+                self.exception = exception;
+                let shown = self.current_frame().map(|f| f.location.clone());
+                actions.push(DebugAction::ShowLocation(shown.unwrap_or(location)));
+            }
+            DebugEvent::Watches(values) => self.watch_values = values,
+            // Only the latest selection (a click may still be on its way).
+            DebugEvent::FrameSelected {
+                frame,
+                variables,
+                watches,
+            } if frame == self.frame => {
+                self.variables = variables;
+                self.watch_values = watches;
+            }
+            DebugEvent::FrameSelected { .. } => {}
+            DebugEvent::SteppedOver(units) => {
+                for unit in units {
+                    self.log.push(format!(
+                        "Step into went over {unit}: it was compiled without debug \
+                         information (Settings → Debugger)"
+                    ));
+                }
+            }
+            DebugEvent::Resumed => {
+                if !self.is_suspended() {
+                    self.state = State::Running;
+                }
+            }
+            DebugEvent::Terminated => {
+                self.state = State::Finished;
+                self.debugger = None;
+                self.stack.clear();
+                self.frame = 0;
+                self.exception = None;
+                self.log.push("Debug session ended".into());
+                actions.push(DebugAction::Finished);
+            }
+            DebugEvent::Error(e) => self.log.push(e),
+        }
     }
 
     /// Debugger shortcuts; call before the editors see the input.
@@ -408,13 +458,14 @@ impl DebugSession {
         ui.separator();
         ui.columns(4, |cols| {
             cols[0].strong("Call stack");
+            let mut select = None;
             egui::ScrollArea::vertical()
                 .id_salt("dbg-stack")
                 .show(&mut cols[0], |ui| {
                     for (i, frame) in self.stack.iter().enumerate() {
                         let text = RichText::new(frame_label(frame)).monospace();
-                        if ui.selectable_label(i == 0, text).clicked() {
-                            actions.push(DebugAction::ShowLocation(frame.location.clone()));
+                        if ui.selectable_label(i == self.frame, text).clicked() {
+                            select = Some(i);
                         }
                     }
                     if self.stack.is_empty() {
@@ -433,8 +484,23 @@ impl DebugSession {
                         });
                     }
                 });
+            if let Some(action) = select.and_then(|i| self.select_frame(i)) {
+                actions.push(action);
+            }
 
-            cols[1].strong("Variables");
+            cols[1].horizontal(|ui| {
+                ui.strong("Variables");
+                // Say whose, when it isn't where execution stopped.
+                if self.is_suspended()
+                    && self.frame != self.execution_frame()
+                    && let Some(frame) = self.stack.get(self.frame)
+                {
+                    ui.add(
+                        egui::Label::new(RichText::new(frame_label(frame)).monospace().weak())
+                            .truncate(),
+                    );
+                }
+            });
             let mut watch = None;
             egui::ScrollArea::vertical()
                 .id_salt("dbg-vars")
@@ -1019,5 +1085,87 @@ mod tests {
         assert_eq!(s.hover(&unit, "l_other"), None);
         let other = Unit::new("PYTHIA", "Q", UnitType::Procedure);
         assert_eq!(s.hover(&other, "l_total"), None, "other unit");
+    }
+
+    #[test]
+    fn selected_frame_has_the_variables() {
+        let api = Unit::new("PYTHIA", "API", UnitType::PackageBody);
+        let pricing = Unit::new("PYTHIA", "PRICING", UnitType::PackageBody);
+        let mut s = DebugSession::default();
+        let mut actions = Vec::new();
+        let stop = |variables| DebugEvent::Suspended {
+            reason: StopReason::Breakpoint,
+            location: Location {
+                unit: pricing.clone(),
+                line: Some(15),
+            },
+            stack: vec![
+                frame(&pricing, "LINE_AMOUNT", Some(15)),
+                frame(&api, "PROCESS", Some(41)),
+            ],
+            frame: 0,
+            variables,
+            watches: Vec::new(),
+            exception: None,
+        };
+        s.on_event(stop(vec![var("P_QTY", Some("2"), vec![])]), &mut actions);
+        assert_eq!(s.hover(&pricing, "p_qty").unwrap().1, "2");
+        assert_eq!(s.hover(&api, "l_total"), None);
+
+        // The caller: its source is shown, its values come from the debugger.
+        let shown = s.select_frame(1);
+        assert_eq!(
+            shown,
+            Some(DebugAction::ShowLocation(Location {
+                unit: api.clone(),
+                line: Some(41)
+            }))
+        );
+        assert_eq!(s.frame, 1);
+        assert!(s.variables.is_empty(), "not the other frame's values");
+        assert_eq!(s.hover(&pricing, "p_qty"), None);
+        s.on_event(
+            DebugEvent::FrameSelected {
+                frame: 1,
+                variables: vec![var("L_TOTAL", Some("0"), vec![])],
+                watches: Vec::new(),
+            },
+            &mut actions,
+        );
+        assert_eq!(s.hover(&api, "l_total").unwrap().1, "0");
+        assert_eq!(s.hover(&pricing, "l_total"), None);
+        // An answer for an earlier selection doesn't replace it.
+        s.on_event(
+            DebugEvent::FrameSelected {
+                frame: 0,
+                variables: Vec::new(),
+                watches: Vec::new(),
+            },
+            &mut actions,
+        );
+        assert_eq!(s.variables.len(), 1);
+        // The next stop starts at the innermost frame again.
+        s.on_event(stop(Vec::new()), &mut actions);
+        assert_eq!(s.frame, 0);
+        assert_eq!(
+            s.current_frame().map(|f| f.method.as_str()),
+            Some("LINE_AMOUNT")
+        );
+    }
+
+    #[test]
+    fn stepping_over_code_without_debug_information_is_logged() {
+        let mut s = DebugSession::default();
+        s.on_event(
+            DebugEvent::SteppedOver(vec![Unit::new("PYTHIA", "PRICING", UnitType::PackageBody)]),
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            s.log,
+            [
+                "Step into went over package body PYTHIA.PRICING: it was compiled without debug \
+              information (Settings → Debugger)"
+            ]
+        );
     }
 }

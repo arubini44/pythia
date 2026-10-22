@@ -44,6 +44,12 @@ struct State {
     compiling: HashMap<u64, usize>,
     /// Parts still to compile after the current one (compile all).
     compile_queue: Vec<usize>,
+    /// Compile with debug information (Settings → Debugger).
+    debug_info: bool,
+    /// The task turning debug information on before a compile, and why it
+    /// failed, if it did.
+    debug_setup: Option<u64>,
+    debug_error: Option<String>,
     message: Option<(bool, String)>,
     /// Line to show once the part's source has loaded: (part, line).
     pending_goto: Option<(usize, usize)>,
@@ -232,11 +238,13 @@ impl ProgramWindow {
         }
     }
 
-    /// Compiles the active part, or all parts (spec first).
-    pub fn compile(&mut self, all: bool) -> Effects {
+    /// Compiles the active part, or all parts (spec first), with debug
+    /// information if `debug_info`.
+    pub fn compile(&mut self, all: bool, debug_info: bool) -> Effects {
         if self.is_busy() {
             return Effects::default();
         }
+        self.state.debug_info = debug_info;
         self.state.compile_queue = if all {
             (0..self.parts.len()).rev().collect()
         } else {
@@ -311,21 +319,65 @@ impl ProgramWindow {
             }
             let id = request_id();
             self.state.compiling.insert(id, i);
-            effects.request(
-                Target::Own,
-                DbRequest::Execute {
-                    id,
-                    sql,
-                    max_rows: 1,
-                    binds: Vec::new(),
-                },
-            );
+            let execute = DbRequest::Execute {
+                id,
+                sql,
+                max_rows: 1,
+                binds: Vec::new(),
+            };
+            if self.state.debug_info {
+                self.debug_compile(execute, &mut effects);
+            } else {
+                effects.request(Target::Own, execute);
+            }
             break;
         }
         effects
     }
 
+    /// Runs the `CREATE` with `PLSQL_DEBUG` on, then restores the session's
+    /// own setting.
+    fn debug_compile(&mut self, execute: DbRequest, effects: &mut Effects) {
+        use pythia_debugger::target::set_compile_debug;
+        type Previous = std::sync::Arc<std::sync::Mutex<Option<bool>>>;
+        let previous: Previous = Default::default();
+        let setup = request_id();
+        self.state.debug_setup = Some(setup);
+        self.state.debug_error = None;
+        let remember = previous.clone();
+        let task: pythia_db::TaskFn = Box::new(move |conn: &pythia_db::oracle::Connection| {
+            let was = set_compile_debug(conn, true)?;
+            if let Ok(mut previous) = remember.lock() {
+                *previous = Some(was);
+            }
+            Ok(Box::new(()) as Box<dyn std::any::Any + Send>)
+        });
+        effects.request(Target::Own, DbRequest::Task { id: setup, task });
+        effects.request(Target::Own, execute);
+        let task: pythia_db::TaskFn = Box::new(move |conn: &pythia_db::oracle::Connection| {
+            let was = previous.lock().ok().and_then(|mut p| p.take());
+            if was == Some(false) {
+                set_compile_debug(conn, false)?;
+            }
+            Ok(Box::new(()) as Box<dyn std::any::Any + Send>)
+        });
+        effects.request(
+            Target::Own,
+            DbRequest::Task {
+                id: request_id(),
+                task,
+            },
+        );
+    }
+
     pub fn on_event(&mut self, event: DbEvent) -> Effects {
+        if let DbEvent::TaskDone { id, result } = &event
+            && self.state.debug_setup == Some(*id)
+        {
+            self.state.debug_setup = None;
+            self.state.debug_error = result.as_ref().err().map(|e| e.to_string());
+            return Effects::default();
+        }
         if let DbEvent::TaskDone { id, result } = &event
             && let Some((part, check)) = self.state.ddl_requests.remove(id)
         {
@@ -379,8 +431,17 @@ impl ProgramWindow {
                     }
                 }
             }
-            DbEvent::Executed { id, summary, .. } => {
+            DbEvent::Executed {
+                id, mut summary, ..
+            } => {
                 if let Some(i) = self.state.compiling.remove(&id) {
+                    let debug_info = self.state.debug_info;
+                    if debug_info && let Some(compiled) = &mut summary.compiled {
+                        // Oracle's notes about the debug option itself.
+                        compiled
+                            .errors
+                            .retain(|e| !pythia_debugger::target::is_debug_notice(&e.text));
+                    }
                     let part = &mut self.parts[i];
                     part.saved = part.editor.text().to_owned();
                     part.errors = summary
@@ -390,7 +451,16 @@ impl ProgramWindow {
                         .unwrap_or_default();
                     part.editor.set_markers(markers(&part.errors));
                     let failed = part.errors.iter().any(|e| !e.warning);
-                    self.state.message = Some((failed, summary.to_string()));
+                    let mut message = summary.to_string();
+                    if debug_info && !failed {
+                        match self.state.debug_error.take() {
+                            None => message.push_str(" (with debug information)"),
+                            Some(e) => {
+                                message.push_str(&format!(" (without debug information: {e})"));
+                            }
+                        }
+                    }
+                    self.state.message = Some((failed, message));
                     if failed {
                         self.active = i;
                         self.state.compile_queue.clear();
@@ -447,7 +517,7 @@ impl ProgramWindow {
                 if cx.settings.format_auto.on_save {
                     self.format_before_compile(false, &cx.settings.format);
                 }
-                effects.extend(self.compile(false));
+                effects.extend(self.compile(false, cx.settings.compile_debug_info));
             }
             if self.parts.len() > 1
                 && ui
@@ -457,7 +527,7 @@ impl ProgramWindow {
                 if cx.settings.format_auto.on_save {
                     self.format_before_compile(true, &cx.settings.format);
                 }
-                effects.extend(self.compile(true));
+                effects.extend(self.compile(true, cx.settings.compile_debug_info));
             }
             if ui
                 .add_enabled(!busy && cx.connected, egui::Button::new("Reload"))

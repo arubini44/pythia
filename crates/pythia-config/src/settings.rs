@@ -30,6 +30,12 @@ pub struct Settings {
     /// Host name or address the database uses to reach Pythia's debugger
     /// (empty: this machine's host name).
     pub debug_host: String,
+    /// Program windows compile with debug information, so the debugger can
+    /// step into their units without a breakpoint there. Off by default:
+    /// Oracle runs such code at a lower optimization level, which shouldn't
+    /// end up in shared or production databases by accident. Units with
+    /// breakpoints get debug information before a debug run either way.
+    pub compile_debug_info: bool,
     /// Code formatter rules.
     pub format: pythia_plsql::FormatOptions,
     /// Named formatter rule sets to switch between and share.
@@ -98,6 +104,7 @@ impl Default for Settings {
             fetch_size: 500,
             editor: EditorSettings::default(),
             debug_host: String::new(),
+            compile_debug_info: false,
             format: pythia_plsql::FormatOptions::default(),
             format_profiles: Default::default(),
             format_profile: None,

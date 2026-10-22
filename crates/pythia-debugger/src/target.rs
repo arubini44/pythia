@@ -112,6 +112,44 @@ pub fn compile_debug(conn: &Connection, unit: &Unit) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Recompiles `unit` with debug information unless it has it already
+/// (recompiling discards the package state of every session using it).
+/// Returns whether it was compiled.
+pub fn ensure_debug_info(conn: &Connection, unit: &Unit) -> Result<bool, DbError> {
+    if unit.unit_type == UnitType::Block || has_debug_info(conn, unit)? {
+        return Ok(false);
+    }
+    compile_debug(conn, unit)?;
+    Ok(true)
+}
+
+/// Sets whether the session's `CREATE` statements compile PL/SQL with debug
+/// information (`PLSQL_DEBUG`, as `ALTER … COMPILE DEBUG` does). Returns
+/// the previous setting, to restore afterwards.
+///
+/// Oracle has deprecated the parameter in favor of `PLSQL_OPTIMIZE_LEVEL =
+/// 1`, which gives the debugger lines and variables too, but only
+/// `PLSQL_DEBUG` is recorded as debug information (`ALL_PLSQL_OBJECT_SETTINGS`).
+/// With PL/SQL warnings enabled, units compiled this way get PLW-06015 and
+/// PLW-06013 about it ([`is_debug_notice`]).
+pub fn set_compile_debug(conn: &Connection, on: bool) -> Result<bool, DbError> {
+    let previous = conn
+        .query_row_as::<String>(
+            "select value from v$parameter where name = 'plsql_debug'",
+            &[],
+        )
+        .is_ok_and(|v| v.eq_ignore_ascii_case("TRUE"));
+    conn.execute(&format!("alter session set plsql_debug = {on}"), &[])?;
+    Ok(previous)
+}
+
+/// Whether a compiler message is one of the warnings Oracle adds to every
+/// unit compiled with `PLSQL_DEBUG` (that the parameter is deprecated and
+/// lowers the optimization level), which say nothing about the code.
+pub fn is_debug_notice(text: &str) -> bool {
+    text.starts_with("PLW-06015") || text.starts_with("PLW-06013")
+}
+
 /// Whether a stored unit was compiled with debug information.
 pub fn has_debug_info(conn: &Connection, unit: &Unit) -> Result<bool, DbError> {
     let flag: Option<String> = conn.query_row_as(
@@ -241,6 +279,19 @@ mod tests {
             "alter package \"HR\".\"PKG\" compile debug body"
         );
         assert!(compile_debug_sql(&Unit::new("HR", "x", UnitType::Block)).is_none());
+    }
+
+    #[test]
+    fn debug_notices() {
+        assert!(is_debug_notice(
+            "PLW-06015: parameter PLSQL_DEBUG is deprecated; use PLSQL_OPTIMIZE_LEVEL = 1"
+        ));
+        assert!(is_debug_notice(
+            "PLW-06013: deprecated parameter PLSQL_DEBUG forces PLSQL_OPTIMIZE_LEVEL <= 1"
+        ));
+        assert!(!is_debug_notice(
+            "PLW-07206: analysis suggests that the assignment to 'L' may be unnecessary"
+        ));
     }
 
     #[test]

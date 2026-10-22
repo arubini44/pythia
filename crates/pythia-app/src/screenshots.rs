@@ -712,30 +712,35 @@ fn debugger_session() {
     wait_until(&mut h, "finish", |app| !app.test_debug_running());
 }
 
-/// The debugger scenario from pythia-debugger's tests: the editors follow
-/// every stop, from a package body to a trigger and back, and into the SQL
-/// window's block. Needs PYTHIA_TEST_DB, PYTHIA_TEST_DB_DBA and
-/// PYTHIA_DEBUG_HOST.
-#[test]
-fn debugger_follows_execution() {
-    use pythia_debugger::{DebugCommand, Unit, UnitType};
-    const SCRIPT: &str = include_str!("../../pythia-debugger/tests/scenario/orders.sql");
-    let (Some((profile, password)), Ok(host), Some(dba)) = (
+/// pythia-debugger's debugging scenario: order processing across packages.
+const DEBUG_SCENARIO: &str = include_str!("../../pythia-debugger/tests/scenario/orders.sql");
+
+/// The environment of the debugger scenario tests: the test user's profile
+/// and password, the debugger host and the DBA connect spec.
+fn debug_environment() -> Option<(ConnectionProfile, String, String, String)> {
+    let (Some((profile, password)), Ok(host), Ok(dba)) = (
         profile(),
         std::env::var("PYTHIA_DEBUG_HOST"),
-        std::env::var("PYTHIA_TEST_DB_DBA").ok(),
+        std::env::var("PYTHIA_TEST_DB_DBA"),
     ) else {
         eprintln!("PYTHIA_TEST_DB / PYTHIA_TEST_DB_DBA / PYTHIA_DEBUG_HOST not set, skipping");
-        return;
+        return None;
     };
-    // Install the scenario, with debug information everywhere.
+    Some((profile, password, host, dba))
+}
+
+/// Lets the test user debug (with the database connecting back to `host`)
+/// and installs [`DEBUG_SCENARIO`], compiled without debug information.
+/// Returns a connection of the test user. The tests share the scenario:
+/// create the harness first, which holds the UI lock.
+fn install_debug_scenario(host: &str, dba: &str) -> pythia_db::oracle::Connection {
     let connect = |spec: &str| {
         let (cred, db) = spec.rsplit_once('@').unwrap();
         let (user, pw) = cred.split_once('/').unwrap();
         pythia_db::oracle::Connection::connect(user, pw, db).unwrap()
     };
-    let dba = connect(&dba);
-    for stmt in pythia_debugger::target::setup_statements("pythia", &host) {
+    let dba = connect(dba);
+    for stmt in pythia_debugger::target::setup_statements("pythia", host) {
         dba.execute(&stmt, &[]).unwrap();
     }
     let conn = connect(&std::env::var("PYTHIA_TEST_DB").unwrap());
@@ -753,13 +758,42 @@ fn debugger_follows_execution() {
     ] {
         let _ = conn.execute(drop, &[]);
     }
-    let mut sources = Vec::new();
-    for stmt in pythia_plsql::split_statements(SCRIPT) {
-        let sql = stmt.text(SCRIPT);
+    for stmt in pythia_plsql::split_statements(DEBUG_SCENARIO) {
+        let sql = stmt.text(DEBUG_SCENARIO);
         conn.execute(sql, &[])
             .unwrap_or_else(|e| panic!("{e}\n{sql}"));
-        sources.push(sql);
     }
+    conn
+}
+
+/// Line of a `-- @name` marker in the scenario's statement that starts
+/// with `head` (e.g. `create or replace trigger dbgx_orders_bu`).
+fn scenario_marker(head: &str, name: &str) -> u32 {
+    let source = pythia_plsql::split_statements(DEBUG_SCENARIO)
+        .into_iter()
+        .map(|s| s.text(DEBUG_SCENARIO))
+        .find(|s| s.to_lowercase().starts_with(head))
+        .unwrap();
+    source
+        .lines()
+        .position(|l| l.contains(&format!("-- @{name}")))
+        .unwrap() as u32
+        + 1
+}
+
+/// The debugger scenario from pythia-debugger's tests: the editors follow
+/// every stop, from a package body to a trigger and back, and into the SQL
+/// window's block. Needs PYTHIA_TEST_DB, PYTHIA_TEST_DB_DBA and
+/// PYTHIA_DEBUG_HOST.
+#[test]
+fn debugger_follows_execution() {
+    use pythia_debugger::{DebugCommand, Unit, UnitType};
+    let Some((profile, password, host, dba)) = debug_environment() else {
+        return;
+    };
+    let mut h = harness(true);
+    // Install the scenario, with debug information everywhere.
+    let conn = install_debug_scenario(&host, &dba);
     let unit = |name: &str, t| Unit::new("PYTHIA", name, t);
     let api = unit("DBGX_ORDERS_API", UnitType::PackageBody);
     let trigger = unit("DBGX_ORDERS_BU", UnitType::Trigger);
@@ -771,24 +805,12 @@ fn debugger_follows_execution() {
     ] {
         pythia_debugger::target::compile_debug(&conn, u).unwrap();
     }
-    let marker = |head: &str, name: &str| -> u32 {
-        let source = sources
-            .iter()
-            .find(|s| s.to_lowercase().starts_with(head))
-            .unwrap();
-        source
-            .lines()
-            .position(|l| l.contains(&format!("-- @{name}")))
-            .unwrap() as u32
-            + 1
-    };
-    let load_done = marker(
+    let load_done = scenario_marker(
         "create or replace package body dbgx_orders_api",
         "load_done",
     );
-    let on_update = marker("create or replace trigger dbgx_orders_bu", "trigger");
+    let on_update = scenario_marker("create or replace trigger dbgx_orders_bu", "trigger");
 
-    let mut h = harness(true);
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
     h.state_mut()
@@ -873,6 +895,117 @@ fn debugger_follows_execution() {
     h.run_steps(3);
     let (_, marker, _) = h.state().test_execution_marker();
     assert_eq!(marker, None, "no marker once finished");
+}
+
+/// "Compile with debug information" (Settings → Debugger): a package body
+/// compiled in its program window gets debug information without new
+/// messages, and Step into enters it. Selecting the caller in the call
+/// stack shows its source, variables and hover values. Needs
+/// PYTHIA_TEST_DB, PYTHIA_TEST_DB_DBA and PYTHIA_DEBUG_HOST.
+#[test]
+fn debugger_steps_into_unit_compiled_in_program_window() {
+    use pythia_debugger::{DebugCommand, Unit, UnitType};
+    let Some((profile, password, host, dba)) = debug_environment() else {
+        return;
+    };
+    let mut h = harness(true);
+    let conn = install_debug_scenario(&host, &dba);
+    let api = Unit::new("PYTHIA", "DBGX_ORDERS_API", UnitType::PackageBody);
+    let pricing = Unit::new("PYTHIA", "DBGX_PRICING", UnitType::PackageBody);
+    pythia_debugger::target::compile_debug(&conn, &api).unwrap();
+    let process_line = scenario_marker(
+        "create or replace package body dbgx_orders_api",
+        "process_line",
+    );
+
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Program {
+        connection: "pythia@FREEPDB1".into(),
+        object: ObjectRef {
+            owner: "PYTHIA".into(),
+            name: "DBGX_PRICING".into(),
+            object_type: pythia_db::ObjectType::PackageBody,
+        },
+    });
+    wait_until(&mut h, "source", |app| !app.test_focused_busy());
+    let has_debug_info = || pythia_debugger::target::has_debug_info(&conn, &pricing).unwrap();
+    let compile = |h: &mut Ui, debug_info: bool| -> String {
+        h.state_mut().test_settings_mut().compile_debug_info = debug_info;
+        h.state_mut().test_execute_focused();
+        wait_until(h, "compile", |app| !app.test_focused_busy());
+        let program = h.state_mut().test_program();
+        let (failed, message) = program.message().expect("compile message");
+        assert!(!failed, "{message}");
+        for part in &program.parts {
+            assert!(part.errors.is_empty(), "{:?}", part.errors);
+        }
+        message
+    };
+    let message = compile(&mut h, false);
+    assert!(!message.contains("debug"), "{message}");
+    assert!(!has_debug_info());
+    let message = compile(&mut h, true);
+    assert!(message.ends_with("(with debug information)"), "{message}");
+    assert!(has_debug_info());
+
+    // Step into the call from the caller's breakpoint.
+    h.state_mut()
+        .test_debug_setup(&host, api.clone(), process_line);
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "declare\n  l_count pls_integer;\nbegin\n  dbgx_orders_api.process_all(l_count);\n  \
+               rollback;\nend;"
+            .into(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::DebugStart);
+    wait_until(&mut h, "breakpoint", |app| app.test_debug().is_suspended());
+    assert_eq!(h.state().test_debug().stack[0].location.unit, api);
+    h.state_mut()
+        .test_debug_mut()
+        .command(DebugCommand::StepInto);
+    wait_until(&mut h, "step", |app| app.test_debug().is_suspended());
+    let debug = h.state().test_debug();
+    assert_eq!(debug.stack[0].location.unit, pricing, "{:?}", debug.stack);
+    assert_eq!(debug.frame, 0);
+    assert!(debug.variables.iter().all(|v| v.name != "L_TOTAL"));
+
+    // The caller, from the call stack.
+    h.get_by_label(&format!("dbgx_orders_api.process:{process_line}"))
+        .click();
+    wait_until(&mut h, "the caller's variables", |app| {
+        let debug = app.test_debug();
+        debug.frame == 1 && debug.variables.iter().any(|v| v.name == "L_TOTAL")
+    });
+    let (title, _, cursor) = h.state().test_execution_marker();
+    assert_eq!(
+        (title.as_str(), cursor),
+        ("dbgx_orders_api", process_line as usize),
+        "the caller's source"
+    );
+    let debug = h.state().test_debug();
+    assert_eq!(
+        debug.hover(&api, "l_total").map(|(_, v)| v),
+        Some("0".into())
+    );
+    assert_eq!(debug.hover(&pricing, "l_total"), None);
+    // Hovering it in the package body's editor.
+    let mut session = pythia_debugger::ui::DebugSession::default();
+    std::mem::swap(&mut session, h.state_mut().test_debug_mut());
+    let editor = h
+        .state_mut()
+        .test_program_editor()
+        .expect("package body editor");
+    let offset = editor.text().find("l_total := l_total").unwrap() + 2;
+    assert!(crate::editor::debug_hover(editor, offset, &session, &api));
+    std::mem::swap(&mut session, h.state_mut().test_debug_mut());
+    save(&mut h, "12b-debugger-caller-dark");
+
+    h.state_mut().test_debug_mut().stop();
+    wait_until(&mut h, "finish", |app| !app.test_debug_running());
 }
 
 /// Runs a deployment script that includes another (`@@`), continues after
@@ -989,7 +1122,7 @@ fn compile_conflict() {
     h.state_mut().test_close_focused();
     h.state_mut().test_focus(program);
 
-    let effects = h.state_mut().test_program().compile(false);
+    let effects = h.state_mut().test_program().compile(false, false);
     h.state_mut().test_apply_focused(effects);
     wait_until(&mut h, "check", |app| !app.test_focused_busy());
     assert!(h.state_mut().test_program().has_conflict());

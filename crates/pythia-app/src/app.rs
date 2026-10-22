@@ -1058,8 +1058,9 @@ impl PythiaApp {
                         continue;
                     };
                     let session = conn.doc_session(doc, &self.notify);
-                    // Units with breakpoints need debug info; compile them on
-                    // the same session so it happens before the block runs.
+                    // Units with breakpoints need debug info; compile those
+                    // without on the same session so it happens before the
+                    // block runs.
                     let units: std::collections::BTreeSet<pythia_debugger::Unit> = self
                         .debug
                         .breakpoints
@@ -1069,7 +1070,7 @@ impl PythiaApp {
                     for unit in units {
                         let task: pythia_db::TaskFn =
                             Box::new(move |c: &pythia_db::oracle::Connection| {
-                                pythia_debugger::target::compile_debug(c, &unit)?;
+                                pythia_debugger::target::ensure_debug_info(c, &unit)?;
                                 Ok(Box::new(()) as Box<dyn std::any::Any + Send>)
                             });
                         session.session.send(DbRequest::Task {
@@ -1771,7 +1772,7 @@ impl PythiaApp {
                 if settings.format_auto.on_save {
                     w.format_before_compile(false, &settings.format);
                 }
-                w.compile(false)
+                w.compile(false, settings.compile_debug_info)
             }
             _ => Effects::default(),
         };
@@ -3012,8 +3013,11 @@ impl eframe::App for PythiaApp {
             project_actions,
             closed,
             rebind,
+            debug_actions,
             ..
         } = viewer;
+        // From the debugger panel, e.g. a call stack frame's source.
+        self.debug_actions(debug_actions);
         for (id, connection) in rebind.into_iter().chain(toolbar_rebind) {
             self.rebind(id, connection);
         }

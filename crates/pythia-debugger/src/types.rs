@@ -188,7 +188,14 @@ pub enum DebugCommand {
     SetBreakpointOptions(Breakpoint, BreakpointOptions),
     /// Expressions evaluated at every stop (and right away when stopped):
     /// variables, `record.field`, `collection(n)`, `package.variable`.
+    /// They are evaluated in the selected frame (see [`DebugCommand::SelectFrame`]).
     SetWatches(Vec<String>),
+    /// While stopped, selects a frame of the call stack (0 = innermost):
+    /// reports its variables and evaluates the watches there, with its
+    /// unit's globals, until the next stop selects the innermost frame with
+    /// source again. Breakpoint conditions are always evaluated in the
+    /// breakpoint's frame.
+    SelectFrame(usize),
     /// Stop when an exception is raised.
     BreakOnException(bool),
     Resume,
@@ -223,6 +230,10 @@ pub enum DebugEvent {
         reason: StopReason,
         location: Location,
         stack: Vec<Frame>,
+        /// The frame `variables` and `watches` belong to: the innermost one
+        /// with source (code without debug information has neither lines
+        /// nor variables).
+        frame: usize,
         variables: Vec<Variable>,
         watches: Vec<Watch>,
         /// The raised exception, for [`StopReason::Exception`].
@@ -230,6 +241,17 @@ pub enum DebugEvent {
     },
     /// Watches were changed while stopped: their values.
     Watches(Vec<Watch>),
+    /// Another frame was selected ([`DebugCommand::SelectFrame`]): its
+    /// variables and the watches evaluated there.
+    FrameSelected {
+        frame: usize,
+        variables: Vec<Variable>,
+        watches: Vec<Watch>,
+    },
+    /// Units without debug information that were loaded while stepping
+    /// into: the step went over their code, as it can't stop there. Units
+    /// are loaded on first use in the session, so later calls go unnoticed.
+    SteppedOver(Vec<Unit>),
     /// A breakpoint was reached with its condition true; `hits` counts
     /// these since the session started.
     BreakpointHit {

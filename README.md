@@ -59,10 +59,12 @@ for Linux, Windows and macOS.
   (IN parameters as binds, OUT parameters printed).
 - **Debugger** (DBMS_DEBUG_JDWP): breakpoints with conditions and hit
   counts, break on exception, step over/into/out (also through the debugged
-  block itself), call stack with subprograms, variables including records,
-  `%ROWTYPE` and collections, watches, values on hover. Units with
-  breakpoints are compiled with debug information; Step into enters only
-  units that have it.
+  block itself), call stack with subprograms, variables of any frame
+  including records, `%ROWTYPE` and collections, watches, values on hover.
+  Units with breakpoints are compiled with debug information; Step into
+  enters only units that have it (program windows can compile with it,
+  Settings → Debugger, and the panel says when a step went over a unit
+  without).
 - **Profiler** (DBMS_HPROF): profile a block or call and see self and
   total time per subprogram and SQL statement; double-click jumps to the
   code. Needs `EXECUTE` on `DBMS_HPROF`; profiling commits.

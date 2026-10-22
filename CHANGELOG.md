@@ -67,6 +67,19 @@ All notable changes to Pythia are documented here. The format follows
   created; another schema's private link from DBA_DB_LINKS where you may
   read it) and Test link, also in the context menu, which queries over the
   link and says whether it works.
+- Debugger: selecting a frame in the call stack shows its variables, and
+  watches and hover values in its unit come from that frame (its package's
+  globals included). Every stop selects the innermost frame again;
+  breakpoint conditions are always evaluated where the breakpoint is.
+- Debugger: Settings → Debugger → Compile with debug information makes
+  program windows compile with debug information, so Step into enters
+  those units without a breakpoint in them. Off by default, as Oracle runs
+  such code less optimized. Oracle's notes about the option (PLW-06015,
+  PLW-06013) aren't listed with the compile messages. Units that already
+  have debug information are no longer recompiled before a debug run.
+- Debugger: when Step into goes over a unit without debug information, the
+  panel says so (for the first call in the session, when the unit is
+  loaded; later calls can't be told apart from code without calls).
 
 ### Fixed
 - Object browser: public database links and public synonyms are listed,
@@ -91,7 +104,14 @@ All notable changes to Pythia are documented here. The format follows
   by their key (`('L1')`), and watches accept text keys.
 - Debugger: SQL collection types show as not readable instead of NULL.
 - Debugger: after pausing in code without debug information (e.g.
-  `DBMS_SESSION.SLEEP`), the editor shows the nearest frame with source.
+  `DBMS_SESSION.SLEEP`), the editor shows the nearest frame with source,
+  and the variables and watches are that frame's.
+- Debugger: clicking a frame in the call stack didn't open its source.
+- Debugger: globals of a package the session hasn't instantiated yet (e.g.
+  a spec loaded for its types, whose constants the compiler inlined where
+  they are read) read as NULL. Oracle's agent has no values for them until
+  the package is first used; the watch now says so. NULL globals of an
+  instantiated package still read as NULL.
 
 ## [0.1.0] - 2026-10-22
 

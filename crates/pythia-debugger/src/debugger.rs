@@ -154,8 +154,13 @@ struct Session {
     exception_request: Option<i32>,
     /// The step in progress, if any.
     step: Option<Step>,
-    /// The innermost frame while suspended, for evaluating watches.
-    top: Option<TopFrame>,
+    /// Units without debug information loaded during the step into in
+    /// progress (see [`DebugEvent::SteppedOver`]).
+    stepped_over: Vec<Unit>,
+    /// The stopped thread's frames, innermost first.
+    frames: Vec<(u64, jdwp::Location)>,
+    /// The frame watches are evaluated in while suspended.
+    selected: Option<SelectedFrame>,
 }
 
 /// A step request and where it started. Oracle reports every code index
@@ -178,8 +183,8 @@ struct Step {
 /// Steps on one line before stopping anyway (a one-line loop).
 const MAX_SAME_LINE_STEPS: u32 = 1000;
 
-/// The stopped thread's innermost frame and its variables.
-struct TopFrame {
+/// The selected frame of the stopped thread and its variables.
+struct SelectedFrame {
     class: u64,
     variables: Vec<Variable>,
 }
@@ -208,7 +213,9 @@ impl Session {
             watches: Vec::new(),
             exception_request: None,
             step: None,
-            top: None,
+            stepped_over: Vec::new(),
+            frames: Vec::new(),
+            selected: None,
         };
         for (_, id, signature) in session.jdwp.all_classes()? {
             if let Some(unit) = Unit::from_class_signature(&signature) {
@@ -251,9 +258,23 @@ impl Session {
                 }
                 DebugCommand::SetWatches(watches) => {
                     self.watches = watches;
-                    if self.top.is_some() {
+                    if self.selected.is_some() {
                         let values = self.evaluate_watches();
                         events.send(DebugEvent::Watches(values));
+                    }
+                    false
+                }
+                DebugCommand::SelectFrame(frame) => {
+                    if let Some(thread) = self.stopped
+                        && frame < self.frames.len()
+                    {
+                        let variables = self.select_frame(thread, frame)?;
+                        let watches = self.evaluate_watches();
+                        events.send(DebugEvent::FrameSelected {
+                            frame,
+                            variables,
+                            watches,
+                        });
                     }
                     false
                 }
@@ -285,6 +306,7 @@ impl Session {
                         DebugCommand::StepInto => jdwp::step::INTO,
                         _ => jdwp::step::OUT,
                     };
+                    self.stepped_over.clear();
                     self.start_step(thread, depth, 0)?;
                     true
                 }
@@ -312,7 +334,8 @@ impl Session {
 
     fn resume(&mut self, events: &Events) -> Result<(), JdwpError> {
         self.stopped = None;
-        self.top = None;
+        self.frames.clear();
+        self.selected = None;
         self.jdwp.resume_vm()?;
         events.send(DebugEvent::Resumed);
         Ok(())
@@ -367,6 +390,15 @@ impl Session {
                     } => {
                         if let Some(unit) = Unit::from_class_signature(&signature) {
                             self.classes.insert(unit.clone(), class);
+                            if self
+                                .step
+                                .as_ref()
+                                .is_some_and(|s| s.depth == jdwp::step::INTO)
+                                && user_code(&unit)
+                                && !self.has_lines(class)?
+                            {
+                                self.stepped_over.push(unit.clone());
+                            }
                             let pending: Vec<Breakpoint> = self
                                 .breakpoints
                                 .iter()
@@ -565,6 +597,23 @@ impl Session {
         Ok(lines)
     }
 
+    /// Whether any subprogram of a class has line information (it was
+    /// compiled with debug information).
+    fn has_lines(&mut self, class: u64) -> Result<bool, JdwpError> {
+        let methods = match self.jdwp.methods(class) {
+            Ok(m) => m,
+            // Unknown: don't claim it has none.
+            Err(JdwpError::Reply { .. }) => return Ok(true),
+            Err(e) => return Err(e),
+        };
+        for method in methods {
+            if !self.line_table(class, method.id)?.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn line_of(&mut self, loc: &jdwp::Location) -> Result<Option<u32>, JdwpError> {
         let lines = self.line_table(loc.class, loc.method)?;
         Ok(lines
@@ -604,7 +653,8 @@ impl Session {
         Ok(unit)
     }
 
-    /// Reports a stop with stack and the top frame's variables.
+    /// Reports a stop with the stack and the variables of the innermost
+    /// frame with source, which is selected.
     fn suspended(
         &mut self,
         thread: u64,
@@ -624,14 +674,12 @@ impl Session {
                 method,
             });
         }
-        let variables = match frames.first() {
-            Some((frame, loc)) => self.frame_variables(thread, *frame, loc)?,
-            None => Vec::new(),
-        };
-        self.top = frames.first().map(|(_, loc)| TopFrame {
-            class: loc.class,
-            variables: variables.clone(),
-        });
+        self.frames = frames;
+        let frame = stack
+            .iter()
+            .position(|f| f.location.line.is_some())
+            .unwrap_or(0);
+        let variables = self.select_frame(thread, frame)?;
         let watches = self.evaluate_watches();
         let location = stack
             .first()
@@ -640,15 +688,35 @@ impl Session {
                 unit: Unit::new("", "?", crate::types::UnitType::Block),
                 line: None,
             });
+        let stepped_over = std::mem::take(&mut self.stepped_over);
+        if reason == StopReason::Step && !stepped_over.is_empty() {
+            events.send(DebugEvent::SteppedOver(stepped_over));
+        }
         events.send(DebugEvent::Suspended {
             reason,
             location,
             stack,
+            frame,
             variables,
             watches,
             exception,
         });
         Ok(())
+    }
+
+    /// Reads the variables of a frame of the stopped thread and makes it
+    /// the one watches are evaluated in.
+    fn select_frame(&mut self, thread: u64, index: usize) -> Result<Vec<Variable>, JdwpError> {
+        let Some((frame, loc)) = self.frames.get(index).copied() else {
+            self.selected = None;
+            return Ok(Vec::new());
+        };
+        let variables = self.frame_variables(thread, frame, &loc)?;
+        self.selected = Some(SelectedFrame {
+            class: loc.class,
+            variables: variables.clone(),
+        });
+        Ok(variables)
     }
 
     /// Whether a breakpoint event should stop: counts the hit when the
@@ -701,24 +769,26 @@ impl Session {
         Ok(hits >= options.hit_count.unwrap_or(1))
     }
 
+    /// The watches' values in the selected frame.
     fn evaluate_watches(&mut self) -> Vec<Watch> {
-        let Some(top) = self.top.take() else {
+        let Some(selected) = self.selected.take() else {
             return Vec::new();
         };
         let watches = self.watches.clone();
         let out = watches
             .into_iter()
             .map(|expression| {
-                let value = self.resolve(&expression, &top.variables, Some(top.class));
+                let value = self.resolve(&expression, &selected.variables, Some(selected.class));
                 Watch { expression, value }
             })
             .collect();
-        self.top = Some(top);
+        self.selected = Some(selected);
         out
     }
 
-    /// Resolves a watch path: a variable of the innermost frame, a global of
-    /// its package, or `package.variable`, followed by fields and elements.
+    /// Resolves a watch path: one of `variables` (of a frame), a global of
+    /// the package of `class` (the frame's), or `package.variable`,
+    /// followed by fields and elements.
     fn resolve(
         &mut self,
         expression: &str,
@@ -743,10 +813,7 @@ impl Session {
         });
         if let Some(unit) = &current {
             for class in self.package_classes(&unit.owner, &unit.name) {
-                if let Some(var) = self
-                    .static_variable(class, first)
-                    .map_err(|e| e.to_string())?
-                {
+                if let Some(var) = self.static_variable(class, first)? {
                     return condition::descend(&var, rest).cloned();
                 }
             }
@@ -768,10 +835,7 @@ impl Session {
                 ));
             }
             for class in classes {
-                if let Some(var) = self
-                    .static_variable(class, name)
-                    .map_err(|e| e.to_string())?
-                {
+                if let Some(var) = self.static_variable(class, name)? {
                     return condition::descend(&var, rest).cloned();
                 }
             }
@@ -805,29 +869,64 @@ impl Session {
         found.into_iter().map(|(_, c)| c).collect()
     }
 
-    /// A static field (package global) of a class, by name.
-    fn static_variable(&mut self, class: u64, name: &str) -> Result<Option<Variable>, JdwpError> {
+    /// A static field (package global) of a class, by name. Fails for a
+    /// package that isn't instantiated in the session yet: its globals have
+    /// no values (they aren't NULL either).
+    fn static_variable(&mut self, class: u64, name: &str) -> Result<Option<Variable>, String> {
         let fields = match self.jdwp.fields(class) {
             Ok(f) => f,
             Err(JdwpError::Reply { .. }) => return Ok(None),
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.to_string()),
         };
         let Some(field) = fields
-            .into_iter()
+            .iter()
             .find(|f| f.modifiers & STATIC != 0 && f.name.eq_ignore_ascii_case(name))
+            .cloned()
         else {
             return Ok(None);
         };
         let value = match self.jdwp.static_values(class, &[field.id]) {
             Ok(mut v) => v.pop(),
             Err(JdwpError::Reply { .. }) => None,
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.to_string()),
         };
         let Some(value) = value else {
             return Ok(None);
         };
+        if matches!(value, Value::Object { id: 0, .. })
+            && !self
+                .instantiated(class, &fields)
+                .map_err(|e| e.to_string())?
+        {
+            let package = self.unit_of(class).map_err(|e| e.to_string())?;
+            return Err(format!(
+                "{} isn't instantiated in this session yet: no values until it's first used \
+                 (constants may be compiled into the code that reads them)",
+                package.name.to_lowercase()
+            ));
+        }
         self.variable(field.name, &field.signature, &value, 0)
             .map(Some)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Whether the package state behind `class` exists in the session.
+    /// Before it does, the agent reports every global as a null reference;
+    /// after, each is an object, also when its value is NULL.
+    fn instantiated(&mut self, class: u64, fields: &[jdwp::FieldInfo]) -> Result<bool, JdwpError> {
+        let globals: Vec<u64> = fields
+            .iter()
+            .filter(|f| f.modifiers & STATIC != 0 && !f.name.starts_with('_'))
+            .map(|f| f.id)
+            .collect();
+        match self.jdwp.static_values(class, &globals) {
+            Ok(values) => Ok(values
+                .iter()
+                .any(|v| !matches!(v, Value::Object { id: 0, .. }))),
+            // Unknown: don't claim it isn't.
+            Err(JdwpError::Reply { .. }) => Ok(true),
+            Err(e) => Err(e),
+        }
     }
 
     /// A readable description of a raised exception object.
@@ -1005,6 +1104,21 @@ impl Session {
 
 /// `ACC_STATIC` in JDWP field modifiers.
 const STATIC: i32 = 0x0008;
+
+/// Stored units with code that can be compiled with debug information to
+/// step into: not specs or anonymous blocks, types declared in a unit
+/// (`DBGX_PRICING/DBGX_ORDERS/Rowtype`), nor SYS's built-in packages.
+fn user_code(unit: &Unit) -> bool {
+    matches!(
+        unit.unit_type,
+        UnitType::Procedure
+            | UnitType::Function
+            | UnitType::PackageBody
+            | UnitType::TypeBody
+            | UnitType::Trigger
+    ) && !unit.name.contains('/')
+        && unit.owner != "SYS"
+}
 
 /// Builds a one-line description from an exception object. Oracle names
 /// the class of `ORA-n` exceptions `EXCEPTION_ORA_n`.
