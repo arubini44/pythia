@@ -25,6 +25,8 @@ egui = "0.36"
 egui_extras = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 oracle = "0.6"
+# Spike (#13): the pure-Rust driver, pinned while it is in beta.
+oracledb = "=26.0.0-beta.4"
 logos = "0.16"
 regex = "1"
 ropey = "1.6"
