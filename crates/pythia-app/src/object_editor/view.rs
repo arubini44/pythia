@@ -29,55 +29,67 @@ impl ViewDef {
 }
 
 pub fn load(conn: &Connection, owner: &str, name: &str) -> Result<ViewDef, DbError> {
-    let text = conn
-        .query_row_as::<Option<String>>(
-            "select text from all_views where owner = :1 and view_name = :2",
+    let (text, read_only) = conn
+        .query_row_as::<(Option<String>, String)>(
+            "select text, read_only from all_views where owner = :1 and view_name = :2",
             &[&owner, &name],
         )
         .map_err(|e| match e.db_error().map(|d| d.code()) {
             Some(1403) => DbError::new(format!("View {owner}.{name} not found")),
             _ => e.into(),
-        })?
-        .unwrap_or_default();
-    // The clauses are constraints of the view: O = read only, V = check option.
-    let mut read_only = false;
-    let mut check_option = false;
-    for kind in conn.query_as::<String>(
-        "select constraint_type from all_constraints
-          where owner = :1 and table_name = :2 and constraint_type in ('O', 'V')",
-        &[&owner, &name],
-    )? {
-        match kind?.as_str() {
-            "O" => read_only = true,
-            _ => check_option = true,
-        }
-    }
+        })?;
+    let text = text.unwrap_or_default();
+    let (query, clause) = split_clause(&text);
+    let read_only = read_only == "Y" || clause == Some(Clause::ReadOnly);
+    // 23ai keeps the clause in the text; before, a check option is only
+    // known as a constraint of the view (slow to look up on a big dictionary).
+    let check_option = match clause {
+        Some(clause) => clause == Clause::CheckOption,
+        None if read_only || conn.server_version()?.0.major() >= 23 => false,
+        None => conn
+            .query_as::<String>(
+                "select constraint_type from all_constraints
+                  where owner = :1 and table_name = :2 and constraint_type = 'V'",
+                &[&owner, &name],
+            )?
+            .next()
+            .is_some(),
+    };
     Ok(ViewDef {
         name: quote_ident(name),
         columns: String::new(),
-        query: strip_clauses(&text).to_owned(),
+        query: query.to_owned(),
         force: false,
         read_only,
         check_option,
     })
 }
 
-/// Removes a trailing `WITH READ ONLY` / `WITH CHECK OPTION [CONSTRAINT x]`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Clause {
+    ReadOnly,
+    CheckOption,
+}
+
+/// Splits off a trailing `WITH READ ONLY` / `WITH CHECK OPTION [CONSTRAINT x]`
 /// that newer versions keep in `ALL_VIEWS.TEXT`.
-fn strip_clauses(text: &str) -> &str {
+fn split_clause(text: &str) -> (&str, Option<Clause>) {
     let trimmed = text.trim_end();
     let lower = trimmed.to_lowercase();
-    for clause in ["with read only", "with check option"] {
+    for (clause, kind) in [
+        ("with read only", Clause::ReadOnly),
+        ("with check option", Clause::CheckOption),
+    ] {
         if let Some(at) = lower.rfind(clause) {
             let rest = lower[at + clause.len()..].trim();
             let tail_ok = rest.is_empty()
                 || rest.starts_with("constraint") && rest.split_whitespace().count() == 2;
             if tail_ok {
-                return trimmed[..at].trim_end();
+                return (trimmed[..at].trim_end(), Some(kind));
             }
         }
     }
-    trimmed
+    (trimmed, None)
 }
 
 pub fn statements(owner: &str, def: &ViewDef) -> Result<Vec<String>, String> {
@@ -143,18 +155,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strips_trailing_clauses() {
+    fn splits_trailing_clauses() {
         assert_eq!(
-            strip_clauses("select 1 x from dual with read only"),
-            "select 1 x from dual"
+            split_clause("select 1 x from dual with read only"),
+            ("select 1 x from dual", Some(Clause::ReadOnly))
         );
         assert_eq!(
-            strip_clauses("select * from t where a = 1 WITH CHECK OPTION constraint c1\n"),
-            "select * from t where a = 1"
+            split_clause("select * from t where a = 1 WITH CHECK OPTION constraint c1\n"),
+            ("select * from t where a = 1", Some(Clause::CheckOption))
         );
         assert_eq!(
-            strip_clauses("select 'with read only' x from dual"),
-            "select 'with read only' x from dual"
+            split_clause("select 'with read only' x from dual"),
+            ("select 'with read only' x from dual", None)
         );
     }
 

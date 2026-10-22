@@ -229,6 +229,9 @@ pub enum MetaQuery {
     Columns {
         owner: String,
         table: String,
+        /// Also the primary key positions: a dictionary join only worth it
+        /// for tables.
+        keys: bool,
     },
     Members {
         owner: String,
@@ -324,7 +327,9 @@ pub(crate) fn run(conn: &Connection, query: &MetaQuery) -> Result<MetaResult, Db
             object_type,
             filter,
         } => MetaResult::Objects(objects(conn, owner, *object_type, filter.as_deref())?),
-        MetaQuery::Columns { owner, table } => MetaResult::Columns(columns(conn, owner, table)?),
+        MetaQuery::Columns { owner, table, keys } => {
+            MetaResult::Columns(columns(conn, owner, table, *keys)?)
+        }
         MetaQuery::Members { owner, package } => {
             MetaResult::Members(members(conn, owner, package)?)
         }
@@ -429,8 +434,22 @@ pub fn like_pattern(filter: &str) -> String {
     out
 }
 
-fn columns(conn: &Connection, owner: &str, table: &str) -> Result<Vec<TableColumn>, DbError> {
-    let sql = "select c.column_name, \
+fn columns(
+    conn: &Connection,
+    owner: &str,
+    table: &str,
+    keys: bool,
+) -> Result<Vec<TableColumn>, DbError> {
+    let pk = if keys {
+        "(select p.position from all_cons_columns p join all_constraints k \
+            on k.owner = p.owner and k.constraint_name = p.constraint_name \
+           where k.constraint_type = 'P' and k.owner = c.owner and k.table_name = c.table_name \
+             and p.column_name = c.column_name)"
+    } else {
+        "cast(null as number)"
+    };
+    let sql = format!(
+        "select c.column_name, \
                 case \
                   when c.data_type in ('VARCHAR2', 'NVARCHAR2', 'CHAR', 'NCHAR', 'RAW') then \
                     c.data_type || '(' || decode(c.char_used, 'C', c.char_length || ' CHAR', c.data_length) || ')' \
@@ -438,18 +457,15 @@ fn columns(conn: &Connection, owner: &str, table: &str) -> Result<Vec<TableColum
                     'NUMBER(' || c.data_precision || nvl2(nullif(c.data_scale, 0), ',' || c.data_scale, '') || ')' \
                   when c.data_type = 'NUMBER' and c.data_scale = 0 then 'INTEGER' \
                   else c.data_type end, \
-                c.nullable, c.data_default, cc.comments, \
-                (select p.position from all_cons_columns p join all_constraints k \
-                   on k.owner = p.owner and k.constraint_name = p.constraint_name \
-                  where k.constraint_type = 'P' and k.owner = c.owner and k.table_name = c.table_name \
-                    and p.column_name = c.column_name) \
+                c.nullable, c.data_default, cc.comments, {pk} \
                from all_tab_columns c \
                left join all_col_comments cc \
                  on cc.owner = c.owner and cc.table_name = c.table_name and cc.column_name = c.column_name \
               where c.owner = :1 and c.table_name = :2 \
-              order by c.column_id";
+              order by c.column_id"
+    );
     let mut out = Vec::new();
-    for row in conn.query(sql, &[&owner, &table])? {
+    for row in conn.query(&sql, &[&owner, &table])? {
         let row = row?;
         let (name, data_type, nullable, default, comment, pk): (
             String,

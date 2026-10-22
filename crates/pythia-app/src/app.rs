@@ -528,7 +528,10 @@ impl PythiaApp {
             }
             OpenRequest::Object { connection, object } => {
                 if !self.focus_existing(&connection, &object, false) {
-                    self.add_doc(Some(connection), DocKind::Object(ObjectView::new(object)));
+                    self.add_doc(
+                        Some(connection),
+                        DocKind::Object(ObjectView::new(object, &self.notify.0)),
+                    );
                 }
             }
             OpenRequest::Monitor { connection, start } => {
@@ -747,6 +750,13 @@ impl PythiaApp {
                 (Target::Own | Target::Connection(_), Some(id)) => {
                     let conn = self.conns.get_mut(&name).expect("checked above");
                     conn.doc_session(id, &self.notify).session.send(request);
+                }
+                (Target::Meta, doc) if let Some(req) = request_key(&request) => {
+                    if let Some(id) = doc {
+                        self.routes.insert(req, id);
+                    }
+                    let conn = self.conns.get_mut(&name).expect("checked above");
+                    conn.send_meta(req, request, &self.notify);
                 }
                 (_, doc) => {
                     if let (Some(id), Some(req)) = (doc, request_key(&request)) {
@@ -1874,11 +1884,18 @@ impl PythiaApp {
                         );
                     }
                     SessionKey::Main => conn.reconnect_main(&self.notify),
+                    // The next request opens a new metadata session.
+                    SessionKey::Meta => {}
                 }
                 self.log(format!("{name}: connection lost, reconnecting"));
             }
             match key {
                 SessionKey::Main => self.main_event(&name, event),
+                SessionKey::Meta => {
+                    if let Some(doc) = event_id(&event).and_then(|id| self.routes.remove(&id)) {
+                        self.deliver(doc, event);
+                    }
+                }
                 SessionKey::Doc(id) => match event {
                     DbEvent::TaskDone { id: task, result }
                         if self.debug_run.is_some_and(|(_, t)| t == task) =>
@@ -3084,6 +3101,21 @@ impl PythiaApp {
             Some(DocKind::ExportTables(e)) => e,
             _ => panic!("not an export window"),
         }
+    }
+
+    pub fn test_object_view(&self) -> &ObjectView {
+        let id = self.focused.expect("focused document");
+        match self.docs.get(&id).map(|d| &d.kind) {
+            Some(DocKind::Object(v)) => v,
+            _ => panic!("not an object view"),
+        }
+    }
+
+    /// Whether `connection` has opened its metadata session.
+    pub fn test_meta_session(&self, connection: &str) -> bool {
+        self.conns
+            .get(connection)
+            .is_some_and(|c| c.has_meta_session())
     }
 
     pub fn test_object_editor(&mut self) -> &mut crate::object_editor::ObjectEditor {

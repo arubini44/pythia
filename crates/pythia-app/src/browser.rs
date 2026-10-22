@@ -365,6 +365,7 @@ impl Browser {
             t if t.has_data() => MetaQuery::Columns {
                 owner: object.owner.clone(),
                 table: object.name.clone(),
+                keys: t == ObjectType::Table,
             },
             ObjectType::Package | ObjectType::Type => MetaQuery::Members {
                 owner: object.owner.clone(),
@@ -1283,6 +1284,7 @@ impl Browser {
                 let query = MetaQuery::Columns {
                     owner: object.owner.clone(),
                     table: object.name.clone(),
+                    keys: object.object_type == ObjectType::Table,
                 };
                 self.pending.insert(id, Pending::Generate { object, kind });
                 effects.request(Target::Main, DbRequest::Meta { id, query });

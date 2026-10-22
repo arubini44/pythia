@@ -14,6 +14,15 @@ All notable changes to Pythia are documented here. The format follows
   labelled New SQL button with Open file/Reopen closed, Save, a connection
   selector (switch this window's connection, connect, disconnect), an
   auto-commit toggle and Format.
+- Object views: views and code objects open on their DDL (tables still on
+  their columns), and the next object of a type opens on the tab you chose
+  last. Only the shown tab loads, on a metadata session of its own, so
+  views and edit forms no longer wait behind the object browser,
+  completion or compiles. A view's columns skip the primary key lookup,
+  and its edit form takes WITH READ ONLY / WITH CHECK OPTION from the
+  view's text where the database keeps it there (23ai) instead of
+  searching all constraints. `RUST_LOG=pythia_db=debug` logs how long each
+  metadata query took.
 
 ### Added
 - Editors: a context menu. On a database object it offers what the object

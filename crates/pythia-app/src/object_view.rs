@@ -22,12 +22,26 @@ pub struct ObjectView {
     state: State,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Tab {
-    #[default]
     Columns,
     Detail(Detail),
     Ddl,
+}
+
+impl Tab {
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Columns => "Columns",
+            Tab::Detail(d) => d.label(),
+            Tab::Ddl => "DDL",
+        }
+    }
+}
+
+/// Where the tab last chosen for objects of type `t` is remembered.
+fn remembered_tab(t: ObjectType) -> egui::Id {
+    egui::Id::new(("object-view-tab", t.dictionary_name()))
 }
 
 pub enum Loaded<T> {
@@ -47,15 +61,38 @@ struct State {
 }
 
 impl ObjectView {
-    pub fn new(object: ObjectRef) -> Self {
-        Self {
+    /// Opens on the tab last chosen for this type of object.
+    pub fn new(object: ObjectRef, ctx: &egui::Context) -> Self {
+        let mut view = Self {
             object,
             state: State::default(),
-        }
+        };
+        let label =
+            ctx.data_mut(|d| d.get_persisted::<String>(remembered_tab(view.object.object_type)));
+        view.state.tab = label.and_then(|l| view.tabs().into_iter().find(|t| t.label() == l));
+        view
     }
 
     pub fn title(&self) -> String {
         self.object.name.to_lowercase()
+    }
+
+    #[cfg(test)]
+    pub fn tab_for_test(&self) -> Option<&'static str> {
+        self.state.tab.map(Tab::label)
+    }
+
+    #[cfg(test)]
+    pub fn loaded_for_test(&self) -> (Option<String>, usize) {
+        let ddl = match &self.state.ddl {
+            Some(Loaded::Ready(editor)) => Some(editor.text().to_owned()),
+            _ => None,
+        };
+        let columns = match &self.state.columns {
+            Some(Loaded::Ready(cols)) => cols.len(),
+            _ => 0,
+        };
+        (ddl, columns)
     }
 
     pub fn is_loading(&self) -> bool {
@@ -66,18 +103,28 @@ impl ObjectView {
         self.object.object_type.has_data()
     }
 
+    fn is_table(&self) -> bool {
+        self.object.object_type == ObjectType::Table
+    }
+
+    /// Tables open on their columns, everything else on its DDL.
     fn tabs(&self) -> Vec<Tab> {
         let mut tabs = Vec::new();
+        if !self.is_table() {
+            tabs.push(Tab::Ddl);
+        }
         if self.has_columns() {
             tabs.push(Tab::Columns);
         }
-        let details = if self.object.object_type == ObjectType::Table {
+        let details = if self.is_table() {
             Detail::TABLE
         } else {
             Detail::CODE
         };
         tabs.extend(details.iter().map(|d| Tab::Detail(*d)));
-        tabs.push(Tab::Ddl);
+        if self.is_table() {
+            tabs.push(Tab::Ddl);
+        }
         tabs
     }
 
@@ -100,6 +147,7 @@ impl ObjectView {
                 MetaQuery::Columns {
                     owner: o.owner.clone(),
                     table: o.name.clone(),
+                    keys: o.object_type == ObjectType::Table,
                 }
             }
             Tab::Detail(detail) if !self.state.details.contains_key(&detail) => {
@@ -122,7 +170,7 @@ impl ObjectView {
         };
         let id = request_id();
         self.state.pending.insert(id, tab);
-        effects.request(Target::Main, DbRequest::Meta { id, query });
+        effects.request(Target::Meta, DbRequest::Meta { id, query });
         effects
     }
 
@@ -191,12 +239,10 @@ impl ObjectView {
         });
         ui.horizontal(|ui| {
             for t in &tabs {
-                let label = match t {
-                    Tab::Columns => "Columns",
-                    Tab::Detail(d) => d.label(),
-                    Tab::Ddl => "DDL",
-                };
-                ui.selectable_value(&mut tab, *t, label);
+                if ui.selectable_value(&mut tab, *t, t.label()).clicked() {
+                    let key = remembered_tab(self.object.object_type);
+                    ui.data_mut(|d| d.insert_persisted(key, t.label().to_owned()));
+                }
             }
         });
         ui.separator();

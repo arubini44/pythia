@@ -1599,6 +1599,76 @@ fn export_tables() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Views open on their DDL, loaded on the metadata session; the tab chosen
+/// last is where the next view opens. The edit form reads WITH READ ONLY
+/// from the dictionary.
+#[test]
+fn object_view_opens_on_the_ddl() {
+    use crate::object_editor::EditTarget;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "create or replace view pythia_ov_a as select 1 x, 'a' y from dual with read only;
+create or replace view pythia_ov_b as select 2 z from dual;"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "views", |app| !app.test_focused_busy());
+    let view = |name: &str| ObjectRef {
+        owner: "PYTHIA".into(),
+        name: name.into(),
+        object_type: pythia_db::ObjectType::View,
+    };
+    let open = |h: &mut Harness<'_, PythiaApp>, name: &str| {
+        h.state_mut().test_open(OpenRequest::Object {
+            connection: "pythia@FREEPDB1".into(),
+            object: view(name),
+        });
+        h.run_steps(2);
+        wait_until(h, "object view", |app| !app.test_focused_busy());
+    };
+
+    open(&mut h, "PYTHIA_OV_A");
+    assert!(h.state().test_meta_session("pythia@FREEPDB1"));
+    let v = h.state().test_object_view();
+    assert_eq!(v.tab_for_test(), Some("DDL"));
+    let (ddl, columns) = v.loaded_for_test();
+    assert!(ddl.is_some_and(|d| d.contains("PYTHIA_OV_A")));
+    assert_eq!(columns, 0, "only the shown tab loads");
+
+    h.get_by_label("Columns").hover();
+    h.run_steps(1);
+    h.get_by_label("Columns").click();
+    h.run_steps(2);
+    wait_until(&mut h, "columns", |app| !app.test_focused_busy());
+    assert_eq!(h.state().test_object_view().loaded_for_test().1, 2);
+
+    // The next view opens where the last one was left.
+    open(&mut h, "PYTHIA_OV_B");
+    let v = h.state().test_object_view();
+    assert_eq!(v.tab_for_test(), Some("Columns"));
+    assert_eq!(v.loaded_for_test(), (None, 1));
+
+    h.state_mut().test_open(OpenRequest::EditObject {
+        connection: "pythia@FREEPDB1".into(),
+        target: EditTarget::Edit(view("PYTHIA_OV_A")),
+    });
+    h.run_steps(2);
+    wait_until(&mut h, "editor", |app| !app.test_focused_busy());
+    let mut loaded = None;
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        loaded = d.downcast_ref::<crate::object_editor::ViewDef>().cloned();
+    });
+    let d = loaded.expect("the view form");
+    assert!(d.read_only && !d.check_option, "{d:?}");
+    assert_eq!(d.query, "select 1 x, 'a' y from dual");
+}
+
 /// The object editors: a new sequence applied through the form, then each
 /// editor on existing objects.
 #[test]

@@ -150,7 +150,15 @@ impl Worker {
                     binds,
                 } => worker.execute(id, &sql, max_rows, &binds),
                 DbRequest::Meta { id, query } => {
+                    let started = Instant::now();
                     let result = meta::run(&worker.conn, &query);
+                    debug!(
+                        id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        ok = result.is_ok(),
+                        ?query,
+                        "metadata query done"
+                    );
                     worker.events.send(DbEvent::Meta { id, result });
                 }
                 DbRequest::FetchMore { id, max_rows } => worker.fetch_more(id, max_rows),
@@ -158,7 +166,14 @@ impl Worker {
                 DbRequest::Rollback => worker.end_transaction(false),
                 DbRequest::SetAutocommit(on) => worker.autocommit = on,
                 DbRequest::Task { id, task } => {
+                    let started = Instant::now();
                     let result = task(&worker.conn);
+                    debug!(
+                        id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        ok = result.is_ok(),
+                        "task done"
+                    );
                     worker.events.send(DbEvent::TaskDone { id, result });
                     // Tasks (data edits, debug runs, …) can open a transaction.
                     worker.report_transaction();

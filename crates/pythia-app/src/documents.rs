@@ -28,6 +28,8 @@ pub enum Target {
     Own,
     /// The connection's main session (metadata lookups).
     Main,
+    /// The connection's metadata session (loading object views and forms).
+    Meta,
     /// The document's own session on another connection (compare tools).
     Connection(String),
 }

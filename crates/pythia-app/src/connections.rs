@@ -3,7 +3,9 @@
 //! Every connection has a *main* session used by the object browser and other
 //! metadata lookups. Documents (SQL and program windows) get their own session
 //! in multi-session mode, so a long-running query never blocks the browser or
-//! another window, and every window has its own transaction.
+//! another window, and every window has its own transaction. Object views and
+//! forms load on a *metadata* session of their own, so they don't queue
+//! behind the browser, completion and compiles on the main session.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -15,6 +17,7 @@ use crate::documents::DocId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionKey {
     Main,
+    Meta,
     Doc(DocId),
 }
 
@@ -35,6 +38,10 @@ pub struct Connection {
     pub status: Status,
     pub main: Session,
     pub main_pending_tx: bool,
+    /// The metadata session, opened on first use.
+    meta: Option<Session>,
+    /// Requests sent to it and not answered yet: true for tasks.
+    meta_pending: HashMap<u64, bool>,
     pub docs: HashMap<DocId, DocSession>,
 }
 
@@ -85,6 +92,76 @@ impl Connection {
         self.main = Session::connect(self.params.clone(), notify.callback());
         self.main_pending_tx = false;
     }
+
+    /// Sends a metadata query or task (with its request id) to the metadata
+    /// session, opening it on first use.
+    pub fn send_meta(&mut self, id: u64, request: DbRequest, notify: &Notify) {
+        let params = &self.params;
+        let session = self
+            .meta
+            .get_or_insert_with(|| Session::connect(params.clone(), notify.callback()));
+        self.meta_pending
+            .insert(id, matches!(request, DbRequest::Task { .. }));
+        session.send(request);
+    }
+
+    #[cfg(test)]
+    pub fn has_meta_session(&self) -> bool {
+        self.meta.is_some()
+    }
+
+    /// The metadata session's events. If it is lost or can't connect, the
+    /// requests waiting on it fail, and the next one opens a new session.
+    fn poll_meta(&mut self) -> Vec<DbEvent> {
+        let mut out = Vec::new();
+        let Some(session) = &mut self.meta else {
+            return out;
+        };
+        let mut failed = None;
+        while let Some(event) = session.try_recv() {
+            match event {
+                DbEvent::Connected(_) | DbEvent::Notice(_) => {}
+                DbEvent::ConnectFailed(e) => failed = Some(e),
+                DbEvent::Meta { id, result } => {
+                    if let Err(e) = &result
+                        && e.is_connection_lost()
+                    {
+                        failed = Some(e.clone());
+                    }
+                    self.meta_pending.remove(&id);
+                    out.push(DbEvent::Meta { id, result });
+                }
+                DbEvent::TaskDone { id, result } => {
+                    if let Err(e) = &result
+                        && e.is_connection_lost()
+                    {
+                        failed = Some(e.clone());
+                    }
+                    self.meta_pending.remove(&id);
+                    out.push(DbEvent::TaskDone { id, result });
+                }
+                event => out.push(event),
+            }
+        }
+        if let Some(error) = failed {
+            self.meta = None;
+            for (id, task) in self.meta_pending.drain() {
+                let error = error.clone();
+                out.push(if task {
+                    DbEvent::TaskDone {
+                        id,
+                        result: Err(error),
+                    }
+                } else {
+                    DbEvent::Meta {
+                        id,
+                        result: Err(error),
+                    }
+                });
+            }
+        }
+        out
+    }
 }
 
 /// Wakes the UI when a session has news.
@@ -128,6 +205,8 @@ impl Connections {
                 status: Status::Connecting,
                 main,
                 main_pending_tx: false,
+                meta: None,
+                meta_pending: HashMap::new(),
                 docs: HashMap::new(),
             },
         );
@@ -168,6 +247,9 @@ impl Connections {
                     conn.main_pending_tx = pending;
                 }
                 out.push((name.clone(), SessionKey::Main, event));
+            }
+            for event in conn.poll_meta() {
+                out.push((name.clone(), SessionKey::Meta, event));
             }
             for (doc, s) in &mut conn.docs {
                 while let Some(event) = s.session.try_recv() {

@@ -459,7 +459,11 @@ impl ImportWindow {
                     Target::Main,
                     DbRequest::Meta {
                         id,
-                        query: MetaQuery::Columns { owner, table },
+                        query: MetaQuery::Columns {
+                            owner,
+                            table,
+                            keys: false,
+                        },
                     },
                 );
             }

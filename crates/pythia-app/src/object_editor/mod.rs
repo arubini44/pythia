@@ -249,7 +249,7 @@ impl ObjectEditor {
             let loaded = load(conn, &target)?;
             Ok(Box::new(loaded) as Box<dyn std::any::Any + Send>)
         });
-        effects.request(Target::Main, DbRequest::Task { id, task });
+        effects.request(Target::Meta, DbRequest::Task { id, task });
         effects
     }
 
@@ -471,7 +471,7 @@ impl ObjectEditor {
                 let names = names(conn, sql, &refs)?;
                 Ok(Box::new(names) as Box<dyn std::any::Any + Send>)
             });
-            effects.request(Target::Main, DbRequest::Task { id, task });
+            effects.request(Target::Meta, DbRequest::Task { id, task });
         }
     }
 

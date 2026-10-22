@@ -249,6 +249,7 @@ fn compile_errors_and_metadata() {
         MetaQuery::Columns {
             owner: owner.clone(),
             table: "PYTHIA_META_T".into(),
+            keys: true,
         },
     ) else {
         panic!()
