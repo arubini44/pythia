@@ -1271,6 +1271,24 @@ fn code_font() {
     );
 }
 
+/// While a menu of the bar is open, moving onto another title opens that
+/// menu; without an open menu, hovering a title does nothing.
+#[test]
+fn menu_bar_switches_on_hover() {
+    let mut h = harness(false);
+    h.run_steps(2);
+    h.get_by_label("Edit").hover();
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Format Code").is_none());
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Save As").is_some());
+    h.get_by_label("Edit").hover();
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Format Code").is_some());
+    assert!(h.query_by_label_contains("Save As").is_none());
+}
+
 /// Profiling a call shows where the time went, per subprogram.
 #[test]
 fn profiler() {

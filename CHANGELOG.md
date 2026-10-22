@@ -52,6 +52,8 @@ All notable changes to orui are documented here. The format follows
 - ORA-01805 (time zone regions with Instant Client Basic Light) is
   explained.
 - Toolbar and other frameless buttons no longer grow when hovered.
+- Menu bar: moving to another menu while one is open opens it, as in
+  native menu bars.
 
 ## [0.1.0] - 2026-10-22
 

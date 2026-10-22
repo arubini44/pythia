@@ -1630,7 +1630,7 @@ impl OruiApp {
             }
         };
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
+            bar_menu(ui, "File", |ui| {
                 item(ui, Command::NewSqlWindow);
                 item(ui, Command::OpenFile);
                 item(ui, Command::SaveFile);
@@ -1644,7 +1644,7 @@ impl OruiApp {
                 ui.separator();
                 item(ui, Command::Quit);
             });
-            ui.menu_button("Edit", |ui| {
+            bar_menu(ui, "Edit", |ui| {
                 item(ui, Command::Format);
                 item(ui, Command::RenameSymbol);
                 item(ui, Command::History);
@@ -1652,7 +1652,7 @@ impl OruiApp {
                 item(ui, Command::FoldAll);
                 item(ui, Command::UnfoldAll);
             });
-            ui.menu_button("Session", |ui| {
+            bar_menu(ui, "Session", |ui| {
                 item(ui, Command::Connect);
                 item(ui, Command::Disconnect);
                 ui.separator();
@@ -1668,7 +1668,7 @@ impl OruiApp {
                 item(ui, Command::Rollback);
                 item(ui, Command::ToggleAutocommit);
             });
-            ui.menu_button("Tools", |ui| {
+            bar_menu(ui, "Tools", |ui| {
                 item(ui, Command::FindObject);
                 item(ui, Command::FindInSource);
                 item(ui, Command::SearchData);
@@ -1681,7 +1681,7 @@ impl OruiApp {
                 item(ui, Command::CompareSchemas);
                 item(ui, Command::CompareData);
             });
-            ui.menu_button("Debug", |ui| {
+            bar_menu(ui, "Debug", |ui| {
                 item(ui, Command::DebugStart);
                 item(ui, Command::ToggleBreakpoint);
                 ui.separator();
@@ -1693,7 +1693,7 @@ impl OruiApp {
                 ui.separator();
                 item(ui, Command::ShowDebugger);
             });
-            ui.menu_button("Reports", |ui| {
+            bar_menu(ui, "Reports", |ui| {
                 for category in crate::reports::categories() {
                     ui.menu_button(category, |ui| {
                         for report in crate::reports::REPORTS
@@ -1738,7 +1738,7 @@ impl OruiApp {
                 ui.separator();
                 item(ui, Command::SaveAsReport);
             });
-            ui.menu_button("Monitor", |ui| {
+            bar_menu(ui, "Monitor", |ui| {
                 item(ui, Command::MonitorDashboard);
                 item(ui, Command::MonitorSessions);
                 item(ui, Command::MonitorBlocking);
@@ -1746,7 +1746,7 @@ impl OruiApp {
                 item(ui, Command::MonitorAwr);
                 item(ui, Command::MonitorTrace);
             });
-            ui.menu_button("View", |ui| {
+            bar_menu(ui, "View", |ui| {
                 item(ui, Command::ShowPalette);
                 item(ui, Command::ShowBrowser);
                 item(ui, Command::ShowLog);
@@ -1761,7 +1761,7 @@ impl OruiApp {
                 ui.separator();
                 item(ui, Command::ResetLayout);
             });
-            ui.menu_button("Help", |ui| item(ui, Command::About));
+            bar_menu(ui, "Help", |ui| item(ui, Command::About));
         });
         if let Some(i) = delete {
             let report = self.user_reports.reports.remove(i);
@@ -2798,6 +2798,25 @@ fn connection_color(profile: &ConnectionProfile) -> Option<Color32> {
         Some(theme::DANGER)
     } else {
         profile.color.map(|[r, g, b]| Color32::from_rgb(r, g, b))
+    }
+}
+
+/// A top-level menu of the menu bar. As in native menu bars, moving onto
+/// another title while one of the bar's menus is open switches to it.
+fn bar_menu(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
+    let response = ui.menu_button(title, add_contents).response;
+    let ctx = ui.ctx();
+    let popup_id = egui::Popup::default_response_id(&response);
+    let open_key = ui.id().with("open_bar_menu");
+    if response.hovered() && !egui::Popup::is_id_open(ctx, popup_id) {
+        let open = ctx.data(|d| d.get_temp::<egui::Id>(open_key));
+        if open.is_some_and(|id| egui::Popup::is_id_open(ctx, id)) {
+            egui::Popup::open_id(ctx, popup_id);
+            ctx.request_repaint();
+        }
+    }
+    if egui::Popup::is_id_open(ctx, popup_id) {
+        ctx.data_mut(|d| d.insert_temp(open_key, popup_id));
     }
 }
 
