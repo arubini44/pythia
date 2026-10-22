@@ -4,8 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Spike (#13): run on the pure-Rust oracledb driver instead of the Instant
+# Client (`cargo run -p pythia-app --features pythia-db/thin`).
+thin = ["dep:oracledb"]
+
 [dependencies]
 oracle.workspace = true
+oracledb = { workspace = true, optional = true }
 pythia-config.workspace = true
 pythia-plsql.workspace = true
 serde.workspace = true
