@@ -2441,6 +2441,106 @@ create table pythia_bnm_t (id number primary key);"
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }
 
+/// The result grid's columns: dragging a header moves its column, the
+/// header menu freezes columns (which stay in step when scrolling), and
+/// copies follow the order shown.
+#[test]
+fn grid_columns() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "select level id, 'name ' || level name_col, level * 10 amount,
+       date '2026-01-01' + level created
+  from dual connect by level <= 40"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "query", |app| !app.test_focused_busy());
+    h.run_steps(3);
+    let order = |h: &Harness<'_, PythiaApp>| {
+        h.state().test_sql_window_ref().unwrap().state.results[0]
+            .grid
+            .visible_columns(4)
+    };
+    assert_eq!(order(&h), [0, 1, 2, 3]);
+
+    // Drag CREATED onto the left half of NAME_COL: it lands before it.
+    let from = h.get_by_label("CREATED").rect().center();
+    let to = h.get_by_label("NAME_COL").rect().left_center() + egui::vec2(3.0, 0.0);
+    h.hover_at(from);
+    h.run_steps(1);
+    h.drag_at(from);
+    h.run_steps(1);
+    for step in 1..=4 {
+        h.hover_at(from + (to - from) * (step as f32 / 4.0));
+        h.run_steps(1);
+    }
+    h.run_steps(1);
+    save(&mut h, "grid-column-drag");
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(2);
+    h.remove_cursor();
+    h.run_steps(2);
+    assert_eq!(order(&h), [0, 3, 1, 2]);
+
+    // Freeze up to CREATED (now second): ID and CREATED stay in place.
+    h.get_by_label("CREATED").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Columns ⏵").hover();
+    h.run_steps(2);
+    save(&mut h, "grid-header-menu");
+    h.get_by_label("Freeze up to CREATED").click();
+    h.run_steps(3);
+    let grid = &h.state().test_sql_window_ref().unwrap().state.results[0].grid;
+    assert_eq!(grid.frozen_columns(4), 2);
+    // CREATED kept its width (fitted to the dates) through the move and
+    // into the frozen part. A label's rect is only what's shown, so measure
+    // the column against 19 monospace characters (from a 6-character value).
+    let date = h.get_by_label("2026-01-02 00:00:00").rect();
+    let column = h.get_by_label("name 1").rect().left() - date.left();
+    let needed = 19.0 * h.get_by_label("name 1").rect().width() / 6.0;
+    assert!(column > needed, "the date is cut off: {column} < {needed}");
+    save(&mut h, "grid-frozen");
+
+    // Scrolling the other part down takes the frozen part along: row 40
+    // shows in both (its number and ID left, its amount right).
+    let at = h.get_by_label("NAME_COL").rect().center() + egui::vec2(0.0, 60.0);
+    h.hover_at(at);
+    for _ in 0..6 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -20.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
+    h.run_steps(10);
+    save(&mut h, "grid-frozen-scrolled");
+    assert!(h.query_by_label("400").is_some(), "the right part scrolled");
+    assert!(
+        h.query_all_by_label("40").count() >= 2,
+        "row number and ID of row 40 in the frozen part"
+    );
+
+    // Copies and exports go by the order shown.
+    let w = h.state().test_sql_window_ref().unwrap();
+    let r = &w.state.results[0];
+    let (columns, _) = pythia_ui::shown_data(&r.columns, &r.rows, &r.grid);
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["ID", "CREATED", "NAME_COL", "AMOUNT"]);
+}
+
 /// Favorites, recently opened objects and the invalid-only filter.
 #[test]
 fn browser_marks() {

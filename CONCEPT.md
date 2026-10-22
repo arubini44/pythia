@@ -192,7 +192,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.6 Result Grid / Data Grid (M1/M5)
 
 - [x] Virtualized grid for millions of rows (row and column virtualization) (rows only; columns are not virtualized)
-- [x] Column resize, reorder, hide, freeze (resize and hide; no reorder or freeze)
+- [x] Column resize, reorder, hide, freeze
 - [x] Sort and filter client-side; option to push sort/filter into SQL (no push of sort/filter into SQL)
 - [x] Data type aware rendering: NULL distinct, dates per NLS format, numbers aligned right
 - [x] LOB viewers: CLOB text, BLOB hex/image, XMLType, JSON pretty view (no XML pretty view)

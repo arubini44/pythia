@@ -32,6 +32,12 @@ All notable changes to Pythia are documented here. The format follows
     window, where compiling creates the unit. A package's body gets a stub
     per subprogram. The form warns when the name exists.
   - What was created shows up selected in the object browser.
+- Result grid: drag a header onto another to move its column, and freeze
+  the row numbers and the columns up to one (right-click its header) so
+  they stay in place when scrolling sideways (#33). The header menu's
+  Columns submenu shows or hides each column and resets the order or the
+  widths. Selection, arrow keys, paste, copy and export follow the order
+  shown.
 - Toolbar: a Debug button next to Execute (Ctrl+F9). It is enabled only
   with the cursor in an anonymous block of a connected SQL window, and when
   disabled says why; in a program window it points to Test… for a block
@@ -56,6 +62,12 @@ All notable changes to Pythia are documented here. The format follows
   Query. A window without an open connection can still pick one.
 
 ### Fixed
+- The object browser, project tree and saved connections list didn't
+  highlight the selected row unless the mouse was over it (#31).
+- Hiding or showing a result grid column reset the widths of all the
+  others; the grid now remembers each column's width.
+- Result grid columns could stay as narrow as their header when the grid
+  was drawn before the first rows arrived.
 - Generate body on a package spec with a schema (`create package hr.pkg`)
   ended the body with `end hr.pkg;`, which doesn't compile.
 - The connection picker above a SQL window switched connections with a

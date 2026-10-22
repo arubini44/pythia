@@ -8,7 +8,7 @@ use egui::{RichText, Ui};
 use pythia_db::{Cell, Column, DbError, DbEvent, DbRequest, MetaQuery, MetaResult};
 use pythia_plsql::{StatementKind, TokenKind, split_statements, statement_at, tokenize};
 use pythia_ui::icons::{Icon, icon_button, icon_text_button};
-use pythia_ui::{GridState, ResultGrid, selection_data, to_tsv};
+use pythia_ui::{GridState, ResultGrid, selection_data, shown_data, to_tsv};
 use serde::{Deserialize, Serialize};
 
 use crate::documents::{DocContext, Effects, Target, request_id};
@@ -1595,9 +1595,8 @@ impl SqlWindow {
                         .on_hover_text("Copy fetched rows as tab separated text")
                         .clicked()
                     {
-                        let mut all = GridState::default();
-                        all.hidden = result.grid.hidden.clone();
-                        let (columns, rows) = selection_data(&result.columns, &result.rows, &all);
+                        let (columns, rows) =
+                            shown_data(&result.columns, &result.rows, &result.grid);
                         ui.ctx().copy_text(to_tsv(&columns, &rows));
                     }
                     let idle = state.fetching.is_none() && state.running.is_none();
