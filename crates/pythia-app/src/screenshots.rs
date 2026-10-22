@@ -45,14 +45,16 @@ impl std::ops::DerefMut for Ui {
     }
 }
 
+/// A harness with the renderer only when screenshots are written: tests
+/// that drive the UI and query it also run where no GPU adapter is
+/// available (the Linux CI runner).
 fn harness(dark: bool) -> Ui {
-    locked(dark, true)
+    locked(dark, out_dir().is_some())
 }
 
-/// A harness without a renderer, for tests that only interact with the UI:
-/// they also run where no GPU adapter is available (CI).
+/// A harness in the light theme.
 fn headless_harness() -> Ui {
-    locked(false, false)
+    harness(false)
 }
 
 fn locked(dark: bool, render: bool) -> Ui {
@@ -2554,11 +2556,7 @@ fn toolbar_follows_the_transaction() {
 #[test]
 fn ai_assistant_panel() {
     use std::sync::{Arc, Mutex};
-    let mut h = if out_dir().is_some() {
-        harness(true)
-    } else {
-        headless_harness()
-    };
+    let mut h = harness(true);
     let requests: Arc<Mutex<Vec<String>>> = Default::default();
     let seen = requests.clone();
     h.state_mut()

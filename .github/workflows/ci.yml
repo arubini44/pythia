@@ -34,4 +34,6 @@ jobs:
       - run: cargo build --workspace --all-targets
       # Database, debugger and screenshot tests skip themselves unless
       # PYTHIA_TEST_DB / PYTHIA_TEST_DB_DBA / PYTHIA_SCREENSHOT_DIR are set.
-      - run: cargo test --workspace
+      # No GPU is needed without PYTHIA_SCREENSHOT_DIR. --no-fail-fast: a
+      # failing crate doesn't hide the other crates' results.
+      - run: cargo test --workspace --no-fail-fast
