@@ -38,6 +38,11 @@ All notable changes to Pythia are documented here. The format follows
   now (`REUSE SETTINGS`), like `UTL_RECOMP` and automatic recompilation
   already did. The browser's Compile also uses the right statement for
   public synonyms and Java classes.
+- Result toolbar in narrow SQL windows: the row count no longer runs into
+  the buttons. The buttons get the room they need first; the filter and the
+  row count share what's left (truncated, hidden when there's no room, the
+  status bar has the count too), and without room for them the buttons show
+  icons only, labels as tooltips.
 - Oracle 11.2 to 21c (#16, tested against 11.2 XE, 18c XE, 21c XE and
   23ai Free). Queries no longer use `FETCH FIRST` or dictionary columns
   that came with 12.1, so find object, completion and go to definition,

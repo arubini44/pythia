@@ -58,17 +58,26 @@ fn headless_harness() -> Ui {
 }
 
 fn locked(dark: bool, render: bool) -> Ui {
+    locked_sized(dark, render, egui::vec2(1440.0, 900.0))
+}
+
+/// A harness of `size` (logical pixels), e.g. a small window.
+fn sized_harness(size: egui::Vec2) -> Ui {
+    locked_sized(true, out_dir().is_some(), size)
+}
+
+fn locked_sized(dark: bool, render: bool, size: egui::Vec2) -> Ui {
     // A failed test poisons the lock; the next one can still run.
     let lock = UI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     Ui {
-        harness: new_harness(dark, render),
+        harness: new_harness(dark, render, size),
         _lock: lock,
     }
 }
 
-fn new_harness(dark: bool, render: bool) -> Harness<'static, PythiaApp> {
+fn new_harness(dark: bool, render: bool, size: egui::Vec2) -> Harness<'static, PythiaApp> {
     let builder = Harness::builder()
-        .with_size(egui::vec2(1440.0, 900.0))
+        .with_size(size)
         .with_pixels_per_point(1.5);
     let builder = if render { builder.wgpu() } else { builder };
     let harness = builder.build_eframe(|cc| PythiaApp::new(cc, None));
@@ -2641,6 +2650,72 @@ fn autocommit_setting() {
     wait_until(&mut h, "rolled back", |app| {
         app.test_transaction_state() == Err("No transaction")
     });
+}
+
+/// The result toolbar fits narrow SQL windows: its buttons, the filter and
+/// the row count never overlap, and buttons drop their labels when needed.
+#[test]
+fn result_toolbar_fits_narrow_windows() {
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::By;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    for width in [1440.0, 760.0, 600.0, 480.0] {
+        let mut h = sized_harness(egui::vec2(width, 700.0));
+        h.state_mut()
+            .test_connect(profile.clone(), password.clone());
+        wait_until(&mut h, "connection", |app| app.test_connected());
+        h.state_mut().test_open(OpenRequest::Sql {
+            connection: "pythia@FREEPDB1".into(),
+            text: "select * from demo_employees".into(),
+            run: true,
+        });
+        wait_until(&mut h, "query", |app| !app.test_focused_busy());
+        // The buttons may drop their labels, which takes a frame.
+        h.run_steps(4);
+        save(&mut h, &format!("result-toolbar-{width}"));
+
+        // The toolbar is the row below the result's tab.
+        let tab = h.get_by_label("Result 1").rect();
+        let in_row = |r: &egui::Rect| {
+            let y = r.center().y;
+            y > tab.max.y && y < tab.max.y + 40.0
+        };
+        let filter = h
+            .query_all(By::new().role(Role::TextInput))
+            .map(|n| n.rect())
+            .find(in_row)
+            .expect("filter field");
+        let mut items = vec![("filter", filter)];
+        match h.query_by_label_contains("columns ·") {
+            Some(info) => items.push(("row count", info.rect())),
+            None => assert!(width < 600.0, "{width}: row count"),
+        }
+        for node in h.query_all(By::new().role(Role::Button)) {
+            let r = node.rect();
+            if in_row(&r) && r.min.x >= filter.min.x {
+                items.push(("button", r));
+            }
+        }
+        assert!(items.len() >= 6, "{width}: {items:?}");
+        // Below that the window is too narrow for more than not overlapping.
+        if width >= 600.0 {
+            assert!(filter.width() >= 80.0, "{width}: filter {filter:?}");
+        }
+        for (i, (a, ra)) in items.iter().enumerate() {
+            assert!(ra.max.x <= width, "{width}: {a} outside the window: {ra:?}");
+            for (b, rb) in &items[i + 1..] {
+                assert!(
+                    !ra.shrink(0.5).intersects(rb.shrink(0.5)),
+                    "{width}: {a} {ra:?} overlaps {b} {rb:?}"
+                );
+            }
+        }
+        if width >= 1440.0 {
+            assert!(h.query_by_label("Copy all").is_some(), "{width}: labels");
+        }
+    }
 }
 
 /// SQL windows stay on their connection unless the settings allow

@@ -7,7 +7,7 @@ use std::time::Duration;
 use egui::{RichText, Ui};
 use pythia_db::{Cell, Column, DbError, DbEvent, DbRequest, MetaQuery, MetaResult};
 use pythia_plsql::{StatementKind, TokenKind, split_statements, statement_at, tokenize};
-use pythia_ui::icons::{Icon, icon_text_button};
+use pythia_ui::icons::{Icon, icon_button, icon_text_button};
 use pythia_ui::{GridState, ResultGrid, selection_data, to_tsv};
 use serde::{Deserialize, Serialize};
 
@@ -178,6 +178,19 @@ pub enum BottomTab {
     #[default]
     Messages,
     Output,
+}
+
+/// A result toolbar's layout, remembered between frames: whether its buttons
+/// show icons only, and how wide they are with their labels.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ResultBar {
+    compact: bool,
+    full_width: f32,
+}
+
+impl ResultBar {
+    /// Width the filter and the row count need at least, left of the buttons.
+    const MIN_LEFT: f32 = 190.0;
 }
 
 /// Values the user must enter before a statement runs.
@@ -1468,26 +1481,31 @@ impl SqlWindow {
         if let BottomTab::Result(i) = state.bottom
             && let Some(result) = state.results.get_mut(i)
         {
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut result.filter).hint_text("Filter rows…").desired_width(160.0));
-                result.grid.set_filter(&result.filter);
-                let more = if result.more { "+" } else { "" };
-                let rows = if result.filter.trim().is_empty() {
-                    format!("{}{more} rows", result.rows.len())
+            // Buttons first, from the right; the filter and the row count get
+            // what's left. Without room for them the buttons drop their
+            // labels, judged by the last frame's widths.
+            let bar_id = ui.id().with(("result-bar", i));
+            let total = ui.available_width();
+            let saved: ResultBar = ui.data(|d| d.get_temp(bar_id)).unwrap_or_default();
+            let mut bar = saved;
+            if bar.compact && total - bar.full_width >= ResultBar::MIN_LEFT {
+                bar.compact = false;
+            }
+            let compact = bar.compact;
+            let labelled = move |ui: &mut Ui, icon: Icon, text: &str| {
+                if compact {
+                    icon_button(ui, icon, text)
                 } else {
-                    format!("{} of {}{more} rows", result.grid.visible_rows(), result.rows.len())
-                };
-                let info = match &state.selection_summary {
-                    Some(summary) => summary.clone(),
-                    None => format!("{rows} · {} columns · {}", result.columns.len(), fmt_duration(result.elapsed)),
-                };
-                ui.weak(info).on_hover_text(&result.sql);
+                    icon_text_button(ui, icon, text)
+                }
+            };
+            ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let idle = state.fetching.is_none() && state.running.is_none() && state.queue.is_empty();
                     match result.grid.changes() {
                         Some(changes) => {
                             let n = changes.count();
-                            if icon_text_button(ui, Icon::Close, "Done").on_hover_text("Stop editing").clicked() {
+                            if labelled(ui, Icon::Close, "Done").on_hover_text("Stop editing").clicked() {
                                 edit_action = Some(EditAction::Done(i));
                             }
                             if ui.add_enabled(n > 0 && idle, egui::Button::new("Discard")).clicked() {
@@ -1521,7 +1539,7 @@ impl SqlWindow {
                         None => {
                             if idle
                                 && crate::data_edit::single_table(&result.sql).is_some()
-                                && icon_text_button(ui, Icon::Edit, "Edit")
+                                && labelled(ui, Icon::Edit, "Edit")
                                     .on_hover_text(
                                         "Edit the rows of this result. Rows are not locked; conflicting \
                                          changes by other sessions are detected when applying.",
@@ -1539,7 +1557,7 @@ impl SqlWindow {
                         (Icon::Chart, "Chart", "Show the fetched rows as a bar or line chart")
                     };
                     if result.grid.changes().is_none()
-                        && icon_text_button(ui, icon, label).on_hover_text(hint).clicked()
+                        && labelled(ui, icon, label).on_hover_text(hint).clicked()
                     {
                         result.chart = match result.chart {
                             Some(_) => None,
@@ -1551,7 +1569,7 @@ impl SqlWindow {
                     }
                     let exporting = state.export.is_some();
                     ui.add_enabled_ui(!exporting, |ui| {
-                        ui.menu_button("Export", |ui| {
+                        let formats = |ui: &mut Ui| {
                             for format in pythia_data::Format::ALL {
                                 if ui.button(format.label()).clicked() {
                                     // The selection if there is one, else all fetched rows.
@@ -1562,9 +1580,18 @@ impl SqlWindow {
                                     ui.close();
                                 }
                             }
-                        });
+                        };
+                        if compact {
+                            let button = egui::Button::image(Icon::Export.image(ui));
+                            egui::containers::menu::MenuButton::from_button(button)
+                                .ui(ui, formats)
+                                .0
+                                .on_hover_text("Export");
+                        } else {
+                            ui.menu_button("Export", formats);
+                        }
                     });
-                    if icon_text_button(ui, Icon::Copy, "Copy all")
+                    if labelled(ui, Icon::Copy, "Copy all")
                         .on_hover_text("Copy fetched rows as tab separated text")
                         .clicked()
                     {
@@ -1574,10 +1601,16 @@ impl SqlWindow {
                         ui.ctx().copy_text(to_tsv(&columns, &rows));
                     }
                     let idle = state.fetching.is_none() && state.running.is_none();
-                    if result.more
-                        && idle
-                        && icon_text_button(ui, Icon::Grid, "Fetch all").clicked()
-                    {
+                    // Compact as a word: its icon is also the grid's.
+                    let fetch_all = |ui: &mut Ui| {
+                        if compact {
+                            let all = egui::Button::new("All").frame_when_inactive(false).min_size(egui::vec2(0.0, 24.0));
+                            ui.add(all).on_hover_text("Fetch all rows")
+                        } else {
+                            icon_text_button(ui, Icon::Grid, "Fetch all")
+                        }
+                    };
+                    if result.more && idle && fetch_all(ui).clicked() {
                         state.fetching = Some(result.id);
                         effects.request(
                             Target::Own,
@@ -1587,8 +1620,38 @@ impl SqlWindow {
                             },
                         );
                     }
+                    if !compact {
+                        bar.full_width = total - ui.available_width();
+                        bar.compact = ui.available_width() < ResultBar::MIN_LEFT;
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        // The row count wants ~100 px; the filter never more than there is.
+                        let room = ui.available_width();
+                        let width = (room - 100.0).clamp(80.0, 160.0).min(room - 8.0).max(0.0);
+                        ui.add(egui::TextEdit::singleline(&mut result.filter).hint_text("Filter rows…").desired_width(width));
+                        result.grid.set_filter(&result.filter);
+                        let more = if result.more { "+" } else { "" };
+                        let rows = if result.filter.trim().is_empty() {
+                            format!("{}{more} rows", result.rows.len())
+                        } else {
+                            format!("{} of {}{more} rows", result.grid.visible_rows(), result.rows.len())
+                        };
+                        let info = match &state.selection_summary {
+                            Some(summary) => summary.clone(),
+                            None => format!("{rows} · {} columns · {}", result.columns.len(), fmt_duration(result.elapsed)),
+                        };
+                        // Too little room even for "…": the status bar has the count.
+                        if ui.available_width() >= 40.0 {
+                            ui.add(egui::Label::new(RichText::new(info).weak()).truncate())
+                                .on_hover_text(&result.sql);
+                        }
+                    });
                 });
             });
+            if bar != saved {
+                ui.data_mut(|d| d.insert_temp(bar_id, bar));
+                ui.ctx().request_repaint();
+            }
         }
         ui.separator();
 
