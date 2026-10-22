@@ -140,8 +140,9 @@ license doesn't allow us to bundle. Install it once:
      `echo /opt/oracle/instantclient_23 | sudo tee /etc/ld.so.conf.d/oracle.conf && sudo ldconfig`.
    - **Windows:** add the directory to `PATH` (System Properties → Environment
      Variables) and install the Visual C++ redistributable it lists.
-   - **macOS:** set `DYLD_LIBRARY_PATH` or copy the libraries next to the app
-     as described in Oracle's instructions.
+   - **macOS:** run `install_ic.sh` from the DMG (it copies the client to
+     `Downloads`), then link the library where Pythia finds it:
+     `mkdir -p ~/lib && ln -s ~/Downloads/instantclient_23_*/libclntsh.dylib ~/lib/`.
 4. Optional: put your `tnsnames.ora` into `network/admin` inside the Instant
    Client directory or point `TNS_ADMIN` at it; Pythia then offers the aliases
    when connecting.

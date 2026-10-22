@@ -18,6 +18,9 @@ pub struct ConnectDialog {
     pub open: bool,
     pub connecting: bool,
     pub error: Option<String>,
+    /// The Instant Client couldn't be loaded: `error` comes with the steps
+    /// to install it.
+    missing_client: bool,
     form: ConnectionProfile,
     password: String,
     /// Display name of the saved profile being edited, if any.
@@ -63,6 +66,7 @@ impl ConnectDialog {
         self.open = true;
         self.tns_aliases = pythia_config::tns::aliases();
         self.error = None;
+        self.missing_client = false;
         self.focus_requested = false;
         self.confirm_delete = false;
         if let Some(last) = last {
@@ -404,7 +408,11 @@ impl ConnectDialog {
                 .corner_radius(6.0)
                 .inner_margin(8.0)
                 .show(ui, |ui| {
-                    ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
+                    if self.missing_client {
+                        client_setup_ui(ui, error);
+                    } else {
+                        ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
+                    }
                 });
         }
 
@@ -474,6 +482,7 @@ impl ConnectDialog {
             return None;
         }
         self.error = None;
+        self.missing_client = false;
         self.connecting = true;
         Some(ConnectAction::Connect(ConnectRequest {
             profile: self.cleaned(),
@@ -493,7 +502,125 @@ impl ConnectDialog {
         self.open = true;
         self.connecting = false;
         self.error = Some(error);
+        self.missing_client = false;
     }
+
+    /// The Oracle Instant Client couldn't be loaded (DPI-1047): shows how to
+    /// install it, with `error` as the details.
+    pub fn failed_missing_client(&mut self, error: String) {
+        self.failed(error);
+        self.missing_client = true;
+    }
+}
+
+/// One step of installing the Instant Client, with a link where it has one.
+struct SetupStep {
+    text: &'static str,
+    link: Option<&'static str>,
+}
+
+const fn step(text: &'static str) -> SetupStep {
+    SetupStep { text, link: None }
+}
+
+const fn link_step(text: &'static str, link: &'static str) -> SetupStep {
+    SetupStep {
+        text,
+        link: Some(link),
+    }
+}
+
+const RESTART: SetupStep = step("Restart Pythia and connect again.");
+
+const WINDOWS_STEPS: &[SetupStep] = &[
+    link_step(
+        "Download the Basic package:",
+        "https://www.oracle.com/database/technologies/instant-client/winx64-64-downloads.html",
+    ),
+    step(r"Unpack it, e.g. to C:\oracle\instantclient_23."),
+    step("Add that directory to PATH (System Properties → Environment Variables)."),
+    link_step(
+        "Install the Microsoft Visual C++ Redistributable (x64), which the Instant Client needs:",
+        "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist",
+    ),
+    RESTART,
+];
+
+const MACOS_STEPS: &[SetupStep] = &[
+    link_step(
+        "Download the Basic package (DMG):",
+        if cfg!(target_arch = "aarch64") {
+            "https://www.oracle.com/database/technologies/instant-client/macos-arm64-downloads.html"
+        } else {
+            "https://www.oracle.com/database/technologies/instant-client/macos-intel-x86-downloads.html"
+        },
+    ),
+    step("Open the DMG and run install_ic.sh from it; it copies the client to Downloads."),
+    step(
+        "Link the library where Pythia finds it: mkdir -p ~/lib && ln -s ~/Downloads/instantclient_23_*/libclntsh.dylib ~/lib/",
+    ),
+    RESTART,
+];
+
+const LINUX_STEPS: &[SetupStep] = &[
+    link_step(
+        "Download the Basic package (ZIP):",
+        if cfg!(target_arch = "aarch64") {
+            "https://www.oracle.com/database/technologies/instant-client/linux-arm-aarch64-downloads.html"
+        } else {
+            "https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html"
+        },
+    ),
+    step("Unpack it, e.g. to /opt/oracle/instantclient_23."),
+    step("Install libaio: sudo apt install libaio1t64 (libaio1 on older distributions)."),
+    step(
+        "Make it findable: echo /opt/oracle/instantclient_23 | sudo tee /etc/ld.so.conf.d/oracle.conf && sudo ldconfig (or set LD_LIBRARY_PATH).",
+    ),
+    RESTART,
+];
+
+/// How to install the Oracle Instant Client on this platform.
+fn client_setup_steps() -> &'static [SetupStep] {
+    if cfg!(target_os = "windows") {
+        WINDOWS_STEPS
+    } else if cfg!(target_os = "macos") {
+        MACOS_STEPS
+    } else {
+        LINUX_STEPS
+    }
+}
+
+/// The steps to install the Instant Client, then the original error.
+fn client_setup_ui(ui: &mut Ui, error: &str) {
+    ui.label(
+        RichText::new("The Oracle Instant Client is needed to connect, and it isn't installed.")
+            .color(ui.visuals().error_fg_color)
+            .strong(),
+    );
+    ui.add_space(4.0);
+    for (i, step) in client_setup_steps().iter().enumerate() {
+        ui.horizontal_top(|ui| {
+            ui.label(format!("{}.", i + 1));
+            ui.vertical(|ui| {
+                ui.add(egui::Label::new(step.text).wrap());
+                if let Some(link) = step.link {
+                    ui.hyperlink(link);
+                }
+            });
+        });
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.weak("Details");
+        if ui.small_button("Copy").clicked() {
+            ui.ctx().copy_text(error.to_owned());
+        }
+    });
+    ui.add(
+        egui::Label::new(RichText::new(error).monospace().small())
+            .selectable(true)
+            .wrap(),
+    );
 }
 
 #[derive(Default)]
@@ -861,4 +988,54 @@ pub fn confirm_ui(ctx: &egui::Context, confirm: &Confirm) -> Option<bool> {
 /// Object types a finder result opens as program windows.
 pub fn opens_as_program(t: ObjectType) -> bool {
     t.has_source()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    /// The download page is a clickable link of its own, without the
+    /// punctuation that made a copied URL a 404; the error stays below.
+    #[test]
+    fn missing_client_shows_install_steps() {
+        let mut dialog = ConnectDialog::default();
+        dialog
+            .failed_missing_client("DPI-1047: Cannot locate a 64-bit Oracle Client library".into());
+        let saved = SavedConnections::default();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(900.0, 900.0))
+            .build_ui(move |ui| {
+                dialog.ui(ui.ctx(), &saved);
+            });
+        h.run();
+        let download = client_setup_steps()[0].link.expect("download link");
+        // A real link: clicking it opens exactly that page.
+        h.get_by_label(download).click();
+        h.step();
+        let opened: Vec<String> = h
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, [download]);
+        h.get_by_label_contains("DPI-1047");
+        h.get_by_label("Restart Pythia and connect again.");
+    }
+
+    #[test]
+    fn setup_links_are_clean() {
+        for steps in [WINDOWS_STEPS, MACOS_STEPS, LINUX_STEPS] {
+            for link in steps.iter().filter_map(|s| s.link) {
+                assert!(link.starts_with("https://"), "{link}");
+                assert!(!link.ends_with([',', '.', ';', ')']), "{link}");
+            }
+        }
+    }
 }

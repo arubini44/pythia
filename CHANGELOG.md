@@ -14,6 +14,10 @@ All notable changes to Pythia are documented here. The format follows
   and the package initialization section.
 
 ### Fixed
+- Connect dialog: without the Oracle Instant Client it lists the steps for
+  this platform, with the download page as a working link (copying the old
+  one picked up a trailing comma and led to a 404) and the Visual C++
+  redistributable on Windows.
 - Debugger: a step no longer stops again on the line it started from.
 - Debugger: a step that ended at a breakpoint no longer stops later, after
   continuing, where the step would have ended.

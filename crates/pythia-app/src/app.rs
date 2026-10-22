@@ -29,11 +29,6 @@ use pythia_ui::icons::{Icon, icon_label};
 
 // Named before the app became Pythia; kept so saved workspaces still load.
 const WORKSPACE_KEY: &str = "orui-workspace-v2";
-const MISSING_CLIENT_HINT: &str = "Oracle Instant Client could not be loaded. Download the \
-     Basic or Basic Light package from \
-     https://www.oracle.com/database/technologies/instant-client/downloads.html, unpack it and put \
-     its directory on LD_LIBRARY_PATH (Linux), PATH (Windows) or DYLD_LIBRARY_PATH (macOS). On \
-     Linux it also needs libaio.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileAction {
@@ -1574,18 +1569,21 @@ impl PythiaApp {
                 }
             }
             DbEvent::ConnectFailed(e) => {
-                let message = if e.is_missing_client() {
-                    format!("{MISSING_CLIENT_HINT}\n\n{e}")
-                } else {
-                    e.to_string()
-                };
                 warn!("connect to {name} failed: {e}");
                 self.conns.close(name);
                 if self.connecting.as_deref() == Some(name) {
                     self.connecting = None;
-                    self.connect_dialog.failed(message);
+                    if e.is_missing_client() {
+                        self.connect_dialog.failed_missing_client(e.to_string());
+                    } else {
+                        self.connect_dialog.failed(e.to_string());
+                    }
+                } else if e.is_missing_client() {
+                    self.log(format!(
+                        "{name}: the Oracle Instant Client isn't installed (Connect… shows how): {e}"
+                    ));
                 } else {
-                    self.log(format!("{name}: {message}"));
+                    self.log(format!("{name}: {e}"));
                 }
             }
             DbEvent::TaskDone { id, result } if self.catalog_inflight.contains_key(&id) => {
