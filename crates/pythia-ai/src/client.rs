@@ -15,6 +15,9 @@ use serde_json::{Value, json};
 
 /// The Messages API version the requests are written for.
 const ANTHROPIC_VERSION: &str = "2026-10-21";
+/// Beta header for `fallbacks: "default"`: a declined request is answered
+/// by the model Anthropic recommends for the refusal's category.
+const SERVER_FALLBACK: &str = "server-side-fallback-2026-07-01";
 /// `max_tokens` when a backend has none (the Messages API requires one).
 const DEFAULT_MAX_TOKENS: u32 = 16000;
 /// Answers larger than this are refused.
@@ -86,10 +89,13 @@ pub fn complete(
             let key = key
                 .filter(|k| !k.trim().is_empty())
                 .ok_or_else(|| missing_key(backend))?;
-            let headers = [
+            let mut headers = vec![
                 ("x-api-key", key.trim().to_owned()),
                 ("anthropic-version", ANTHROPIC_VERSION.to_owned()),
             ];
+            if server_fallback(backend) {
+                headers.push(("anthropic-beta", SERVER_FALLBACK.to_owned()));
+            }
             let body = anthropic_body(backend, request);
             let (status, text) = post(endpoint(backend)?, &headers, &body, timeout)?;
             parse_anthropic(status, &text)
@@ -152,7 +158,30 @@ pub fn anthropic_body(backend: &AiBackend, request: &ChatRequest) -> Value {
     if !request.system.is_empty() {
         body["system"] = json!(request.system);
     }
+    if server_fallback(backend) {
+        body["fallbacks"] = json!("default");
+    }
     body
+}
+
+/// Whether to ask for a server-side fallback when the model declines: only
+/// the Claude API itself has them (not gateways or other platforms), and
+/// only for the models listed (Claude Haiku 5.5 has none).
+fn server_fallback(backend: &AiBackend) -> bool {
+    let on_claude_api = backend
+        .endpoint
+        .trim()
+        .starts_with("https://api.anthropic.com/");
+    let model = backend.model.trim();
+    on_claude_api
+        && [
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-sonnet-5-5",
+        ]
+        .contains(&model)
 }
 
 /// Request body for OpenAI-compatible chat completions: the system prompt
@@ -529,6 +558,21 @@ mod tests {
             Duration::from_secs(10),
             &AtomicBool::new(false),
         )
+    }
+
+    #[test]
+    fn server_fallback_only_on_the_claude_api() {
+        let request = ChatRequest {
+            system: String::new(),
+            messages: Vec::new(),
+        };
+        let mut b = AiBackend::new(AiKind::Anthropic, "a".into());
+        assert_eq!(anthropic_body(&b, &request)["fallbacks"], "default");
+        b.model = "claude-haiku-5-5".into();
+        assert!(anthropic_body(&b, &request).get("fallbacks").is_none());
+        b.model = "claude-opus-5-5".into();
+        b.endpoint = "https://gateway.example.com/v1/messages".into();
+        assert!(anthropic_body(&b, &request).get("fallbacks").is_none());
     }
 
     #[test]

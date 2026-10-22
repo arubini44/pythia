@@ -48,7 +48,9 @@ All notable changes to Pythia are documented here. The format follows
   errors, top SQL, session details, AWR/ASH reports and traces. Requests
   carry table definitions, keys, indexes, statistics, plans and source;
   result rows and bind values only when allowed in Settings → AI, and each
-  answer shows what was sent and what was held back.
+  answer shows what was sent and what was held back. On the Claude API, a
+  request Claude declines is answered by the fallback model Anthropic
+  recommends for it.
 - Editors: a context menu. On a database object it offers what the object
   browser offers (query, edit, test, describe, edit table, grants, generate,
   compile, favorites, copy name) and Show in object browser; on a local
