@@ -5,20 +5,27 @@ use std::time::Instant;
 
 use crate::oracle::sql_type::OracleType;
 use crate::oracle::{Connection, Connector, ResultSet, Row, StatementType};
-use pythia_config::Privilege;
+use pythia_config::{DbKind, Privilege};
 use tracing::{debug, info, warn};
 
-use crate::meta;
+use crate::dialect::Dialect;
+use crate::meta::{self, MetaQuery, MetaResult};
 use crate::types::{
-    Cell, Column, Compiled, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
+    Cell, Client, Column, Compiled, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary,
+    ServerInfo,
 };
+
+/// Interrupts the statement a worker is running (from another thread).
+pub(crate) type Canceller = Arc<dyn Fn() + Send + Sync>;
+/// Where a worker puts its [`Canceller`] while it is connected.
+pub(crate) type CancelSlot = Arc<Mutex<Option<Canceller>>>;
 
 /// Handle to a database session running on its own worker thread.
 pub struct Session {
     requests: Sender<DbRequest>,
     events: Receiver<DbEvent>,
     /// Shared with the worker so a running call can be interrupted.
-    connection: Arc<Mutex<Option<Arc<Connection>>>>,
+    cancel: CancelSlot,
 }
 
 impl Session {
@@ -27,8 +34,8 @@ impl Session {
     pub fn connect(params: ConnectParams, notify: impl Fn() + Send + 'static) -> Self {
         let (req_tx, req_rx) = mpsc::channel();
         let (ev_tx, ev_rx) = mpsc::channel();
-        let connection = Arc::new(Mutex::new(None));
-        let shared = connection.clone();
+        let cancel = Arc::new(Mutex::new(None));
+        let shared = cancel.clone();
         thread::Builder::new()
             .name(format!("db-{}", params.username))
             .spawn(move || {
@@ -36,13 +43,16 @@ impl Session {
                     tx: ev_tx,
                     notify: Box::new(notify),
                 };
-                Worker::run(params, req_rx, events, shared);
+                match params.kind {
+                    DbKind::Oracle => Worker::run(params, req_rx, events, shared),
+                    DbKind::MySql => crate::mysql_session::run(params, req_rx, events, shared),
+                }
             })
             .expect("spawning db worker thread");
         Self {
             requests: req_tx,
             events: ev_rx,
-            connection,
+            cancel,
         }
     }
 
@@ -56,13 +66,12 @@ impl Session {
         self.events.try_recv().ok()
     }
 
-    /// Interrupts the statement currently running on this session (OCIBreak).
+    /// Interrupts the statement currently running on this session (OCIBreak
+    /// on Oracle, `KILL QUERY` on MySQL).
     pub fn cancel(&self) {
-        let conn = self.connection.lock().expect("connection mutex").clone();
-        if let Some(conn) = conn
-            && let Err(e) = conn.break_execution()
-        {
-            warn!("cancel failed: {e}");
+        let cancel = self.cancel.lock().expect("cancel mutex").clone();
+        if let Some(cancel) = cancel {
+            cancel();
         }
     }
 }
@@ -73,13 +82,13 @@ impl Drop for Session {
     }
 }
 
-struct Events {
+pub(crate) struct Events {
     tx: Sender<DbEvent>,
     notify: Box<dyn Fn() + Send>,
 }
 
 impl Events {
-    fn send(&self, event: DbEvent) {
+    pub(crate) fn send(&self, event: DbEvent) {
         if self.tx.send(event).is_ok() {
             (self.notify)();
         }
@@ -104,7 +113,7 @@ impl Worker {
         params: ConnectParams,
         requests: Receiver<DbRequest>,
         events: Events,
-        shared: Arc<Mutex<Option<Arc<Connection>>>>,
+        shared: CancelSlot,
     ) {
         info!(?params, "connecting");
         let conn = match connect(&params) {
@@ -116,7 +125,12 @@ impl Worker {
                 return;
             }
         };
-        *shared.lock().expect("connection mutex") = Some(conn.clone());
+        let breaker = conn.clone();
+        *shared.lock().expect("cancel mutex") = Some(Arc::new(move || {
+            if let Err(e) = breaker.break_execution() {
+                warn!("cancel failed: {e}");
+            }
+        }));
 
         let mut worker = Worker {
             conn,
@@ -178,12 +192,24 @@ impl Worker {
                     // Tasks (data edits, debug runs, …) can open a transaction.
                     worker.report_transaction();
                 }
+                DbRequest::Run { id, task } => {
+                    let started = Instant::now();
+                    let result = task(&mut OracleClient(&worker.conn));
+                    debug!(
+                        id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        ok = result.is_ok(),
+                        "task done"
+                    );
+                    worker.events.send(DbEvent::TaskDone { id, result });
+                    worker.report_transaction();
+                }
                 DbRequest::Disconnect => break,
             }
         }
 
         worker.open_query = None;
-        *shared.lock().expect("connection mutex") = None;
+        *shared.lock().expect("cancel mutex") = None;
         if let Err(e) = worker.conn.close() {
             warn!("closing connection: {e}");
         }
@@ -197,6 +223,7 @@ impl Worker {
         self.conn
             .execute("begin dbms_output.enable(null); end;", &[])?;
         Ok(ServerInfo {
+            dialect: Dialect::ORACLE,
             version: version.to_string(),
             release: (version.major(), version.minor()),
             banner,
@@ -384,8 +411,34 @@ impl Worker {
     }
 }
 
-/// A connection of its own (not behind a [`Session`]), e.g. for a task that
-/// works in parallel. Runs the login statements; their errors don't fail it.
+/// An Oracle connection as a [`Client`].
+struct OracleClient<'a>(&'a Connection);
+
+impl Client for OracleClient<'_> {
+    fn dialect(&self) -> Dialect {
+        Dialect::ORACLE
+    }
+
+    fn query(&mut self, sql: &str, params: &[&str]) -> Result<Vec<Vec<Cell>>, DbError> {
+        let params: Vec<&dyn crate::oracle::sql_type::ToSql> = params
+            .iter()
+            .map(|p| p as &dyn crate::oracle::sql_type::ToSql)
+            .collect();
+        let mut out = Vec::new();
+        for row in self.0.query(sql, &params)? {
+            out.push(row?.sql_values().iter().map(cell).collect());
+        }
+        Ok(out)
+    }
+
+    fn meta(&mut self, query: &MetaQuery) -> Result<MetaResult, DbError> {
+        meta::run(self.0, query)
+    }
+}
+
+/// An Oracle connection of its own (not behind a [`Session`]), e.g. for a
+/// task that works in parallel. Runs the login statements; their errors
+/// don't fail it.
 pub fn open_connection(params: &ConnectParams) -> Result<Connection, DbError> {
     let conn = connect(params)?;
     conn.set_module("pythia")?;

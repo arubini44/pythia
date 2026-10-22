@@ -9,7 +9,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use egui::{Color32, RichText, Sense, Ui};
-use pythia_db::DbRequest;
+use pythia_db::{DbRequest, Dialect, Feature};
 use pythia_ui::icons::{Icon, IconSize, icon_text_button};
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,9 @@ pub struct Project {
 
 #[derive(Default)]
 struct State {
+    /// The connection's database: whether files can be compared with it
+    /// and its schema exported.
+    dialect: Dialect,
     repo: Option<Repo>,
     /// Directory listings, cleared on refresh.
     listings: HashMap<PathBuf, Vec<Entry>>,
@@ -176,7 +179,13 @@ impl Project {
         files
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, connection: Option<&str>) -> Vec<ProjectAction> {
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        connection: Option<&str>,
+        dialect: Dialect,
+    ) -> Vec<ProjectAction> {
+        self.state.dialect = dialect;
         let mut actions = Vec::new();
         let now = ui.input(|i| i.time);
         self.poll(ui, &mut actions);
@@ -221,13 +230,14 @@ impl Project {
                         self.pick(Pick::Root);
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(
-                            connection.is_some() && self.state.export.is_none(),
-                            egui::Button::new("Export schema to folder…"),
-                        )
-                        .on_hover_text("One file per object: tables/, packages/, …")
-                        .clicked()
+                    if dialect.supports(Feature::ObjectFiles)
+                        && ui
+                            .add_enabled(
+                                connection.is_some() && self.state.export.is_none(),
+                                egui::Button::new("Export schema to folder…"),
+                            )
+                            .on_hover_text("One file per object: tables/, packages/, …")
+                            .clicked()
                     {
                         self.pick(Pick::ExportTo);
                         ui.close();
@@ -490,10 +500,11 @@ impl Project {
             Some(c) => format!("Compare with {c}"),
             None => "Compare with database".into(),
         };
-        if ui
-            .add_enabled(sql && connection.is_some(), egui::Button::new(label))
-            .on_disabled_hover_text("Connect first")
-            .clicked()
+        if self.state.dialect.supports(Feature::ObjectFiles)
+            && ui
+                .add_enabled(sql && connection.is_some(), egui::Button::new(label))
+                .on_disabled_hover_text("Connect first")
+                .clicked()
             && let Some(c) = connection
         {
             self.compare_db(path, c, actions);

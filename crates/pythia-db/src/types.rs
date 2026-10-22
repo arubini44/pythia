@@ -1,12 +1,15 @@
 use std::fmt;
 use std::time::Duration;
 
-use pythia_config::Privilege;
+use pythia_config::{DbKind, Privilege};
 
+use crate::dialect::Dialect;
 use crate::meta::{CompileError, MetaQuery, MetaResult};
 
 #[derive(Clone)]
 pub struct ConnectParams {
+    /// Which backend the session uses.
+    pub kind: DbKind,
     pub username: String,
     pub password: String,
     pub connect_string: String,
@@ -19,6 +22,7 @@ impl fmt::Debug for ConnectParams {
     // Never print the password, not even in debug logs.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectParams")
+            .field("kind", &self.kind)
             .field("username", &self.username)
             .field("connect_string", &self.connect_string)
             .field("privilege", &self.privilege)
@@ -26,9 +30,25 @@ impl fmt::Debug for ConnectParams {
     }
 }
 
-/// A closure run on the session's worker thread with its connection.
+/// A closure run on the session's worker thread with its connection. Tasks
+/// are written against the Oracle driver: other databases answer them with
+/// an error, so the UI only sends them where the dialect has the feature.
 pub type TaskFn = Box<dyn FnOnce(&crate::oracle::Connection) -> TaskResult + Send>;
 pub type TaskResult = Result<Box<dyn std::any::Any + Send>, DbError>;
+
+/// A session's connection as tools see it, whatever the database: for work
+/// that is the same everywhere but its SQL (see [`DbRequest::Run`]).
+pub trait Client {
+    fn dialect(&self) -> Dialect;
+    /// All rows of a query as text. Parameters are positional: `:1`, `:2`
+    /// on Oracle, `?` on MySQL.
+    fn query(&mut self, sql: &str, params: &[&str]) -> Result<Vec<Vec<Cell>>, DbError>;
+    /// Answers a dictionary lookup as [`DbRequest::Meta`] does.
+    fn meta(&mut self, query: &MetaQuery) -> Result<MetaResult, DbError>;
+}
+
+/// A closure run on the session's worker thread with its [`Client`].
+pub type RunFn = Box<dyn FnOnce(&mut dyn Client) -> TaskResult + Send>;
 
 pub enum DbRequest {
     /// Executes one statement. Queries return the first `max_rows` rows.
@@ -57,6 +77,12 @@ pub enum DbRequest {
     Task {
         id: u64,
         task: TaskFn,
+    },
+    /// Runs code on any database's connection through [`Client`]. Answered
+    /// with [`DbEvent::TaskDone`].
+    Run {
+        id: u64,
+        task: RunFn,
     },
     Disconnect,
 }
@@ -91,6 +117,10 @@ impl fmt::Debug for DbRequest {
             DbRequest::SetAutocommit(on) => f.debug_tuple("SetAutocommit").field(on).finish(),
             DbRequest::Task { id, .. } => f
                 .debug_struct("Task")
+                .field("id", id)
+                .finish_non_exhaustive(),
+            DbRequest::Run { id, .. } => f
+                .debug_struct("Run")
                 .field("id", id)
                 .finish_non_exhaustive(),
             DbRequest::Disconnect => f.write_str("Disconnect"),
@@ -130,7 +160,7 @@ pub enum DbEvent {
         id: u64,
         result: TaskResult,
     },
-    /// Lines read from `DBMS_OUTPUT` after a statement.
+    /// Lines read from `DBMS_OUTPUT` after a statement (Oracle).
     Output(Vec<String>),
     /// Whether the session has uncommitted changes.
     Transaction {
@@ -143,6 +173,7 @@ pub enum DbEvent {
 
 #[derive(Debug, Clone)]
 pub struct ServerInfo {
+    pub dialect: Dialect,
     pub version: String,
     /// Major and minor release, for features newer versions have.
     pub release: crate::compat::Release,
@@ -205,11 +236,14 @@ impl fmt::Display for ExecSummary {
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{message}")]
 pub struct DbError {
-    /// ORA error code, if the error came from the database.
+    /// The database's error code (ORA-nnnnn, MySQL's error number), if the
+    /// error came from the database.
     pub code: Option<i32>,
     pub message: String,
     /// Byte offset of the error in the statement text, if known.
     pub offset: Option<u32>,
+    /// Set by backends that know from the error that the session is gone.
+    pub lost: bool,
 }
 
 impl DbError {
@@ -218,23 +252,34 @@ impl DbError {
             code: None,
             message: message.into(),
             offset: None,
+            lost: false,
         }
+    }
+
+    /// For requests a database can't serve, e.g. an Oracle task on MySQL.
+    pub fn unsupported(what: &str, dialect: Dialect) -> Self {
+        Self::new(format!(
+            "{what} isn't available for {} connections",
+            dialect.name()
+        ))
     }
 
     /// The session is gone (network or instance failure, killed session).
     pub fn is_connection_lost(&self) -> bool {
-        matches!(
-            self.code,
-            Some(28 | 1012 | 2396 | 3113 | 3114 | 3135 | 12537 | 12570)
-        ) || [
-            "DPI-1080",
-            "DPI-1010",
-            "ORA-03113",
-            "ORA-03114",
-            "ORA-03135",
-        ]
-        .iter()
-        .any(|c| self.message.contains(c))
+        self.lost
+            || matches!(
+                self.code,
+                Some(28 | 1012 | 2396 | 3113 | 3114 | 3135 | 12537 | 12570)
+            )
+            || [
+                "DPI-1080",
+                "DPI-1010",
+                "ORA-03113",
+                "ORA-03114",
+                "ORA-03135",
+            ]
+            .iter()
+            .any(|c| self.message.contains(c))
     }
 
     /// True if the Oracle client libraries could not be loaded (DPI-1047).
@@ -261,6 +306,7 @@ impl From<crate::oracle::Error> for DbError {
                     code: Some(db.code()).filter(|c| *c != 0),
                     message,
                     offset: Some(db.offset()).filter(|o| *o != 0),
+                    lost: false,
                 }
             }
             None => Self::new(e.to_string()),

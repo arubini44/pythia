@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::time::Duration;
 
 use egui::{RichText, Ui};
-use pythia_db::{Cell, Column, DbError, DbEvent, DbRequest, MetaQuery, MetaResult};
+use pythia_db::{Cell, Column, DbError, DbEvent, DbRequest, Feature, MetaQuery, MetaResult};
 use pythia_plsql::{StatementKind, TokenKind, split_statements, statement_at, tokenize};
 use pythia_ui::icons::{Icon, icon_button, icon_text_button};
 use pythia_ui::{GridState, ResultGrid, selection_data, to_tsv};
@@ -634,6 +634,13 @@ impl SqlWindow {
                 self.send_internal(stmt.start, stmt.sql, internal, cx, &mut effects);
                 return effects;
             }
+            if stmt.kind == StatementKind::SqlPlus
+                && cx.dialect != pythia_db::Dialect::ORACLE
+                && !client_command(&stmt.sql)
+            {
+                // MySQL's SET, SHOW, DESC, START TRANSACTION, … are SQL.
+                stmt.kind = StatementKind::Sql;
+            }
             if stmt.kind == StatementKind::SqlPlus {
                 match self.sqlplus(&stmt) {
                     SqlPlus::Done => continue,
@@ -1077,7 +1084,9 @@ impl SqlWindow {
                     }
                 };
                 self.state.bottom = BottomTab::Result(index);
-                if let Some(table) = crate::data_edit::single_table(&self.state.results[index].sql)
+                if cx.dialect.supports(Feature::FollowKeys)
+                    && let Some(table) =
+                        crate::data_edit::single_table(&self.state.results[index].sql)
                 {
                     let task_id = request_id();
                     self.state.relation_requests.insert(task_id, id);
@@ -1414,12 +1423,15 @@ impl SqlWindow {
                 _ => "Messages".into(),
             };
             ui.selectable_value(&mut state.bottom, BottomTab::Messages, label);
-            let output = if state.output.is_empty() {
-                "Output".to_owned()
-            } else {
-                format!("Output ({})", state.output.len())
-            };
-            ui.selectable_value(&mut state.bottom, BottomTab::Output, output);
+            // DBMS_OUTPUT; other databases print nothing there.
+            if cx.dialect.supports(Feature::ServerOutput) || !state.output.is_empty() {
+                let output = if state.output.is_empty() {
+                    "Output".to_owned()
+                } else {
+                    format!("Output ({})", state.output.len())
+                };
+                ui.selectable_value(&mut state.bottom, BottomTab::Output, output);
+            }
             if let Some(job) = &state.to_file {
                 ui.spinner();
                 let rows = job.rows.load(std::sync::atomic::Ordering::Relaxed);
@@ -1538,6 +1550,7 @@ impl SqlWindow {
                         }
                         None => {
                             if idle
+                                && cx.dialect.supports(Feature::EditResults)
                                 && crate::data_edit::single_table(&result.sql).is_some()
                                 && labelled(ui, Icon::Edit, "Edit")
                                     .on_hover_text(
@@ -2161,6 +2174,31 @@ pub fn find_binds(sql: &str) -> Vec<String> {
         .collect()
 }
 
+/// SQL*Plus commands the SQL window carries out itself for any database
+/// (scripts, prompts, substitution variables). The others mean something
+/// else to MySQL and go to the server.
+fn client_command(sql: &str) -> bool {
+    let line = sql.trim_start();
+    let command = line
+        .split(|c: char| c.is_whitespace() || c == ';')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    line.starts_with('@')
+        || matches!(
+            command.as_str(),
+            "PRO"
+                | "PROMPT"
+                | "DEF"
+                | "DEFINE"
+                | "UNDEF"
+                | "UNDEFINE"
+                | "REM"
+                | "REMARK"
+                | "WHENEVER"
+        )
+}
+
 /// Removes case-insensitive duplicates, keeping the first spelling.
 fn dedup(names: impl Iterator<Item = String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -2228,6 +2266,28 @@ pub fn fmt_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_commands() {
+        for local in [
+            "@setup",
+            "@@next.sql",
+            "prompt hello",
+            "define x = 1",
+            "rem note",
+        ] {
+            assert!(client_command(local), "{local}");
+        }
+        for server in [
+            "set @a = 1",
+            "show tables",
+            "desc emp",
+            "start transaction",
+            "exec x",
+        ] {
+            assert!(!client_command(server), "{server}");
+        }
+    }
 
     #[test]
     fn substitutions() {

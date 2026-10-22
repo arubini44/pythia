@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use egui::{Color32, RichText, Sense, Ui};
 use pythia_db::{
-    DbEvent, DbObject, DbRequest, Member, MetaQuery, MetaResult, ObjectType, TableColumn,
+    DbEvent, DbObject, DbRequest, Dialect, Feature, Member, MetaQuery, MetaResult, ObjectType,
+    TableColumn,
 };
 
 use pythia_ui::icons::{Icon, IconSize, paint_invalid_badge};
@@ -141,15 +142,28 @@ enum Pending {
         member: Option<String>,
     },
     TestLink(ObjectRef),
+    /// DDL for a script that replaces the object.
+    Script(ObjectRef),
 }
 
-/// The folders of a schema; `PUBLIC` only owns synonyms and links.
-fn folders(owner: &str) -> &'static [ObjectType] {
-    if owner == "PUBLIC" {
+/// The folders of a schema; Oracle's `PUBLIC` only owns synonyms and links.
+fn folders(dialect: Dialect, owner: &str) -> &'static [ObjectType] {
+    if owner == "PUBLIC" && dialect == Dialect::ORACLE {
         ObjectType::PUBLIC
     } else {
-        ObjectType::BROWSER
+        dialect.browser_types()
     }
+}
+
+/// Whether a name contains the (uppercase) filter. Oracle's names are
+/// uppercase already; MySQL's are compared without case.
+fn name_matches(dialect: Dialect, name: &str, filter: &str) -> bool {
+    filter.is_empty()
+        || if dialect == Dialect::ORACLE {
+            name.contains(filter)
+        } else {
+            name.to_uppercase().contains(filter)
+        }
 }
 
 /// One visible line of the tree.
@@ -192,6 +206,8 @@ enum Row<'a> {
 #[derive(Default)]
 pub struct Browser {
     pub connection: Option<String>,
+    /// The connection's database: its folders and what objects offer.
+    dialect: Dialect,
     schema: Option<String>,
     schemas: Option<Loaded<Vec<String>>>,
     filter: String,
@@ -211,10 +227,11 @@ pub struct Browser {
 
 impl Browser {
     /// Shows a (newly connected) connection, starting in its current schema.
-    pub fn attach(&mut self, connection: String, schema: String) -> Effects {
+    pub fn attach(&mut self, connection: String, schema: String, dialect: Dialect) -> Effects {
         let marks = std::mem::take(&mut self.marks);
         *self = Self {
             connection: Some(connection),
+            dialect,
             schema: Some(schema),
             marks,
             ..Self::default()
@@ -267,7 +284,7 @@ impl Browser {
             ObjectType::TypeBody => ObjectType::Type,
             t => t,
         };
-        if !ObjectType::BROWSER.contains(&object_type) {
+        if !self.dialect.browser_types().contains(&object_type) {
             effects.log.push(format!(
                 "{} objects aren't listed in the object browser",
                 object_type.dictionary_name().to_lowercase()
@@ -279,7 +296,11 @@ impl Browser {
             ..object
         };
         self.set_schema(object.owner.clone(), effects);
-        if !object.name.contains(&self.filter.trim().to_uppercase()) {
+        if !name_matches(
+            self.dialect,
+            &object.name,
+            &self.filter.trim().to_uppercase(),
+        ) {
             self.filter.clear();
         }
         let node = Node::Folder(object.owner.clone(), object_type);
@@ -385,7 +406,7 @@ impl Browser {
         };
         self.children.insert(object.clone(), Loaded::Loading);
         self.meta(effects, Pending::Children(object.clone()), query);
-        if object.object_type == ObjectType::Table {
+        if object.object_type == ObjectType::Table && self.dialect.supports(Feature::TableParts) {
             let id = request_id();
             self.pending.insert(id, Pending::Parts(object.clone()));
             let (owner, table) = (object.owner.clone(), object.name.clone());
@@ -491,11 +512,29 @@ impl Browser {
             match result {
                 Ok(MetaResult::Columns(cols)) => {
                     effects.open.push(OpenRequest::InsertText {
-                        text: template(kind, &object, cols),
+                        text: template(self.dialect, kind, &object, cols),
                     });
                 }
                 Ok(_) => {}
                 Err(e) => log.push(format!("Generate: {e}")),
+            }
+            return effects;
+        }
+        if let DbEvent::Meta { id, result } = &event
+            && let Some(Pending::Script(object)) = self.pending.get(id)
+        {
+            let object = object.clone();
+            self.pending.remove(id);
+            match (result, self.connection.clone()) {
+                (Ok(MetaResult::Text(ddl)), Some(connection)) => {
+                    effects.open.push(OpenRequest::Sql {
+                        connection,
+                        text: replace_script(self.dialect, &object, ddl),
+                        run: false,
+                    });
+                }
+                (Err(e), _) => log.push(format!("Edit {}: {e}", object.name)),
+                _ => {}
             }
             return effects;
         }
@@ -633,7 +672,9 @@ impl Browser {
             if pythia_ui::icons::icon_button(ui, Icon::Refresh, "Refresh").clicked() {
                 self.refresh(&mut effects);
             }
+            let invalid = self.dialect.supports(Feature::InvalidObjects);
             if schema != "PUBLIC"
+                && invalid
                 && pythia_ui::icons::icon_button(
                     ui,
                     Icon::Compile,
@@ -666,9 +707,12 @@ impl Browser {
             } else {
                 Icon::Filter.image(ui)
             };
+            let invalid = self.dialect.supports(Feature::InvalidObjects);
             ui.menu_image_button(icon, |ui| {
-                ui.checkbox(&mut self.invalid_only, "Invalid objects only");
-                ui.separator();
+                if invalid {
+                    ui.checkbox(&mut self.invalid_only, "Invalid objects only");
+                    ui.separator();
+                }
                 ui.label(RichText::new("Changed").strong());
                 for (value, label) in [
                     (Changed::Any, "Any time"),
@@ -759,7 +803,7 @@ impl Browser {
             };
             let matching: Vec<&ObjectRef> = list
                 .iter()
-                .filter(|o| filter.is_empty() || o.name.contains(&filter))
+                .filter(|o| name_matches(self.dialect, &o.name, &filter))
                 .collect();
             if matching.is_empty() {
                 continue;
@@ -781,12 +825,12 @@ impl Browser {
                 .to_string()
         });
         let shown = |o: &DbObject| {
-            (filter.is_empty() || o.name.contains(&filter))
+            name_matches(self.dialect, &o.name, &filter)
                 && (!self.invalid_only || !o.valid)
                 && cutoff.as_deref().is_none_or(|c| o.last_ddl.as_str() >= c)
         };
         let filtering = !filter.is_empty() || self.invalid_only || cutoff.is_some();
-        for &object_type in folders(owner) {
+        for &object_type in folders(self.dialect, owner) {
             let node = Node::Folder(owner.to_owned(), object_type);
             let open = self.expanded.contains(&node);
             let folder = self.folders.get(&(owner.to_owned(), object_type));
@@ -949,7 +993,7 @@ impl Browser {
                     if toggle || label.clicked() {
                         toggles.push(Node::Folder((*owner).to_owned(), *object_type));
                     }
-                    if has_editor(*object_type) {
+                    if has_editor(*object_type) && self.dialect.supports(Feature::ObjectEditors) {
                         label.context_menu(|ui| {
                             let kind = object_type.dictionary_name().to_lowercase();
                             if ui.button(format!("New {kind}…")).clicked() {
@@ -1196,10 +1240,17 @@ impl Browser {
         object: &ObjectRef,
         add: impl FnOnce(&mut Ui) -> egui::Response,
     ) -> egui::Response {
+        let dialect = self.dialect;
         let name = if Some(object.owner.as_str()) == self.schema.as_deref() {
-            crate::documents::quote_ident(&object.name).to_lowercase()
+            dialect.quote_ident(&object.name)
         } else {
-            object.qualified().to_lowercase()
+            dialect.qualified(&object.owner, &object.name)
+        };
+        // Oracle's names read better in lowercase; MySQL's keep their case.
+        let name = if dialect == Dialect::ORACLE {
+            name.to_lowercase()
+        } else {
+            name
         };
         let response = add(ui);
         drag_text(ui, &response, name);
@@ -1209,6 +1260,7 @@ impl Browser {
     fn context_menu(&self, ui: &mut Ui, object: &ObjectRef, actions: &mut Vec<ObjectAction>) {
         let connection = self.connection.as_deref().unwrap_or_default();
         let options = MenuOptions {
+            dialect: self.dialect,
             favorite: self.marks.is_favorite(connection, object),
             drop: true,
             reveal: false,
@@ -1235,9 +1287,11 @@ impl Browser {
         effects: &mut Effects,
     ) {
         let connection = connection.to_owned();
+        let dialect = self.dialect;
+        let programs = dialect.supports(Feature::PlSql);
         match action {
             ObjectAction::Select(o) => self.selected = Some(o),
-            ObjectAction::Default(o) if o.object_type.has_source() => {
+            ObjectAction::Default(o) if o.object_type.has_source() && programs => {
                 effects.open.push(OpenRequest::Program {
                     connection,
                     object: o,
@@ -1251,13 +1305,23 @@ impl Browser {
             }
             ObjectAction::Query(o) => effects.open.push(OpenRequest::Sql {
                 connection,
-                text: format!("select * from {}", o.qualified()),
+                text: format!("select * from {}", dialect.qualified(&o.owner, &o.name)),
                 run: true,
             }),
-            ObjectAction::Edit(o) => effects.open.push(OpenRequest::Program {
+            ObjectAction::Edit(o) if programs => effects.open.push(OpenRequest::Program {
                 connection,
                 object: o,
             }),
+            // Without program windows the DDL becomes a script that
+            // replaces the object.
+            ObjectAction::Edit(o) => {
+                let query = MetaQuery::Ddl {
+                    owner: o.owner.clone(),
+                    name: o.name.clone(),
+                    object_type: o.object_type,
+                };
+                self.meta(effects, Pending::Script(o), query);
+            }
             ObjectAction::Compile(o) => {
                 // As the invalid objects window does: keeping each unit's
                 // compiler settings, debug information included.
@@ -1274,7 +1338,7 @@ impl Browser {
                 }
             }
             ObjectAction::CopyName(o) => ctx.copy_text(o.name.clone()),
-            ObjectAction::CopyQualified(o) => ctx.copy_text(o.qualified()),
+            ObjectAction::CopyQualified(o) => ctx.copy_text(dialect.qualified(&o.owner, &o.name)),
             ObjectAction::Drop(o) => self.confirm_drop = Some(o),
             ObjectAction::ToggleFavorite(o) => {
                 let opening = !self.marks.is_favorite(&connection, &o);
@@ -1374,7 +1438,7 @@ impl Browser {
         if let Some(yes) = decision {
             self.confirm_drop = None;
             if yes {
-                self.run(effects, &object, "dropped", drop_sql(&object));
+                self.run(effects, &object, "dropped", drop_sql(self.dialect, &object));
             }
         }
     }
@@ -1382,8 +1446,11 @@ impl Browser {
 
 /// `DROP` for an object. Public synonyms and links have their own syntax,
 /// and a link's name can't be qualified: its dots belong to the name.
-fn drop_sql(o: &ObjectRef) -> String {
+fn drop_sql(dialect: Dialect, o: &ObjectRef) -> String {
     let kind = o.object_type.dictionary_name().to_lowercase();
+    if dialect != Dialect::ORACLE {
+        return format!("drop {kind} {}", dialect.qualified(&o.owner, &o.name));
+    }
     match (o.owner.as_str(), o.object_type) {
         ("PUBLIC", _) => format!("drop public {kind} {}", quote_ident(&o.name)),
         (_, ObjectType::DatabaseLink) => format!("drop {kind} {}", quote_ident(&o.name)),
@@ -1391,8 +1458,22 @@ fn drop_sql(o: &ObjectRef) -> String {
     }
 }
 
+/// A script that replaces a stored object with its (edited) DDL, for
+/// databases without `CREATE OR REPLACE` for routines: drop, then create,
+/// ended by `/` like a PL/SQL unit so the body's `;` stay in it.
+pub fn replace_script(dialect: Dialect, o: &ObjectRef, ddl: &str) -> String {
+    format!(
+        "drop {} if exists {};\n\n{}\n/\n",
+        o.object_type.dictionary_name().to_lowercase(),
+        dialect.qualified(&o.owner, &o.name),
+        ddl.trim_end()
+    )
+}
+
 /// Entries of an object's context menu besides those for its type.
 pub struct MenuOptions {
+    /// The connection's database: what it offers for the object.
+    pub dialect: Dialect,
     /// The object is a favorite: the entry removes it.
     pub favorite: bool,
     /// Offer Drop… (left out in editors, where it's too easy to hit).
@@ -1407,6 +1488,8 @@ pub struct MenuOptions {
 /// the editors. Returns the chosen action.
 pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Option<ObjectAction> {
     let t = object.object_type;
+    let plsql = options.dialect.supports(Feature::PlSql);
+    let editors = options.dialect.supports(Feature::ObjectEditors);
     let mut chosen = None;
     let mut item = |ui: &mut Ui, label: &str, action: ObjectAction| {
         if ui.button(label).clicked() {
@@ -1429,7 +1512,7 @@ pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Op
     }
     let testable = matches!(t, ObjectType::Procedure | ObjectType::Function)
         || (t == ObjectType::Package && options.member.is_some());
-    if testable {
+    if testable && plsql {
         item(
             ui,
             "Test…",
@@ -1437,13 +1520,13 @@ pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Op
         );
     }
     item(ui, "Describe", ObjectAction::Describe(object.clone()));
-    if t == ObjectType::Table {
+    if t == ObjectType::Table && editors {
         item(ui, "Edit table…", ObjectAction::EditTable(object.clone()));
     }
-    if has_editor(t) {
+    if has_editor(t) && editors {
         item(ui, "Edit…", ObjectAction::EditObject(object.clone()));
     }
-    if has_grants(t) {
+    if has_grants(t) && editors {
         item(ui, "Grants…", ObjectAction::Grants(object.clone()));
     }
     if t.has_data() {
@@ -1463,7 +1546,7 @@ pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Op
         });
     }
     ui.separator();
-    if t.has_source() || matches!(t, ObjectType::View | ObjectType::MaterializedView) {
+    if plsql && (t.has_source() || matches!(t, ObjectType::View | ObjectType::MaterializedView)) {
         item(ui, "Compile", ObjectAction::Compile(object.clone()));
     }
     if t == ObjectType::DatabaseLink {
@@ -1544,9 +1627,17 @@ impl Template {
 }
 
 /// Builds the statement for `kind` with binds named after the columns.
-fn template(kind: Template, object: &ObjectRef, cols: &[TableColumn]) -> String {
-    let name = |c: &TableColumn| crate::documents::quote_ident(&c.name).to_lowercase();
-    let table = object.qualified().to_lowercase();
+/// Oracle's names are written in lowercase; MySQL's keep their case.
+fn template(dialect: Dialect, kind: Template, object: &ObjectRef, cols: &[TableColumn]) -> String {
+    let case = |s: String| {
+        if dialect == Dialect::ORACLE {
+            s.to_lowercase()
+        } else {
+            s
+        }
+    };
+    let name = |c: &TableColumn| case(dialect.quote_ident(&c.name));
+    let table = case(dialect.qualified(&object.owner, &object.name));
     let names: Vec<String> = cols.iter().map(name).collect();
     match kind {
         Template::ColumnList => names.join(", "),
@@ -1616,22 +1707,28 @@ mod tests {
             object_type,
         };
         assert_eq!(
-            drop_sql(&o("PUBLIC", "DUAL2", ObjectType::Synonym)),
+            drop_sql(Dialect::ORACLE, &o("PUBLIC", "DUAL2", ObjectType::Synonym)),
             "drop public synonym DUAL2"
         );
         assert_eq!(
-            drop_sql(&o("PUBLIC", "REMOTE.EXAMPLE.COM", ObjectType::DatabaseLink)),
+            drop_sql(
+                Dialect::ORACLE,
+                &o("PUBLIC", "REMOTE.EXAMPLE.COM", ObjectType::DatabaseLink)
+            ),
             "drop public database link \"REMOTE.EXAMPLE.COM\""
         );
         assert_eq!(
-            drop_sql(&o("HR", "REMOTE", ObjectType::DatabaseLink)),
+            drop_sql(
+                Dialect::ORACLE,
+                &o("HR", "REMOTE", ObjectType::DatabaseLink)
+            ),
             "drop database link REMOTE"
         );
         assert_eq!(
-            drop_sql(&o("HR", "EMP", ObjectType::Table)),
+            drop_sql(Dialect::ORACLE, &o("HR", "EMP", ObjectType::Table)),
             "drop table HR.EMP"
         );
-        assert_eq!(folders("PUBLIC"), ObjectType::PUBLIC);
+        assert_eq!(folders(Dialect::ORACLE, "PUBLIC"), ObjectType::PUBLIC);
     }
 
     fn col(name: &str, pk: Option<u32>) -> TableColumn {
@@ -1653,22 +1750,62 @@ mod tests {
             object_type: ObjectType::Table,
         };
         let cols = [col("ID", Some(1)), col("NAME", None), col("SAL", None)];
+        let oracle = Dialect::ORACLE;
         assert_eq!(
-            template(Template::ColumnList, &object, &cols),
+            template(oracle, Template::ColumnList, &object, &cols),
             "id, name, sal"
         );
         assert_eq!(
-            template(Template::Select, &object, &cols),
+            template(oracle, Template::Select, &object, &cols),
             "select e.id,\n       e.name,\n       e.sal\n  from hr.emp e"
         );
         assert_eq!(
-            template(Template::Insert, &object, &cols),
+            template(oracle, Template::Insert, &object, &cols),
             "insert into hr.emp\n  (id, name, sal)\nvalues\n  (:id, :name, :sal)"
         );
         assert_eq!(
-            template(Template::Update, &object, &cols),
+            template(oracle, Template::Update, &object, &cols),
             "update hr.emp\n   set name = :name,\n       sal = :sal\n where id = :id"
         );
+
+        // MySQL keeps the names' case and quotes with backticks.
+        let object = ObjectRef {
+            owner: "shop".into(),
+            name: "Order".into(),
+            object_type: ObjectType::Table,
+        };
+        let cols = [col("id", Some(1)), col("Total", None), col("key", None)];
+        assert_eq!(
+            template(Dialect::MYSQL, Template::Select, &object, &cols),
+            "select o.id,\n       o.Total,\n       o.`key`\n  from shop.`Order` o"
+        );
+    }
+
+    #[test]
+    fn mysql_statements() {
+        let routine = ObjectRef {
+            owner: "shop".into(),
+            name: "add_order".into(),
+            object_type: ObjectType::Procedure,
+        };
+        assert_eq!(
+            drop_sql(Dialect::MYSQL, &routine),
+            "drop procedure shop.add_order"
+        );
+        let script = replace_script(
+            Dialect::MYSQL,
+            &routine,
+            "CREATE DEFINER=`app`@`%` PROCEDURE `add_order`()\nbegin\n  select 1;\nend\n",
+        );
+        assert_eq!(
+            script,
+            "drop procedure if exists shop.add_order;\n\n\
+             CREATE DEFINER=`app`@`%` PROCEDURE `add_order`()\nbegin\n  select 1;\nend\n/\n"
+        );
+        // Two statements: the drop, and the whole routine up to the slash.
+        let statements = pythia_plsql::split_statements(&script);
+        assert_eq!(statements.len(), 2, "{statements:?}");
+        assert!(statements[1].text(&script).ends_with("end"));
     }
 }
 

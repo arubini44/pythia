@@ -6,7 +6,7 @@
 //! the engine already normalizes unquoted identifiers to uppercase.
 
 use pythia_db::oracle::Connection;
-use pythia_db::{DbError, TaskFn};
+use pythia_db::{DbError, DbKind, DbRequest, Dialect, TaskFn};
 use pythia_lsp_core::{
     CatalogCache, CatalogColumn, CatalogMember, CatalogObject, CatalogParam, CatalogRequest,
     MemberKind, ParamMode,
@@ -39,12 +39,130 @@ impl Answer {
     }
 }
 
-/// Builds the task answering `request`.
+/// Builds the task answering `request` on Oracle.
 pub fn task(request: CatalogRequest) -> TaskFn {
     Box::new(move |conn: &Connection| {
         let answer = fetch(conn, request)?;
         Ok(Box::new(answer) as Box<dyn std::any::Any + Send>)
     })
+}
+
+/// The request answering `request` (with an [`Answer`]) on a connection of
+/// `dialect`.
+pub fn request(id: u64, request: CatalogRequest, dialect: Dialect) -> DbRequest {
+    match dialect.kind() {
+        DbKind::Oracle => DbRequest::Task {
+            id,
+            task: task(request),
+        },
+        DbKind::MySql => DbRequest::Run {
+            id,
+            task: Box::new(move |client| {
+                let answer = mysql::fetch(client, request)?;
+                Ok(Box::new(answer) as Box<dyn std::any::Any + Send>)
+            }),
+        },
+    }
+}
+
+/// MySQL's dictionary. Code assistance asks with uppercase names (Oracle's
+/// rule for unquoted ones); MySQL keeps their case, so names are compared
+/// without it and answered as stored.
+mod mysql {
+    use pythia_db::{Cell, Client, DbError};
+    use pythia_lsp_core::{CatalogColumn, CatalogObject, CatalogRequest};
+
+    use super::Answer;
+
+    /// Tables, views and routines as `(owner, name, type)`.
+    const OBJECTS: &str = "select table_schema as owner, table_name as name, \
+                                  if(table_type = 'VIEW', 'VIEW', 'TABLE') as type \
+                             from information_schema.tables \
+                           union all \
+                           select routine_schema, routine_name, routine_type \
+                             from information_schema.routines";
+
+    pub(super) fn fetch(
+        client: &mut dyn Client,
+        request: CatalogRequest,
+    ) -> Result<Answer, DbError> {
+        Ok(match request {
+            CatalogRequest::Schemas => {
+                let rows = client.query(
+                    "select schema_name from information_schema.schemata order by 1",
+                    &[],
+                )?;
+                Answer::Schemas(rows.into_iter().filter_map(first).collect())
+            }
+            CatalogRequest::Objects { schema } => {
+                let owner = owner(client, schema.as_deref())?;
+                let rows = client.query(
+                    &format!("select * from ({OBJECTS}) o where lower(owner) = lower(?)"),
+                    &[&owner],
+                )?;
+                Answer::Objects(schema, rows.into_iter().filter_map(object).collect())
+            }
+            CatalogRequest::Resolve { schema, name } => {
+                let owner = owner(client, schema.as_deref())?;
+                let rows = client.query(
+                    &format!(
+                        "select * from ({OBJECTS}) o \
+                          where lower(owner) = lower(?) and lower(name) = lower(?) \
+                          order by name = ? desc, type = 'TABLE' desc limit 1"
+                    ),
+                    &[&owner, &name, &name],
+                )?;
+                let object = rows.into_iter().find_map(object);
+                Answer::Resolved(schema, name, object)
+            }
+            CatalogRequest::Columns { owner, name } => {
+                let rows = client.query(
+                    "select column_name, column_type, is_nullable, nullif(column_comment, '') \
+                       from information_schema.columns \
+                      where lower(table_schema) = lower(?) and lower(table_name) = lower(?) \
+                      order by ordinal_position",
+                    &[&owner, &name],
+                )?;
+                let columns = rows
+                    .into_iter()
+                    .filter_map(|mut r| {
+                        let comment = r.get_mut(3).and_then(Option::take);
+                        Some(CatalogColumn {
+                            name: r.first()?.clone()?,
+                            data_type: r.get(1)?.clone()?,
+                            nullable: r.get(2)?.as_deref() == Some("YES"),
+                            comment,
+                        })
+                    })
+                    .collect();
+                Answer::Columns(owner, name, columns)
+            }
+            // Routines stand alone: no packages with members.
+            CatalogRequest::Members { owner, name } => Answer::Members(owner, name, Vec::new()),
+        })
+    }
+
+    /// The schema asked for, or the current database.
+    fn owner(client: &mut dyn Client, schema: Option<&str>) -> Result<String, DbError> {
+        if let Some(schema) = schema {
+            return Ok(schema.to_owned());
+        }
+        let rows = client.query("select database()", &[])?;
+        Ok(rows.into_iter().find_map(first).unwrap_or_default())
+    }
+
+    fn first(row: Vec<Cell>) -> Option<String> {
+        row.into_iter().next().flatten()
+    }
+
+    fn object(row: Vec<Cell>) -> Option<CatalogObject> {
+        let mut row = row.into_iter();
+        Some(CatalogObject {
+            owner: row.next()??,
+            name: row.next()??,
+            object_type: row.next()??,
+        })
+    }
 }
 
 fn fetch(conn: &Connection, request: CatalogRequest) -> Result<Answer, DbError> {
@@ -414,6 +532,119 @@ mod tests {
                 if name == "DEMO_DEPARTMENTS" && object_type == "TABLE"),
             "{target:?}"
         );
+    }
+}
+
+/// Completion with MySQL's dictionary (skipped unless `PYTHIA_TEST_MYSQL`
+/// is set to `user/password@host:port/database`).
+#[cfg(test)]
+mod mysql_live {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use pythia_db::{ConnectParams, DbEvent, Session};
+    use pythia_lsp_core::{Analysis, CatalogCache, CatalogRequest};
+
+    use super::*;
+
+    struct Live {
+        session: Session,
+        wake: mpsc::Receiver<()>,
+    }
+
+    impl Live {
+        fn next(&mut self) -> DbEvent {
+            loop {
+                if let Some(event) = self.session.try_recv() {
+                    return event;
+                }
+                self.wake
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("timed out");
+            }
+        }
+
+        fn answer(&mut self, request: CatalogRequest) -> Answer {
+            self.session
+                .send(super::request(7, request, Dialect::MYSQL));
+            loop {
+                if let DbEvent::TaskDone { result, .. } = self.next() {
+                    return *result
+                        .expect("catalog query")
+                        .downcast::<Answer>()
+                        .expect("an answer");
+                }
+            }
+        }
+
+        fn run(&mut self, sql: &str) {
+            self.session.send(DbRequest::Execute {
+                id: 1,
+                sql: sql.into(),
+                max_rows: 10,
+                binds: Vec::new(),
+            });
+            loop {
+                match self.next() {
+                    DbEvent::Executed { .. } => return,
+                    DbEvent::Failed { error, .. } => panic!("{sql}: {error}"),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn columns_after_an_alias() {
+        let Ok(spec) = std::env::var("PYTHIA_TEST_MYSQL") else {
+            return;
+        };
+        let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+        let (username, password) = credentials.split_once('/').unwrap();
+        let (tx, wake) = mpsc::channel();
+        let session = Session::connect(
+            ConnectParams {
+                kind: DbKind::MySql,
+                username: username.into(),
+                password: password.into(),
+                connect_string: connect_string.into(),
+                privilege: Default::default(),
+                init_sql: Vec::new(),
+            },
+            move || {
+                let _ = tx.send(());
+            },
+        );
+        let mut live = Live { session, wake };
+        let DbEvent::Connected(server) = live.next() else {
+            panic!("not connected")
+        };
+        live.run("drop table if exists cat_orders");
+        live.run("create table cat_orders (id int primary key, Customer varchar(30), `order` int)");
+
+        let mut cache = CatalogCache::new(server.current_schema)
+            .with_names(pythia_lsp_core::NameStyle::AsStored);
+        let src = "select o.\n  from cat_orders o";
+        let analysis = Analysis::new(src);
+        let mut items = Vec::new();
+        for _ in 0..8 {
+            let c = analysis.complete(9, &cache);
+            if c.missing.is_empty() {
+                items = c.items;
+                break;
+            }
+            for request in c.missing {
+                live.answer(request).apply(&mut cache);
+            }
+        }
+        // Names as stored; backticks only where MySQL needs them.
+        let inserted: Vec<(&str, &str)> = items
+            .iter()
+            .map(|i| (i.label.as_str(), i.insert_text.as_str()))
+            .collect();
+        assert!(inserted.contains(&("Customer", "Customer")), "{inserted:?}");
+        assert!(inserted.contains(&("order", "`order`")), "{inserted:?}");
+        live.run("drop table cat_orders");
     }
 }
 

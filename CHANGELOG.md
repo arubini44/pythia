@@ -7,6 +7,11 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- MySQL connections (experimental): pick *Type: MySQL* when connecting.
+  SQL windows, explain plan, completion, the object browser and object views
+  work; tools that rely on Oracle's dictionary or PL/SQL are hidden on
+  MySQL connections. `pythia_db::Dialect` says what a connection's database
+  supports, and `DbRequest::Run` runs tool code on any database.
 - Toolbar: a Debug button next to Execute (Ctrl+F9). It is enabled only
   with the cursor in an anonymous block of a connected SQL window, and when
   disabled says why; in a program window it points to Test… for a block

@@ -68,6 +68,7 @@ fn main() -> eframe::Result {
     let (cred, db) = spec.rsplit_once('@').expect("user/password@connect_string");
     let (user, pass) = cred.split_once('/').expect("user/password@connect_string");
     let params = ConnectParams {
+        kind: Default::default(),
         username: user.into(),
         password: pass.into(),
         connect_string: db.into(),

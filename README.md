@@ -142,6 +142,23 @@ for Linux, Windows and macOS.
   marked red and ask before commit; read-only connections; passwords live
   in the OS keychain.
 
+**MySQL (experimental)**
+- Connect to MySQL (tested with 9.4; MariaDB not yet) with *Type: MySQL* and `host:3306/database`
+  (`?tls` for TLS, `?tls=skip-verify` for self-signed certificates); no
+  client library needed.
+- SQL windows with results, fetching on demand, Break, explain plan,
+  completion with columns and comments, and transactions that work as with
+  Oracle: queries see what others committed, changes wait for Commit.
+  Warnings show as messages.
+- The object browser lists tables, views, procedures, functions and
+  triggers; object views show columns, indexes, constraints, triggers,
+  grants, dependencies and the DDL. *Edit* opens a routine as a script that
+  drops and creates it again.
+- Everything built on Oracle's dictionary or PL/SQL — debugger, profiler,
+  monitor, reports, scheduler jobs, compare, import/export, editing results,
+  the form editors — isn't offered on MySQL connections. As in SQL\*Plus,
+  end a routine with `/` on a line of its own (there is no `DELIMITER`).
+
 ## Installing
 
 Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
@@ -224,6 +241,7 @@ PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 | Variable | Used by |
 |---|---|
 | `PYTHIA_TEST_DB` | integration tests (app user) |
+| `PYTHIA_TEST_MYSQL` | MySQL tests, e.g. `pythia/pythia@localhost:3306/pythia` for `docker compose up -d mysql` |
 | `PYTHIA_TEST_DB_DBA` | monitor, compare and debugger tests (`system/oracle@…`) |
 | `PYTHIA_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local Podman container; with Docker on Linux, the compose network's gateway from `docker network inspect pythia_default`) |
 | `PYTHIA_SCREENSHOT_DIR` | renders the real UI offscreen into PNGs (`cargo test -p pythia-app screenshots`) |
@@ -244,7 +262,7 @@ once with `PYTHIA_SCREENSHOT_DIR` set. The reports test needs
 |---|---|
 | `pythia-app` | the application: documents, docking, commands, dialogs |
 | `pythia-ui` | code editor, data grid, icon set |
-| `pythia-db` | sessions on worker threads, dictionary queries |
+| `pythia-db` | sessions on worker threads (Oracle, MySQL), dictionary queries, what each database supports (`Dialect`, `Feature`) |
 | `pythia-plsql` | lexer, statement splitter, error-tolerant parser |
 | `pythia-lsp-core` | completion, hover, navigation, outline, diagnostics |
 | `pythia-data` | export and import |

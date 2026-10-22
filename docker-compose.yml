@@ -18,5 +18,25 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+  # MySQL for the MySQL backend:
+  #   podman compose up -d mysql
+  #   PYTHIA_TEST_MYSQL=pythia/pythia@localhost:3306/pythia cargo test -p pythia-db
+  mysql:
+    image: docker.io/library/mysql:9.4.0
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: mysql
+      MYSQL_DATABASE: pythia
+      MYSQL_USER: pythia
+      MYSQL_PASSWORD: pythia
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pmysql"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 volumes:
   oracle-data:
+  mysql-data:

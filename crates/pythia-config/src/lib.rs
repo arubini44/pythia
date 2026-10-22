@@ -14,7 +14,7 @@ mod connections;
 mod settings;
 pub mod tns;
 
-pub use connections::{ConnectionProfile, Connections, Privilege};
+pub use connections::{ConnectionProfile, Connections, DbKind, Privilege};
 pub use settings::{
     AiBackend, AiKind, AiSettings, EditorSettings, FormatTriggers, InvalidObjectSettings,
     InvalidScope, KeymapPreset, Settings, ThemeChoice,

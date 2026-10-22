@@ -50,16 +50,7 @@ impl ObjectRef {
 
 /// Quotes an identifier only if Oracle would need it.
 pub fn quote_ident(name: &str) -> String {
-    let plain = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || "_$#".contains(c))
-        && !pythia_plsql::is_keyword(name);
-    if plain {
-        name.to_owned()
-    } else {
-        format!("\"{}\"", name.replace('"', "\"\""))
-    }
+    pythia_db::Dialect::ORACLE.quote_ident(name)
 }
 
 /// Things a document asks the app to do after a frame or an event.
@@ -275,6 +266,8 @@ pub struct DocContext<'a> {
     pub marks: Option<&'a crate::browser::Marks>,
     /// How the document's connection is logged in (SYSDBA, …).
     pub privilege: Option<pythia_config::Privilege>,
+    /// The document connection's database: what it can offer.
+    pub dialect: pythia_db::Dialect,
 }
 
 impl Document {

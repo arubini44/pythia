@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use pythia_config::ConnectionProfile;
-use pythia_db::{ConnectParams, DbEvent, DbRequest, ServerInfo, Session};
+use pythia_db::{ConnectParams, DbEvent, DbKind, DbRequest, Dialect, ServerInfo, Session};
 
 use crate::documents::DocId;
 
@@ -66,11 +66,16 @@ impl Connection {
         &self.params
     }
 
+    /// The connection's database and what it supports.
+    pub fn dialect(&self) -> Dialect {
+        self.profile.kind.into()
+    }
+
     /// Schema the browser starts in.
     pub fn current_schema(&self) -> String {
         self.server()
             .map(|s| s.current_schema.clone())
-            .unwrap_or_else(|| self.profile.username.to_uppercase())
+            .unwrap_or_else(|| self.dialect().dictionary_name(&self.profile.username))
     }
 
     /// The document's session, opening it on first use (with `autocommit`).
@@ -111,8 +116,10 @@ impl Connection {
         let session = self
             .meta
             .get_or_insert_with(|| Session::connect(params.clone(), notify.callback()));
-        self.meta_pending
-            .insert(id, matches!(request, DbRequest::Task { .. }));
+        self.meta_pending.insert(
+            id,
+            matches!(request, DbRequest::Task { .. } | DbRequest::Run { .. }),
+        );
         session.send(request);
     }
 
@@ -200,6 +207,7 @@ impl Connections {
         notify: &Notify,
     ) -> String {
         let params = ConnectParams {
+            kind: profile.kind,
             username: profile.username.clone(),
             password,
             connect_string: profile.connect_string.clone(),
@@ -290,10 +298,12 @@ fn init_sql(profile: &ConnectionProfile) -> Vec<String> {
     let mut out = Vec::new();
     let schema = profile.default_schema.trim();
     if !schema.is_empty() {
-        out.push(format!(
-            "alter session set current_schema = {}",
-            crate::documents::quote_ident(&schema.to_uppercase())
-        ));
+        let dialect = Dialect::from(profile.kind);
+        let schema = dialect.quote_ident(&dialect.dictionary_name(schema));
+        out.push(match profile.kind {
+            DbKind::Oracle => format!("alter session set current_schema = {schema}"),
+            DbKind::MySql => format!("use {schema}"),
+        });
     }
     let script = &profile.login_script;
     for statement in pythia_plsql::split_statements(script) {

@@ -413,6 +413,7 @@ fn data_editing() {
             debug: None,
             marks: None,
             privilege: None,
+            dialect: Default::default(),
         };
         let effects = app.test_sql_window().start_editing(0, &cx);
         app.test_apply(effects);
@@ -465,6 +466,7 @@ fn data_editing() {
             debug: None,
             marks: None,
             privilege: None,
+            dialect: Default::default(),
         };
         let effects = app.test_sql_window().apply_changes(0, &cx);
         app.test_apply(effects);
@@ -3017,4 +3019,138 @@ fn settings_ai() {
     h.state_mut().test_settings_ai();
     h.run_steps(3);
     save(&mut h, "settings-ai");
+}
+
+/// A MySQL connection (`PYTHIA_TEST_MYSQL=user/password@host:port/database`):
+/// queries, transactions, browser and object views work; what MySQL can't
+/// do is left out of the menus, the toolbar and the browser.
+#[test]
+fn mysql_connection() {
+    use crate::commands::Command;
+    use pythia_db::ObjectType;
+    let Some(spec) = std::env::var("PYTHIA_TEST_MYSQL").ok() else {
+        return;
+    };
+    let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+    let (username, password) = credentials.split_once('/').unwrap();
+    let schema = connect_string.rsplit_once('/').map(|(_, db)| db).unwrap();
+    let profile = ConnectionProfile {
+        name: "pythia@mysql".into(),
+        kind: pythia_config::DbKind::MySql,
+        username: username.into(),
+        connect_string: connect_string.into(),
+        color: Some([0x14, 0xb8, 0xa6]),
+        ..Default::default()
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password.into());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    assert!(
+        h.state()
+            .test_log()
+            .iter()
+            .any(|l| l.starts_with("Connected to pythia@mysql (MySQL ")),
+        "{:?}",
+        h.state().test_log()
+    );
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@mysql".into(),
+        text: "drop table if exists app_orders;
+create table app_orders (
+  id int primary key,
+  customer varchar(30) not null comment 'Who ordered',
+  total decimal(8,2),
+  ordered datetime default current_timestamp
+);
+insert into app_orders (id, customer, total) values (1, 'Ada', 12.50), (2, 'Linus', 99.00), (3, 'Grace', 250.00);
+set @limit = 100;
+select id, customer, total from app_orders where total < @limit order by id;
+"
+        .into(),
+        run: true,
+    });
+    wait_until(&mut h, "script", |app| !app.test_focused_busy());
+    let w = h.state_mut().test_sql_window();
+    let result = w.state.results.last().expect("a result");
+    let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["id", "customer", "total"]);
+    assert_eq!(result.rows.len(), 2, "SET ran on the server");
+    assert_eq!(
+        h.state().test_transaction_state(),
+        Ok(()),
+        "the insert waits for commit"
+    );
+    save(&mut h, "mysql-sql-window");
+    h.state_mut().test_command(Command::Commit);
+    wait_until(&mut h, "commit", |app| {
+        app.test_transaction_state() == Err("No transaction")
+    });
+
+    // Oracle-only menus are gone, the rest only offers what works.
+    for menu in ["Debug", "Monitor", "Reports"] {
+        assert!(h.query_by_label(menu).is_none(), "{menu}");
+    }
+    h.get_by_label("Tools").click();
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Find Database Object").is_some());
+    assert!(h.query_by_label_contains("Scheduler Jobs").is_none());
+    assert!(h.query_by_label_contains("Compare Schemas").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    // A shortcut to something hidden explains instead of running it.
+    h.state_mut().test_command(Command::MonitorSessions);
+    assert_eq!(
+        h.state().test_log().last().map(String::as_str),
+        Some("Sessions isn't available for MySQL connections")
+    );
+
+    // The browser has MySQL's folders.
+    h.state_mut()
+        .test_expand_browser(&[ObjectType::Table, ObjectType::Procedure]);
+    wait_until(&mut h, "browser", |app| !app.test_browser_loading());
+    h.run_steps(3);
+    save(&mut h, "mysql-browser");
+    assert!(h.query_by_label("Procedures").is_some());
+    assert!(h.query_by_label("Packages").is_none());
+    assert!(h.query_by_label_contains("app_orders").is_some());
+
+    // Tables open on their columns; MySQL's details are tabs.
+    h.state_mut().test_open(OpenRequest::Object {
+        connection: "pythia@mysql".into(),
+        object: ObjectRef {
+            owner: schema.into(),
+            name: "app_orders".into(),
+            object_type: ObjectType::Table,
+        },
+    });
+    h.run_steps(2);
+    wait_until(&mut h, "object view", |app| !app.test_focused_busy());
+    assert_eq!(h.state().test_object_view().loaded_for_test().1, 4);
+    assert!(h.query_by_label("Constraints").is_some());
+    save(&mut h, "mysql-object-view");
+
+    // Completion: the columns after an alias, from MySQL's dictionary.
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@mysql".into(),
+        text: "select o\n  from app_orders o".into(),
+        run: false,
+    });
+    h.run_steps(3);
+    h.state_mut().test_sql_window().editor.select(8..8);
+    h.run_steps(3);
+    h.event(egui::Event::Text(".".into()));
+    wait_until(&mut h, "completion popup", |app| {
+        app.test_sql_window_ref()
+            .is_some_and(|w| w.completion_visible_with("customer"))
+    });
+    save(&mut h, "mysql-completion");
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@mysql".into(),
+        text: "drop table app_orders;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }

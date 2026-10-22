@@ -27,6 +27,8 @@ egui_dock = { version = "0.21", features = ["serde"] }
 oracle = "0.6"
 # Spike (#13): the pure-Rust driver, pinned while it is in beta.
 oracledb = "=26.0.0-beta.4"
+# Pure Rust, synchronous like the session workers; rustls on ring as ureq uses.
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "buffer-pool", "rustls-tls-ring"] }
 logos = "0.16"
 regex = "1"
 ropey = "1.6"

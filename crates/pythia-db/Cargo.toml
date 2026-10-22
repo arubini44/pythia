@@ -10,6 +10,7 @@ license.workspace = true
 thin = ["dep:oracledb"]
 
 [dependencies]
+mysql.workspace = true
 oracle.workspace = true
 oracledb = { workspace = true, optional = true }
 pythia-config.workspace = true

@@ -7,7 +7,7 @@ use pythia_plsql::ast::*;
 use pythia_plsql::{Token, TokenKind};
 
 use crate::builtins;
-use crate::catalog::{CatalogMember, CatalogObject, CatalogRequest, MemberKind};
+use crate::catalog::{CatalogMember, CatalogObject, CatalogRequest, MemberKind, NameStyle};
 use crate::navigate::describe;
 use crate::sema::{FieldInfo, MemberTarget, Part, Resolved, Sema, SymRef, is_ref_token};
 
@@ -215,7 +215,7 @@ pub(crate) fn complete(sema: &Sema, offset: usize, opts: &CompletionOptions) -> 
     completion.replace = word_start..offset;
 
     let ctx = context(sema, word_start, offset);
-    let mut b = Builder::new(prefix, quoted, opts);
+    let mut b = Builder::new(prefix, quoted, opts, sema.cat.names());
     fill(sema, &ctx, word_start, prefix, &mut b);
     completion.items = b.finish(opts.max_items);
     completion
@@ -495,6 +495,8 @@ struct Builder {
     prefix: String,
     quoted: bool,
     case: CaseStyle,
+    /// How the database writes dictionary names.
+    names: NameStyle,
     items: Vec<(String, CompletionItem)>,
     seen: HashSet<(String, CompletionKind)>,
 }
@@ -510,7 +512,7 @@ const P_SCHEMA: u8 = 6;
 const P_SNIPPET: u8 = 7;
 
 impl Builder {
-    fn new(prefix: &str, quoted: bool, opts: &CompletionOptions) -> Self {
+    fn new(prefix: &str, quoted: bool, opts: &CompletionOptions, names: NameStyle) -> Self {
         let letters: Vec<char> = prefix.chars().filter(|c| c.is_alphabetic()).collect();
         let case = if opts.match_typing && !letters.is_empty() {
             if letters.iter().all(|c| c.is_lowercase()) {
@@ -527,6 +529,7 @@ impl Builder {
             prefix: prefix.to_owned(),
             quoted,
             case,
+            names,
             items: Vec::new(),
             seen: HashSet::new(),
         }
@@ -539,12 +542,16 @@ impl Builder {
         }
     }
 
-    /// A dictionary-style name (stored uppercase unless quoted).
+    /// A dictionary name as it is written: Oracle's in the case the user
+    /// types unless quoted, MySQL's as stored.
     fn name_text(&self, name: &str) -> String {
-        if self.quoted || needs_quotes(name) {
-            format!("\"{name}\"")
-        } else {
-            self.cased(name)
+        match self.names {
+            NameStyle::Upper if self.quoted || needs_quotes(name) => format!("\"{name}\""),
+            NameStyle::Upper => self.cased(name),
+            NameStyle::AsStored if needs_backticks(name) => {
+                format!("`{}`", name.replace('`', "``"))
+            }
+            NameStyle::AsStored => name.to_owned(),
         }
     }
 
@@ -603,10 +610,10 @@ impl Builder {
         priority: u8,
     ) -> Option<&mut CompletionItem> {
         let text = self.name_text(name);
-        let label = if needs_quotes(name) {
-            text.clone()
-        } else {
-            self.cased(name)
+        let label = match self.names {
+            NameStyle::Upper if needs_quotes(name) => text.clone(),
+            NameStyle::Upper => self.cased(name),
+            NameStyle::AsStored => name.to_owned(),
         };
         self.push(label, kind, detail, text, None, priority)
     }
@@ -689,6 +696,18 @@ fn word_start_match(segments: &[&str], p: &str) -> bool {
         false
     }
     segments.len() > 1 && go(segments, p)
+}
+
+/// Whether a MySQL name must be written in backticks.
+fn needs_backticks(name: &str) -> bool {
+    let ok_start = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let ok_rest = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'));
+    !(ok_start && ok_rest) || RESERVED.contains(&name.to_ascii_uppercase().as_str())
 }
 
 /// Whether a stored name must be written in double quotes.

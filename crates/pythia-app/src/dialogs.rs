@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use egui::{Key, RichText, Sense, Ui};
-use pythia_config::{ConnectionProfile, Connections as SavedConnections, Privilege};
+use pythia_config::{ConnectionProfile, Connections as SavedConnections, DbKind, Privilege};
 use pythia_db::{DbObject, ObjectType};
 use pythia_ui::icons::Icon;
 
@@ -197,7 +197,8 @@ impl ConnectDialog {
                                 egui::Button::selectable(selected, text).frame_when_inactive(false),
                             );
                             r.on_hover_text(format!(
-                                "{}@{}{}",
+                                "{} {}@{}{}",
+                                p.kind.label(),
                                 p.username,
                                 p.connect_string,
                                 if p.production { "\nProduction" } else { "" }
@@ -230,14 +231,29 @@ impl ConnectDialog {
         });
         ui.add_space(6.0);
         let mut submit = false;
+        let oracle = self.form.kind == DbKind::Oracle;
         egui::Grid::new("connect-form")
             .num_columns(2)
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
+                ui.label("Type");
+                egui::ComboBox::from_id_salt("db-kind")
+                    .selected_text(self.form.kind.label())
+                    .show_ui(ui, |ui| {
+                        for kind in DbKind::ALL {
+                            ui.selectable_value(&mut self.form.kind, kind, kind.label());
+                        }
+                    });
+                ui.end_row();
+
                 ui.label("Username");
                 let user = ui.add(
                     egui::TextEdit::singleline(&mut self.form.username)
-                        .hint_text("user, or proxy[target] for proxy authentication")
+                        .hint_text(if oracle {
+                            "user, or proxy[target] for proxy authentication"
+                        } else {
+                            "user"
+                        })
                         .desired_width(280.0),
                 );
                 if !self.focus_requested {
@@ -267,18 +283,19 @@ impl ConnectDialog {
 
                 ui.label("Database");
                 ui.horizontal(|ui| {
-                    let width = if self.tns_aliases.is_empty() {
-                        280.0
-                    } else {
-                        250.0
-                    };
+                    let aliases = oracle && !self.tns_aliases.is_empty();
+                    let width = if aliases { 250.0 } else { 280.0 };
                     let db = ui.add(
                         egui::TextEdit::singleline(&mut self.form.connect_string)
-                            .hint_text("TNS alias or host:1521/service")
+                            .hint_text(if oracle {
+                                "TNS alias or host:1521/service"
+                            } else {
+                                "host:3306/database, ?tls for TLS"
+                            })
                             .desired_width(width),
                     );
                     submit |= db.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if !self.tns_aliases.is_empty() {
+                    if aliases {
                         ui.menu_button("▾", |ui| {
                             ui.set_max_height(320.0);
                             let typed = self.form.connect_string.to_lowercase();
@@ -306,15 +323,17 @@ impl ConnectDialog {
                 });
                 ui.end_row();
 
-                ui.label("Connect as");
-                egui::ComboBox::from_id_salt("privilege")
-                    .selected_text(self.form.privilege.label())
-                    .show_ui(ui, |ui| {
-                        for p in Privilege::ALL {
-                            ui.selectable_value(&mut self.form.privilege, p, p.label());
-                        }
-                    });
-                ui.end_row();
+                if oracle {
+                    ui.label("Connect as");
+                    egui::ComboBox::from_id_salt("privilege")
+                        .selected_text(self.form.privilege.label())
+                        .show_ui(ui, |ui| {
+                            for p in Privilege::ALL {
+                                ui.selectable_value(&mut self.form.privilege, p, p.label());
+                            }
+                        });
+                    ui.end_row();
+                }
 
                 ui.label("Name");
                 ui.add(
@@ -378,7 +397,11 @@ impl ConnectDialog {
                         ui.label("Default schema");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.form.default_schema)
-                                .hint_text("work in another schema after connecting")
+                                .hint_text(if oracle {
+                                    "work in another schema after connecting"
+                                } else {
+                                    "database to use after connecting"
+                                })
                                 .desired_width(280.0),
                         );
                         ui.end_row();
@@ -386,9 +409,11 @@ impl ConnectDialog {
                         ui.add(
                             egui::TextEdit::multiline(&mut self.form.login_script)
                                 .code_editor()
-                                .hint_text(
-                                    "alter session set nls_date_format = 'YYYY-MM-DD HH24:MI:SS';",
-                                )
+                                .hint_text(if oracle {
+                                    "alter session set nls_date_format = 'YYYY-MM-DD HH24:MI:SS';"
+                                } else {
+                                    "set session time_zone = '+00:00';"
+                                })
                                 .desired_rows(3)
                                 .desired_width(280.0),
                         );
@@ -474,6 +499,10 @@ impl ConnectDialog {
         profile.connect_string = profile.connect_string.trim().to_owned();
         profile.name = profile.name.trim().to_owned();
         profile.folder = profile.folder.trim().trim_matches('/').to_owned();
+        if profile.kind != DbKind::Oracle {
+            // Hidden for other databases: don't keep one chosen before.
+            profile.privilege = Privilege::Normal;
+        }
         profile
     }
 
@@ -637,13 +666,19 @@ impl CommandPalette {
         self.selected = 0;
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, keymap: &Keymap) -> Option<Command> {
+    /// Lists the commands available for a connection of `dialect`.
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        keymap: &Keymap,
+        dialect: pythia_db::Dialect,
+    ) -> Option<Command> {
         if !self.open {
             return None;
         }
         let mut matches: Vec<(i32, Command)> = Command::ALL
             .iter()
-            .filter(|c| **c != Command::ShowPalette)
+            .filter(|c| **c != Command::ShowPalette && c.available(dialect))
             .filter_map(|c| fuzzy_score(&self.query, c.label()).map(|s| (s, *c)))
             .collect();
         matches.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
