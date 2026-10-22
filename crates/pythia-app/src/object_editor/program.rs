@@ -98,7 +98,7 @@ pub fn source_name(owner: &str, name: &str) -> String {
 }
 
 /// The unqualified name as `END name` repeats it.
-fn end_name(name: &str) -> String {
+pub(super) fn end_name(name: &str) -> String {
     let n = crate::documents::quote_ident(&ident(name));
     if n.starts_with('"') {
         n
@@ -108,7 +108,7 @@ fn end_name(name: &str) -> String {
 }
 
 /// Parameter list (with a leading line break), or nothing.
-fn params(list: &[Param], indent: &str) -> String {
+pub(super) fn params(list: &[Param], indent: &str) -> String {
     if list.is_empty() {
         return String::new();
     }
@@ -256,7 +256,7 @@ fn types() -> Vec<String> {
     .collect()
 }
 
-fn params_ui(ui: &mut Ui, id: &str, list: &mut Vec<Param>) {
+pub(super) fn params_ui(ui: &mut Ui, id: &str, list: &mut Vec<Param>) {
     let types = types();
     let mut remove = None;
     let mut swap = None;
@@ -341,7 +341,7 @@ fn params_ui(ui: &mut Ui, id: &str, list: &mut Vec<Param>) {
     }
 }
 
-fn returns_ui(ui: &mut Ui, id: &str, returns: &mut String) {
+pub(super) fn returns_ui(ui: &mut Ui, id: &str, returns: &mut String) {
     ui.add(
         egui::TextEdit::singleline(returns)
             .font(egui::TextStyle::Monospace)

@@ -568,7 +568,7 @@ impl ObjectEditor {
                 Ok(grants::statements(&object, o, d))
             }
             (_, Form::Program(d)) => program::sources(owner, d),
-            (_, Form::Type(d)) => type_def::source(owner, d).map(|s| vec![s]),
+            (_, Form::Type(d)) => type_def::sources(owner, d),
             (_, Form::Trigger(d)) => trigger::source(owner, d).map(|s| vec![s]),
         }
     }
@@ -1603,7 +1603,7 @@ mod tests {
             data_type: "varchar2(100)".into(),
         });
         ty.not_final = true;
-        let src = type_def::source(&owner, &ty).unwrap();
+        let src = type_def::sources(&owner, &ty).unwrap().remove(0);
         assert_eq!(
             compile(&conn, &owner, &src, "PYTHIA_OB_OBJ_T"),
             Vec::<String>::new()
@@ -1614,7 +1614,7 @@ mod tests {
             element: "pythia_ob_obj_t".into(),
             ..type_def::TypeDef::new()
         };
-        let src = type_def::source(&owner, &list).unwrap();
+        let src = type_def::sources(&owner, &list).unwrap().remove(0);
         assert_eq!(
             compile(&conn, &owner, &src, "PYTHIA_OB_LIST_T"),
             Vec::<String>::new()
@@ -1626,9 +1626,53 @@ mod tests {
             limit: 5,
             ..type_def::TypeDef::new()
         };
-        let src = type_def::source(&owner, &array).unwrap();
+        let src = type_def::sources(&owner, &array).unwrap().remove(0);
         assert_eq!(
             compile(&conn, &owner, &src, "PYTHIA_OB_ARRAY_T"),
+            Vec::<String>::new()
+        );
+
+        // An object type with methods: spec and body compile as they are.
+        let mut with_methods = type_def::TypeDef::new();
+        with_methods.name = "pythia_ob_meth_t".into();
+        with_methods.not_final = true;
+        with_methods.methods = vec![
+            type_def::Method {
+                function: true,
+                name: "label".into(),
+                returns: "varchar2".into(),
+                ..Default::default()
+            },
+            type_def::Method {
+                kind: type_def::MethodKind::Static,
+                name: "reset".into(),
+                ..Default::default()
+            },
+            type_def::Method {
+                kind: type_def::MethodKind::Constructor,
+                params: vec![program::Param {
+                    name: "p_id".into(),
+                    mode: program::Mode::In,
+                    data_type: "number".into(),
+                    default: String::new(),
+                }],
+                ..Default::default()
+            },
+            type_def::Method {
+                kind: type_def::MethodKind::Map,
+                name: "sort_key".into(),
+                returns: "number".into(),
+                ..Default::default()
+            },
+        ];
+        let src = type_def::sources(&owner, &with_methods).unwrap();
+        assert_eq!(src.len(), 2);
+        assert_eq!(
+            compile(&conn, &owner, &src[0], "PYTHIA_OB_METH_T"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            compile(&conn, &owner, &src[1], "PYTHIA_OB_METH_T"),
             Vec::<String>::new()
         );
 

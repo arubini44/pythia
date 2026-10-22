@@ -7,6 +7,9 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Type form: methods (member and static procedures and functions,
+  constructors, a map or order method) and "not instantiable". A type with
+  methods opens with its body too, a stub per method (#40).
 - User and role form: quotas on any number of tablespaces, the admin
   option of granted roles and system privileges, a user's default roles,
   and object privileges (with grant option for users) to add and revoke
