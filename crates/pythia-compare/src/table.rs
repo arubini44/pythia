@@ -188,6 +188,108 @@ pub struct CreateOptions {
     /// Empty: the owner's default tablespace.
     pub tablespace: String,
     pub temporary: Temporary,
+    pub partitioning: Option<Partitioning>,
+}
+
+/// How a table is partitioned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PartitionMethod {
+    #[default]
+    Range,
+    /// Range, with new partitions created by the database as rows arrive.
+    Interval,
+    List,
+    Hash,
+}
+
+impl PartitionMethod {
+    pub fn label(self) -> &'static str {
+        match self {
+            PartitionMethod::Range => "range",
+            PartitionMethod::Interval => "interval",
+            PartitionMethod::List => "list",
+            PartitionMethod::Hash => "hash",
+        }
+    }
+}
+
+/// The partitioning of a table: method, key and partitions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Partitioning {
+    pub method: PartitionMethod,
+    /// Key columns (dictionary names).
+    pub columns: Vec<String>,
+    /// An interval table's interval, e.g. `NUMTOYMINTERVAL(1, 'MONTH')`.
+    pub interval: String,
+    pub partitions: Vec<PartitionDef>,
+    /// Hash partitions by number when none are named.
+    pub hash_count: u32,
+}
+
+/// A partition: its name (empty: the database names it) and its bound as
+/// written in SQL (`100`, `MAXVALUE`, `'A', 'B'`, `DEFAULT`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartitionDef {
+    pub name: String,
+    pub bound: String,
+    /// Empty: the table's.
+    pub tablespace: String,
+}
+
+impl PartitionDef {
+    /// `partition p1 values less than (100) tablespace ts`, as in
+    /// `CREATE TABLE` and `ALTER TABLE … ADD`.
+    pub fn definition(&self, method: PartitionMethod) -> String {
+        let mut text = "partition".to_owned();
+        if !self.name.trim().is_empty() {
+            text.push(' ');
+            text.push_str(&ident(self.name.trim()));
+        }
+        let bound = self.bound.trim();
+        match method {
+            PartitionMethod::Range | PartitionMethod::Interval => {
+                text.push_str(&format!(" values less than ({bound})"));
+            }
+            PartitionMethod::List => text.push_str(&format!(" values ({bound})")),
+            PartitionMethod::Hash => {}
+        }
+        if !self.tablespace.trim().is_empty() {
+            text.push_str(&format!(" tablespace {}", ident(self.tablespace.trim())));
+        }
+        text
+    }
+}
+
+impl Partitioning {
+    /// `partition by range (…) (partition …, …)`
+    pub fn clause(&self) -> String {
+        let columns = self
+            .columns
+            .iter()
+            .map(|c| ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let by = match self.method {
+            PartitionMethod::Range | PartitionMethod::Interval => "range",
+            PartitionMethod::List => "list",
+            PartitionMethod::Hash => "hash",
+        };
+        let mut text = format!("partition by {by} ({columns})");
+        if self.method == PartitionMethod::Interval {
+            text.push_str(&format!(" interval ({})", self.interval.trim()));
+        }
+        if self.method == PartitionMethod::Hash && self.partitions.is_empty() {
+            text.push_str(&format!(" partitions {}", self.hash_count.max(1)));
+            return text;
+        }
+        let partitions: Vec<String> = self
+            .partitions
+            .iter()
+            .map(|p| p.definition(self.method))
+            .collect();
+        text.push_str(&format!("\n(\n  {}\n)", partitions.join(",\n  ")));
+        text
+    }
 }
 
 /// A global temporary table and what a commit does to its rows.
@@ -229,6 +331,10 @@ pub fn create(def: &TableDef, options: &CreateOptions) -> Vec<SyncStatement> {
         Temporary::DeleteRows => sql.push_str("\non commit delete rows"),
         Temporary::PreserveRows => sql.push_str("\non commit preserve rows"),
         Temporary::No => {}
+    }
+    if let Some(partitioning) = &options.partitioning {
+        sql.push('\n');
+        sql.push_str(&partitioning.clause());
     }
     let mut statements = vec![SyncStatement::new(Phase::Tables, def.name.clone(), sql)];
     statements.extend(diff(def, &created, false).statements);
@@ -976,6 +1082,7 @@ mod tests {
             &CreateOptions {
                 tablespace: "USERS".into(),
                 temporary: Temporary::No,
+                partitioning: None,
             },
         );
         let sql: Vec<&str> = statements.iter().map(|s| s.sql.as_str()).collect();
@@ -1008,6 +1115,7 @@ mod tests {
             &CreateOptions {
                 tablespace: "ignored".into(),
                 temporary: Temporary::PreserveRows,
+                partitioning: None,
             },
         );
         assert_eq!(
@@ -1016,6 +1124,52 @@ mod tests {
              name VARCHAR2(30 CHAR),\n  constraint emp_pk primary key (id)\n)\n\
              on commit preserve rows"
         );
+    }
+
+    #[test]
+    fn partitioned_tables() {
+        let part = |name: &str, bound: &str| PartitionDef {
+            name: name.into(),
+            bound: bound.into(),
+            tablespace: String::new(),
+        };
+        let mut p = Partitioning {
+            method: PartitionMethod::Range,
+            columns: vec!["ID".into()],
+            partitions: vec![part("P1", "100"), part("PMAX", "MAXVALUE")],
+            ..Partitioning::default()
+        };
+        p.partitions[1].tablespace = "USERS".into();
+        let options = CreateOptions {
+            partitioning: Some(p.clone()),
+            ..CreateOptions::default()
+        };
+        assert_eq!(
+            create(&base(), &options)[0].sql,
+            "create table emp (\n  id NUMBER(10) not null,\n  name VARCHAR2(30 CHAR),\n  \
+             constraint emp_pk primary key (id)\n)\npartition by range (id)\n(\n  \
+             partition p1 values less than (100),\n  \
+             partition pmax values less than (MAXVALUE) tablespace users\n)"
+        );
+        p.method = PartitionMethod::Interval;
+        p.interval = "1000".into();
+        p.partitions.truncate(1);
+        assert_eq!(
+            p.clause(),
+            "partition by range (id) interval (1000)\n(\n  partition p1 values less than (100)\n)"
+        );
+        p.method = PartitionMethod::List;
+        p.columns = vec!["NAME".into()];
+        p.partitions = vec![part("", "'A', 'B'"), part("P_OTHER", "DEFAULT")];
+        assert_eq!(
+            p.clause(),
+            "partition by list (name)\n(\n  partition values ('A', 'B'),\n  \
+             partition p_other values (DEFAULT)\n)"
+        );
+        p.method = PartitionMethod::Hash;
+        p.partitions.clear();
+        p.hash_count = 4;
+        assert_eq!(p.clause(), "partition by hash (name) partitions 4");
     }
 
     #[test]

@@ -252,8 +252,8 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.11 Object Editors (M3/M5)
 
 - [x] View and generate DDL (`DBMS_METADATA`) with options (storage, tablespace, constraints) (no options: always without storage and tablespace clauses)
-- [x] Table editor: columns, keys, indexes, checks, comments, partitions → generates `ALTER` script (no partitions)
-- [x] Table builder: new tables (columns, primary/unique/foreign keys, checks, indexes, identity columns, temporary tables, copy of a table) → `CREATE TABLE` script, applied in the window
+- [x] Table editor: columns, keys, indexes, checks, comments, partitions → generates `ALTER` script (partitions: add, truncate, drop; no split, merge or conversion to partitioned)
+- [x] Table builder: new tables (columns, primary/unique/foreign keys, checks, indexes, identity columns, partitioning, temporary tables, copy of a table) → `CREATE TABLE` script, applied in the window
 - [x] Sequence, synonym, view, materialized view, index, database link, user, role editors
 - [x] New triggers, procedures, functions, packages and types from a form that writes the first source for a program window
 - [x] Grants editor

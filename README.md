@@ -55,8 +55,8 @@ for Linux, Windows and macOS.
   and roles.
 - Create objects from the browser's right-click menu (or File → New
   Object): a table builder (columns with a type picker, primary and
-  foreign keys, checks, indexes, identity columns, temporary tables, a copy
-  of another table), and forms for views, materialized views, sequences,
+  foreign keys, checks, indexes, identity columns, range, interval, list
+  or hash partitioning, temporary tables, a copy of another table), and forms for views, materialized views, sequences,
   synonyms, indexes, database links, users and roles, with a preview of the
   generated DDL. Triggers, procedures, functions, packages and types start
   from a form that writes their first source for a program window.

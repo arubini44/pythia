@@ -7,6 +7,12 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Table editor: a Partitions tab (#37). A new table can be partitioned by
+  range, interval, list or hash, with its key, partitions (and a MAXVALUE
+  or DEFAULT one) and tablespaces; a copy of a partitioned table is
+  partitioned the same way. An existing table shows its partitions and
+  takes new ones; truncating and dropping partitions run only with Allow
+  dropping on the Script tab.
 - Creating objects without writing DDL (#29). The object browser's
   right-click menu offers **New …** on every folder, a **New** submenu on
   objects (a table like this one, an index, trigger or view on a table, a

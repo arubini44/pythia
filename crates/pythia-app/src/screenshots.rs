@@ -2109,6 +2109,92 @@ end;
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }
 
+/// The table builder's Partitions tab: a range-partitioned table with a
+/// MAXVALUE partition, created and shown as an existing table's partitions.
+#[test]
+fn table_builder_partitions() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let drop = "begin execute immediate 'drop table pythia_tbp_sales purge';
+  exception when others then null; end;";
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: drop.into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+    h.state_mut().test_open(OpenRequest::NewTable {
+        connection: "pythia@FREEPDB1".into(),
+        owner: "PYTHIA".into(),
+        like: None,
+    });
+    h.run_steps(2);
+    wait_until(&mut h, "builder", |app| !app.test_focused_busy());
+    h.state_mut().test_table_editor().edit_for_test(|t| {
+        t.name = "pythia_tbp_sales".into();
+        t.columns.push(pythia_compare::table::ColumnDef {
+            name: "SOLD".into(),
+            data_type: "DATE".into(),
+            nullable: false,
+            default: None,
+            comment: None,
+            identity: false,
+        });
+    });
+    h.get_by_label("Partitions").hover();
+    h.run_steps(1);
+    h.get_by_label("Partitions").click();
+    h.run_steps(2);
+    // A combo box shows its choice as its value.
+    h.get_by_value("not partitioned").click();
+    h.run_steps(2);
+    h.get_by_label("range").click();
+    h.run_steps(2);
+    h.state_mut()
+        .test_table_editor()
+        .set_partition_key_for_test("sold");
+    h.get_by_label("Add partition").click();
+    h.run_steps(2);
+    h.get_by_label("Add MAXVALUE partition").click();
+    h.run_steps(2);
+    // The first partition's bound (a hint text isn't a label to find).
+    h.state_mut()
+        .test_table_editor()
+        .edit_partitioning_for_test(|p| p.partitions[0].bound = "DATE '2026-01-01'".into());
+    h.run_steps(3);
+    save(&mut h, "table-builder-partitions");
+    let sql = h
+        .state_mut()
+        .test_table_editor()
+        .statements_for_test()
+        .unwrap();
+    assert!(
+        sql[0].contains("partition by range (sold)\n(\n  partition p1 values less than (DATE '2026-01-01'),\n  partition p_max values less than (MAXVALUE)\n)"),
+        "{}",
+        sql[0]
+    );
+    let effects = h.state_mut().test_table_editor().apply_for_test();
+    h.state_mut().test_apply_focused(effects);
+    h.run_steps(2);
+    wait_until(&mut h, "apply", |app| !app.test_focused_busy());
+    let editor = h.state_mut().test_table_editor();
+    assert_eq!(editor.outcome(), Some(("Applied", true)));
+    assert_eq!(editor.partition_names_for_test(), ["P1", "P_MAX"]);
+    h.run_steps(3);
+    save(&mut h, "table-editor-partitions");
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: drop.into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
 /// Procedures, packages and triggers start from a form whose source opens
 /// in a program window; compiling there creates them.
 #[test]

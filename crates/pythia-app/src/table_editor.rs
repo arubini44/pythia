@@ -1,5 +1,5 @@
 //! Table editor: builds a new table, or changes an existing one's columns,
-//! keys, indexes and comments. A new table becomes `CREATE TABLE` and the
+//! keys, indexes, comments and partitions. A new table becomes `CREATE TABLE` and the
 //! statements that follow it; an existing one the ALTER script from diffing
 //! against the table as loaded, with the same structural diff as schema
 //! compare. Apply runs the script on the window's session.
@@ -21,6 +21,7 @@ use crate::documents::{
     DocContext, Effects, ObjectRef, OpenRequest, Target, quote_ident, request_id,
 };
 use crate::object_editor::{ApplyError, error_text, first_line, ident, names, picker};
+use crate::table_partitions::{self, Existing};
 
 #[derive(Serialize, Deserialize)]
 pub struct TableEditor {
@@ -43,6 +44,7 @@ pub enum TableTab {
     Columns,
     Keys,
     Indexes,
+    Partitions,
     Script,
 }
 
@@ -58,6 +60,11 @@ struct State {
     allow_drops: bool,
     /// Tablespace (as typed) and temporary, for a new table.
     options: CreateOptions,
+    /// A new table's partitioning (names as typed) and its key columns.
+    partitioning: Option<pythia_compare::table::Partitioning>,
+    partition_key: String,
+    /// An existing table's partitions and the changes to them.
+    partitions: Option<Existing>,
     new_constraint: NewConstraint,
     new_index: NewIndex,
     lists: Lists,
@@ -82,6 +89,7 @@ struct Lists {
 
 struct Loaded {
     table: Option<TableDef>,
+    partitions: Option<Existing>,
     release: pythia_db::compat::Release,
     tables: Vec<String>,
     tablespaces: Vec<String>,
@@ -174,6 +182,14 @@ impl TableEditor {
     }
 
     pub fn is_dirty(&self) -> bool {
+        if self
+            .state
+            .partitions
+            .as_ref()
+            .is_some_and(Existing::is_changed)
+        {
+            return true;
+        }
         match (&self.state.original, &self.state.edited) {
             (Some(a), Some(b)) => *a != to_dictionary(b),
             (None, Some(b)) => !b.name.trim().is_empty(),
@@ -192,6 +208,32 @@ impl TableEditor {
         if let Some(def) = self.state.edited.as_mut() {
             f(def);
         }
+    }
+
+    /// The partition key typed on the Partitions tab, in tests.
+    #[cfg(test)]
+    pub fn set_partition_key_for_test(&mut self, key: &str) {
+        self.state.partition_key = key.into();
+    }
+
+    /// Changes a new table's partitioning in tests.
+    #[cfg(test)]
+    pub fn edit_partitioning_for_test(
+        &mut self,
+        f: impl FnOnce(&mut pythia_compare::table::Partitioning),
+    ) {
+        if let Some(p) = self.state.partitioning.as_mut() {
+            f(p);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn partition_names_for_test(&self) -> Vec<String> {
+        self.state
+            .partitions
+            .iter()
+            .flat_map(|e| e.partitions.iter().map(|(p, _)| p.name.clone()))
+            .collect()
     }
 
     /// The statements Apply would run, in order.
@@ -290,9 +332,15 @@ impl TableEditor {
             (false, Some(table)) => {
                 self.state.edited = Some(to_typed(&table));
                 self.state.original = Some(table);
+                self.state.partitions = loaded.partitions;
             }
             (true, like) => {
                 self.state.original = None;
+                // A copy is partitioned the same way.
+                self.state.partitioning = loaded.partitions.as_ref().and_then(Existing::copy);
+                if let Some(p) = &self.state.partitioning {
+                    self.state.partition_key = p.columns.join(", ");
+                }
                 self.state.edited = Some(match like {
                     Some(table) => copy_of(&table),
                     None => new_table(),
@@ -312,16 +360,34 @@ impl TableEditor {
         validate(edited, self.creating, release)?;
         let def = named(to_dictionary(edited), max_name_length(release));
         if self.creating {
+            let key = &self.state.partition_key;
+            if let Some(p) = &self.state.partitioning {
+                let columns: Vec<String> = def.columns.iter().map(|c| c.name.clone()).collect();
+                let temporary = self.state.options.temporary != Temporary::No;
+                table_partitions::validate_new(p, key, &columns, temporary)?;
+            }
             let options = CreateOptions {
                 tablespace: ident(&self.state.options.tablespace),
                 temporary: self.state.options.temporary,
+                partitioning: self
+                    .state
+                    .partitioning
+                    .as_ref()
+                    .map(|p| table_partitions::to_dictionary(p, key)),
             };
             return Ok((table::create(&def, &options), Vec::new()));
         }
         let Some(original) = &self.state.original else {
             return Ok(Default::default());
         };
-        let d = diff(&def, original, self.state.allow_drops);
+        let mut d = diff(&def, original, self.state.allow_drops);
+        if let Some(existing) = &self.state.partitions {
+            d.statements.extend(table_partitions::statements(
+                &original.name,
+                existing,
+                self.state.allow_drops,
+            )?);
+        }
         Ok((d.statements, d.notes))
     }
 
@@ -442,6 +508,10 @@ impl TableEditor {
                         .clicked()
                     {
                         self.state.edited = self.state.original.as_ref().map(to_typed);
+                        if let Some(p) = &mut self.state.partitions {
+                            p.added.clear();
+                            p.actions.clear();
+                        }
                     }
                     if ui.button("Reload").clicked() {
                         effects.extend(self.load());
@@ -468,6 +538,7 @@ impl TableEditor {
             ui.selectable_value(tab, TableTab::Columns, "Columns");
             ui.selectable_value(tab, TableTab::Keys, "Keys & checks");
             ui.selectable_value(tab, TableTab::Indexes, "Indexes");
+            ui.selectable_value(tab, TableTab::Partitions, "Partitions");
             let label = if script.is_empty() {
                 "Script"
             } else {
@@ -484,10 +555,30 @@ impl TableEditor {
             TableTab::Columns => columns_ui(ui, table, original, creating, lists.release),
             TableTab::Keys => keys_ui(ui, table, &mut self.state.new_constraint, lists),
             TableTab::Indexes => indexes_ui(ui, table, &mut self.state.new_index),
+            TableTab::Partitions => {
+                if creating {
+                    let columns: Vec<String> =
+                        table.columns.iter().map(|c| c.name.clone()).collect();
+                    table_partitions::new_table_ui(
+                        ui,
+                        &mut self.state.partitioning,
+                        &mut self.state.partition_key,
+                        &columns,
+                        &lists.tablespaces,
+                    );
+                } else if let Some(existing) = &mut self.state.partitions {
+                    table_partitions::existing_ui(ui, existing, &lists.tablespaces);
+                } else {
+                    ui.weak("Not partitioned.");
+                    ui.weak("Turning a table into a partitioned one (ALTER TABLE … MODIFY PARTITION BY, 12.2+) isn't offered here.");
+                }
+            }
             TableTab::Script => {
                 if !creating {
-                    ui.checkbox(&mut self.state.allow_drops, "Allow dropping columns")
-                        .on_hover_text("Dropping columns loses data; off by default");
+                    ui.checkbox(&mut self.state.allow_drops, "Allow dropping")
+                        .on_hover_text(
+                            "Dropping columns, and dropping or truncating partitions, loses data; off by default",
+                        );
                 }
                 for note in &notes {
                     ui.colored_label(ui.visuals().warn_fg_color, note);
@@ -596,19 +687,19 @@ fn load(
           where contents = 'PERMANENT' order by tablespace_name",
         &[],
     )?;
-    let table = match source {
+    let (table, partitions) = match source {
         Some((owner, name)) => {
             let mut tables = table::load(conn, &owner, Some(&name)).map_err(DbError::from)?;
-            Some(
-                tables
-                    .remove(&name)
-                    .ok_or_else(|| DbError::new(format!("Table {owner}.{name} not found")))?,
-            )
+            let table = tables
+                .remove(&name)
+                .ok_or_else(|| DbError::new(format!("Table {owner}.{name} not found")))?;
+            (Some(table), table_partitions::load(conn, &owner, &name)?)
         }
-        None => None,
+        None => (None, None),
     };
     Ok(Loaded {
         table,
+        partitions,
         release,
         tables,
         tablespaces,
@@ -1529,6 +1620,7 @@ mod tests {
     fn loaded(editor: &mut TableEditor, table: Option<TableDef>) {
         editor.loaded(Loaded {
             table,
+            partitions: None,
             release: (23, 0),
             tables: vec!["DEPT".into()],
             tablespaces: vec!["USERS".into()],
@@ -1762,6 +1854,7 @@ mod tests {
         let release = pythia_db::compat::release(&conn).unwrap();
         let lists = |table: Option<TableDef>| Loaded {
             table,
+            partitions: None,
             release,
             tables: Vec::new(),
             tablespaces: Vec::new(),
@@ -1875,6 +1968,209 @@ mod tests {
         );
         assert_eq!(copy.columns.len(), 4);
         assert_eq!(copy.indexes.len(), 1);
+        conn.execute(cleanup, &[]).unwrap();
+    }
+
+    /// Partitioned tables through the editor: range, list, hash and interval
+    /// tables created, reloaded, partitions added, truncated and dropped.
+    #[test]
+    fn builds_live_partitioned_tables() {
+        use pythia_compare::table::{PartitionDef, PartitionMethod, Partitioning};
+        let Ok(spec) = std::env::var("PYTHIA_TEST_DB") else {
+            return;
+        };
+        let (cred, db) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        let conn = Connection::connect(user, pw, db).unwrap();
+        let owner = conn
+            .query_row_as::<String>("select user from dual", &[])
+            .unwrap();
+        let cleanup = "begin
+               for t in (select table_name from user_tables
+                          where table_name like 'PYTHIA\\_TP\\_%' escape '\\') loop
+                 execute immediate 'drop table ' || t.table_name || ' purge';
+               end loop;
+             end;";
+        conn.execute(cleanup, &[]).unwrap();
+        let release = pythia_db::compat::release(&conn).unwrap();
+        let part = |name: &str, bound: &str| PartitionDef {
+            name: name.into(),
+            bound: bound.into(),
+            tablespace: String::new(),
+        };
+        let build = |name: &str, p: Partitioning, key: &str| -> Result<(), ApplyError> {
+            let mut editor = TableEditor::create(owner.clone(), None);
+            editor.loaded(Loaded {
+                table: None,
+                partitions: None,
+                release,
+                tables: Vec::new(),
+                tablespaces: Vec::new(),
+            });
+            editor.edit_for_test(|t| {
+                t.name = name.into();
+                t.columns.push(column("created", "DATE"));
+                t.columns.push(column("region", "VARCHAR2(10 CHAR)"));
+            });
+            editor.state.partitioning = Some(p);
+            editor.state.partition_key = key.into();
+            let sql = editor.statements_for_test().unwrap();
+            run(&conn, &owner, &sql)
+        };
+
+        let range = Partitioning {
+            method: PartitionMethod::Range,
+            partitions: vec![
+                part("p_2025", "DATE '2026-01-01'"),
+                part("p_max", "MAXVALUE"),
+            ],
+            ..Partitioning::default()
+        };
+        match build("pythia_tp_range", range, "created") {
+            Err(e) if e.error.code == Some(439) => {
+                eprintln!("no Partitioning option, skipping: {}", e.error);
+                return;
+            }
+            other => other.unwrap_or_else(|e| panic!("{}: {}", e.statement, e.error)),
+        }
+        let list = Partitioning {
+            method: PartitionMethod::List,
+            partitions: vec![part("p_eu", "'CH', 'DE'"), part("p_rest", "DEFAULT")],
+            ..Partitioning::default()
+        };
+        build("pythia_tp_list", list, "region")
+            .unwrap_or_else(|e| panic!("{}: {}", e.statement, e.error));
+        let hash = Partitioning {
+            method: PartitionMethod::Hash,
+            hash_count: 4,
+            ..Partitioning::default()
+        };
+        build("pythia_tp_hash", hash, "id")
+            .unwrap_or_else(|e| panic!("{}: {}", e.statement, e.error));
+        let interval = Partitioning {
+            method: PartitionMethod::Interval,
+            interval: "NUMTOYMINTERVAL(1, 'MONTH')".into(),
+            partitions: vec![part("p_start", "DATE '2026-01-01'")],
+            ..Partitioning::default()
+        };
+        build("pythia_tp_interval", interval, "created")
+            .unwrap_or_else(|e| panic!("{}: {}", e.statement, e.error));
+
+        // Reloaded: kinds, keys and partitions.
+        let range = table_partitions::load(&conn, &owner, "PYTHIA_TP_RANGE")
+            .unwrap()
+            .unwrap();
+        assert_eq!(range.method, Some(PartitionMethod::Range));
+        assert_eq!(range.columns, ["CREATED"]);
+        let names: Vec<&str> = range
+            .partitions
+            .iter()
+            .map(|(p, _)| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["P_2025", "P_MAX"]);
+        assert_eq!(range.partitions[1].0.bound, "MAXVALUE");
+        let list = table_partitions::load(&conn, &owner, "PYTHIA_TP_LIST")
+            .unwrap()
+            .unwrap();
+        assert_eq!(list.partitions[0].0.bound, "'CH', 'DE'");
+        let hash = table_partitions::load(&conn, &owner, "PYTHIA_TP_HASH")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hash.partitions.len(), 4);
+        // A row past the interval table's first partition adds one.
+        conn.execute(
+            "insert into pythia_tp_interval (id, created) values (1, date '2026-03-15')",
+            &[],
+        )
+        .unwrap();
+        conn.commit().unwrap();
+        let interval = table_partitions::load(&conn, &owner, "PYTHIA_TP_INTERVAL")
+            .unwrap()
+            .unwrap();
+        assert_eq!(interval.method, Some(PartitionMethod::Interval));
+        assert_eq!(interval.partitions.len(), 2);
+        assert!(interval.partitions[1].1, "added by the interval");
+        assert!(
+            table_partitions::load(&conn, &owner, "PYTHIA_TP_NONE")
+                .unwrap()
+                .is_none()
+        );
+
+        // An existing list table: add a partition, truncate and drop others.
+        let object = ObjectRef {
+            owner: owner.clone(),
+            name: "PYTHIA_TP_LIST".into(),
+            object_type: ObjectType::Table,
+        };
+        let mut editor = TableEditor::new(object);
+        let table = table::load(&conn, &owner, Some("PYTHIA_TP_LIST"))
+            .unwrap()
+            .remove("PYTHIA_TP_LIST")
+            .unwrap();
+        editor.loaded(Loaded {
+            table: Some(table),
+            partitions: Some(list),
+            release,
+            tables: Vec::new(),
+            tablespaces: Vec::new(),
+        });
+        assert!(!editor.is_dirty());
+        let p = editor.state.partitions.as_mut().unwrap();
+        p.added.push(part("p_us", "'US'"));
+        p.actions
+            .insert("P_EU".into(), table_partitions::Action::Truncate);
+        p.actions
+            .insert("P_REST".into(), table_partitions::Action::Drop);
+        assert!(editor.is_dirty());
+        // Without "allow dropping" only the new partition runs.
+        assert_eq!(
+            editor.statements_for_test().unwrap(),
+            ["alter table pythia_tp_list add partition p_us values ('US')"]
+        );
+        editor.state.allow_drops = true;
+        let sql = editor.statements_for_test().unwrap();
+        assert_eq!(sql.len(), 3, "{sql:?}");
+        run(&conn, &owner, &sql).unwrap_or_else(|e| panic!("{}: {}", e.statement, e.error));
+        let list = table_partitions::load(&conn, &owner, "PYTHIA_TP_LIST")
+            .unwrap()
+            .unwrap();
+        let names: Vec<&str> = list
+            .partitions
+            .iter()
+            .map(|(p, _)| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["P_EU", "P_US"]);
+
+        // A copy of the interval table: the same partitioning, without the
+        // partition the interval added.
+        let mut like = TableEditor::create(
+            owner.clone(),
+            Some(ObjectRef {
+                owner: owner.clone(),
+                name: "PYTHIA_TP_INTERVAL".into(),
+                object_type: ObjectType::Table,
+            }),
+        );
+        let source = table::load(&conn, &owner, Some("PYTHIA_TP_INTERVAL"))
+            .unwrap()
+            .remove("PYTHIA_TP_INTERVAL")
+            .unwrap();
+        like.loaded(Loaded {
+            table: Some(source),
+            partitions: Some(interval),
+            release,
+            tables: Vec::new(),
+            tablespaces: Vec::new(),
+        });
+        like.edit_for_test(|t| t.name = "pythia_tp_interval2".into());
+        let sql = like.statements_for_test().unwrap();
+        assert!(
+            sql[0].contains("interval (NUMTOYMINTERVAL(1, 'MONTH'))"),
+            "{}",
+            sql[0]
+        );
+        assert!(!sql[0].contains("SYS_P"), "{}", sql[0]);
+        run(&conn, &owner, &sql).unwrap_or_else(|e| panic!("{}: {}", e.statement, e.error));
         conn.execute(cleanup, &[]).unwrap();
     }
 }

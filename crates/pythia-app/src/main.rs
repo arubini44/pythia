@@ -46,6 +46,7 @@ mod sql_window;
 mod statistics;
 mod stubs;
 mod table_editor;
+mod table_partitions;
 mod table_parts;
 mod test_script;
 mod text_diff;
