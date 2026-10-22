@@ -1,0 +1,15 @@
+[package]
+name = "pythia-debugger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+pythia-db.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
+tracing-subscriber.workspace = true

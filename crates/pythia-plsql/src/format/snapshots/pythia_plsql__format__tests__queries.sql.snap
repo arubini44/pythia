@@ -1,0 +1,86 @@
+---
+source: crates/pythia-plsql/src/format/tests.rs
+expression: out
+---
+-- Reporting queries with analytic functions, hierarchies and set operators
+select /*+ LEADING(e) USE_HASH(d) */
+  e.employee_id,
+  e.first_name      as first,
+  e.last_name       as last,
+  d.department_name as dept,
+  ROW_NUMBER() over (partition by e.department_id order by e.salary desc, e.hire_date) as rn,
+  SUM(e.salary) over (
+    partition by e.department_id order by e.hire_date rows between unbounded preceding and current row
+  ) running_total,
+  case when e.salary > 10000 then 'high' when e.salary > 5000 then 'medium' else 'low' end as band
+from employees e
+inner join departments d
+  on d.department_id = e.department_id
+    and d.location_id in (1700, 1800, 2400)
+left join jobs j using (job_id)
+where
+  e.hire_date between date '2015-01-01' and sysdate
+  and (e.commission_pct is null or e.commission_pct < 0.2)
+  and e.manager_id is not null
+order by dept, rn
+fetch first 50 rows only;
+
+select
+  lpad(' ', 2 * (level - 1)) || last_name as tree,
+  level,
+  sys_connect_by_path(last_name, '/') path
+from employees
+start with manager_id is null
+connect by prior employee_id = manager_id
+order siblings by last_name;
+
+select department_id
+from departments
+minus
+select department_id
+from employees
+intersect
+select department_id
+from departments
+where location_id = 1700;
+
+select
+  listagg(last_name, ', ') within group (order by last_name) names,
+  count(distinct job_id) jobs,
+  max(salary) keep (dense_rank last order by hire_date) last_sal
+from employees
+group by department_id
+having
+  count(*) > 3 -- only bigger departments
+  and avg(salary) > 4000;
+
+select
+  extract(year from hire_date) yr,
+  trim(both ' ' from last_name) ln,
+  cast(salary as number(10, 2)) sal,
+  -salary neg,
+  x.a(+) outer_col
+from employees, (select 1 a from dual) x
+where employees.employee_id = x.a(+) and nvl(commission_pct, 0) = 0;
+
+select *
+from (
+  select e.*, rownum rnum
+  from (
+    select *
+    from employees
+    order by salary desc
+  ) e
+  where rownum <= :max_row
+)
+where rnum > :min_row;
+
+select
+  q'{multi
+line ' quote}' txt,
+  'a''b' s,
+  n'unicode',
+  1.5e3 num,
+  :bind,
+  &&subst. as subst
+from dual;

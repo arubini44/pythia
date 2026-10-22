@@ -9,15 +9,15 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.95"
 
 [workspace.dependencies]
-orui-config = { path = "crates/orui-config" }
-orui-compare = { path = "crates/orui-compare" }
-orui-data = { path = "crates/orui-data" }
-orui-db = { path = "crates/orui-db" }
-orui-debugger = { path = "crates/orui-debugger" }
-orui-lsp-core = { path = "crates/orui-lsp-core" }
-orui-monitor = { path = "crates/orui-monitor" }
-orui-plsql = { path = "crates/orui-plsql" }
-orui-ui = { path = "crates/orui-ui" }
+pythia-config = { path = "crates/pythia-config" }
+pythia-compare = { path = "crates/pythia-compare" }
+pythia-data = { path = "crates/pythia-data" }
+pythia-db = { path = "crates/pythia-db" }
+pythia-debugger = { path = "crates/pythia-debugger" }
+pythia-lsp-core = { path = "crates/pythia-lsp-core" }
+pythia-monitor = { path = "crates/pythia-monitor" }
+pythia-plsql = { path = "crates/pythia-plsql" }
+pythia-ui = { path = "crates/pythia-ui" }
 
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "glow", "default_fonts", "accesskit", "wayland", "x11", "persistence"] }
 egui = "0.36"

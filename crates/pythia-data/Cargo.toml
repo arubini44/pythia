@@ -1,0 +1,14 @@
+[package]
+name = "pythia-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+calamine = "0.37"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+csv = "1"
+pythia-db.workspace = true
+rust_xlsxwriter = "0.101"
+serde_json = "1"
+thiserror.workspace = true

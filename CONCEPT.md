@@ -1,4 +1,4 @@
-# orui – Oracle PL/SQL IDE in Rust
+# Pythia – Oracle PL/SQL IDE in Rust
 
 A native, fast, cross-platform alternative to Allround Automations' PL/SQL Developer,
 written in Rust with `egui` on the `wgpu` renderer.
@@ -47,18 +47,18 @@ written in Rust with `egui` on the `wgpu` renderer.
 ## 3. Architecture
 
 ```
-orui/
+pythia/
 ├── crates/
-│   ├── orui-app          # eframe entry point, window, docking layout, command palette
-│   ├── orui-ui           # reusable widgets: code editor, data grid, tree view, diff view
-│   ├── orui-db           # connection mgmt, sessions, query execution, metadata queries
-│   ├── orui-plsql        # lexer, parser, AST, symbol tables, formatter
-│   ├── orui-lsp-core     # completion, hover, go-to-definition, diagnostics (no UI)
-│   ├── orui-debugger     # DBMS_DEBUG_JDWP / DBMS_DEBUG client, debug session state machine
-│   ├── orui-data         # import/export, data compare, data generator
-│   ├── orui-compare      # schema/DDL compare and sync script generation
-│   ├── orui-search       # code search index, data search
-│   └── orui-config       # settings, profiles, keybindings, themes
+│   ├── pythia-app          # eframe entry point, window, docking layout, command palette
+│   ├── pythia-ui           # reusable widgets: code editor, data grid, tree view, diff view
+│   ├── pythia-db           # connection mgmt, sessions, query execution, metadata queries
+│   ├── pythia-plsql        # lexer, parser, AST, symbol tables, formatter
+│   ├── pythia-lsp-core     # completion, hover, go-to-definition, diagnostics (no UI)
+│   ├── pythia-debugger     # DBMS_DEBUG_JDWP / DBMS_DEBUG client, debug session state machine
+│   ├── pythia-data         # import/export, data compare, data generator
+│   ├── pythia-compare      # schema/DDL compare and sync script generation
+│   ├── pythia-search       # code search index, data search
+│   └── pythia-config       # settings, profiles, keybindings, themes
 └── tests/                # integration tests against Oracle Free container
 ```
 
@@ -119,7 +119,7 @@ orui/
 - [x] Multiple simultaneous connections
 - [ ] Session modes: multi-session / dual-session / single-session
 - [x] Connection health check, auto-reconnect prompt (lost sessions are detected on errors and replaced on the next statement; no periodic ping or prompt)
-- [x] Set NLS settings, `CURRENT_SCHEMA`, module/action/client info on connect (`CURRENT_SCHEMA` per connection, NLS via the login script, module set to `orui`; no action/client info)
+- [x] Set NLS settings, `CURRENT_SCHEMA`, module/action/client info on connect (`CURRENT_SCHEMA` per connection, NLS via the login script, module set to `pythia`; no action/client info)
 - [x] Login script per connection (like `login.sql`)
 - [x] Detect Instant Client and give a helpful message if it's missing
 

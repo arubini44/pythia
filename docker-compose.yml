@@ -1,7 +1,7 @@
 # Oracle Free for local development and integration tests.
 #
 #   podman compose up -d   (or docker compose up -d)
-#   ORUI_TEST_DB=orui/orui@localhost:1521/FREEPDB1 cargo test -p orui-db
+#   PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test -p pythia-db
 services:
   oracle:
     image: docker.io/gvenzl/oracle-free:23-slim
@@ -9,8 +9,8 @@ services:
       - "1521:1521"
     environment:
       ORACLE_PASSWORD: oracle
-      APP_USER: orui
-      APP_USER_PASSWORD: orui
+      APP_USER: pythia
+      APP_USER_PASSWORD: pythia
     volumes:
       - oracle-data:/opt/oracle/oradata
     healthcheck:

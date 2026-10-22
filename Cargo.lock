@@ -3018,153 +3018,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orui-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "csv",
- "eframe",
- "egui",
- "egui_dock",
- "egui_extras",
- "egui_kittest",
- "egui_plot",
- "keyring",
- "orui-compare",
- "orui-config",
- "orui-data",
- "orui-db",
- "orui-debugger",
- "orui-lsp-core",
- "orui-monitor",
- "orui-plsql",
- "orui-ui",
- "regex",
- "rfd",
- "serde",
- "serde_json",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "orui-compare"
-version = "0.1.0"
-dependencies = [
- "egui",
- "egui_extras",
- "egui_kittest",
- "orui-data",
- "orui-db",
- "orui-plsql",
- "orui-ui",
- "similar",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "orui-config"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "directories",
- "orui-plsql",
- "serde",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
-]
-
-[[package]]
-name = "orui-data"
-version = "0.1.0"
-dependencies = [
- "calamine",
- "chrono",
- "csv",
- "orui-db",
- "rust_xlsxwriter",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "orui-db"
-version = "0.1.0"
-dependencies = [
- "oracle",
- "orui-config",
- "orui-plsql",
- "serde",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
-name = "orui-debugger"
-version = "0.1.0"
-dependencies = [
- "egui",
- "egui_kittest",
- "orui-db",
- "thiserror 2.0.21",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "orui-lsp-core"
-version = "0.1.0"
-dependencies = [
- "insta",
- "orui-plsql",
-]
-
-[[package]]
-name = "orui-monitor"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "egui_extras",
- "egui_kittest",
- "egui_plot",
- "orui-config",
- "orui-db",
- "tracing",
-]
-
-[[package]]
-name = "orui-plsql"
-version = "0.1.0"
-dependencies = [
- "insta",
- "logos",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "orui-ui"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "egui_extras",
- "jiff",
- "orui-data",
- "orui-db",
- "orui-plsql",
- "regex",
- "resvg",
- "ropey",
- "serde",
- "serde_json",
- "tiny-skia",
-]
-
-[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3483,6 +3336,153 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "pythia-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "csv",
+ "eframe",
+ "egui",
+ "egui_dock",
+ "egui_extras",
+ "egui_kittest",
+ "egui_plot",
+ "keyring",
+ "pythia-compare",
+ "pythia-config",
+ "pythia-data",
+ "pythia-db",
+ "pythia-debugger",
+ "pythia-lsp-core",
+ "pythia-monitor",
+ "pythia-plsql",
+ "pythia-ui",
+ "regex",
+ "rfd",
+ "serde",
+ "serde_json",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pythia-compare"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui_extras",
+ "egui_kittest",
+ "pythia-data",
+ "pythia-db",
+ "pythia-plsql",
+ "pythia-ui",
+ "similar",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pythia-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "pythia-plsql",
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
+name = "pythia-data"
+version = "0.1.0"
+dependencies = [
+ "calamine",
+ "chrono",
+ "csv",
+ "pythia-db",
+ "rust_xlsxwriter",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pythia-db"
+version = "0.1.0"
+dependencies = [
+ "oracle",
+ "pythia-config",
+ "pythia-plsql",
+ "serde",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "pythia-debugger"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui_kittest",
+ "pythia-db",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "pythia-lsp-core"
+version = "0.1.0"
+dependencies = [
+ "insta",
+ "pythia-plsql",
+]
+
+[[package]]
+name = "pythia-monitor"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "egui_extras",
+ "egui_kittest",
+ "egui_plot",
+ "pythia-config",
+ "pythia-db",
+ "tracing",
+]
+
+[[package]]
+name = "pythia-plsql"
+version = "0.1.0"
+dependencies = [
+ "insta",
+ "logos",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pythia-ui"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "egui_extras",
+ "jiff",
+ "pythia-data",
+ "pythia-db",
+ "pythia-plsql",
+ "regex",
+ "resvg",
+ "ropey",
+ "serde",
+ "serde_json",
+ "tiny-skia",
+]
 
 [[package]]
 name = "quick-error"

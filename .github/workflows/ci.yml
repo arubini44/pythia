@@ -33,5 +33,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       # Database, debugger and screenshot tests skip themselves unless
-      # ORUI_TEST_DB / ORUI_TEST_DB_DBA / ORUI_SCREENSHOT_DIR are set.
+      # PYTHIA_TEST_DB / PYTHIA_TEST_DB_DBA / PYTHIA_SCREENSHOT_DIR are set.
       - run: cargo test --workspace

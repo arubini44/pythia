@@ -1,10 +1,15 @@
 # Changelog
 
-All notable changes to orui are documented here. The format follows
+All notable changes to Pythia are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+### Changed
+- orui is now called Pythia: the program is `pythia`, the crates are
+  `pythia-*` and test variables start with `PYTHIA_`. Settings, saved
+  connections, passwords and the workspace move over on first start.
 
 ### Added
 

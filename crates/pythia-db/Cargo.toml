@@ -1,0 +1,13 @@
+[package]
+name = "pythia-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oracle.workspace = true
+pythia-config.workspace = true
+pythia-plsql.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

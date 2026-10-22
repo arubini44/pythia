@@ -1,0 +1,17 @@
+[package]
+name = "pythia-monitor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+egui_extras.workspace = true
+egui_plot = "0.37"
+pythia-db.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+eframe.workspace = true
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
+pythia-config.workspace = true

@@ -1,0 +1,1538 @@
+//! Object browser: connection → schema → object type → objects → children.
+//!
+//! The tree is flattened into visible rows every frame and drawn with a
+//! virtualized scroll area, so folders with tens of thousands of objects stay
+//! smooth. Folders load lazily when expanded.
+
+use std::collections::{HashMap, HashSet};
+
+use egui::{Color32, RichText, Sense, Ui};
+use pythia_db::{
+    DbEvent, DbObject, DbRequest, Member, MetaQuery, MetaResult, ObjectType, TableColumn,
+};
+
+use pythia_ui::icons::{Icon, IconSize, paint_invalid_badge};
+
+use crate::documents::{Effects, ObjectRef, OpenRequest, Target, request_id};
+use crate::object_editor::{EditTarget, has_editor, has_grants};
+use crate::table_parts::{Part, PartKind, TableParts};
+
+enum Loaded<T> {
+    Loading,
+    Ready(T),
+    Failed(String),
+}
+
+enum Children {
+    Columns(Vec<TableColumn>),
+    Members(Vec<Member>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Node {
+    Folder(String, ObjectType),
+    Object(ObjectRef),
+    /// Indexes, constraints or triggers of a table.
+    Group(ObjectRef, Group),
+    /// Favorites or recently opened objects.
+    Section(Section),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Section {
+    Favorites,
+    Recent,
+}
+
+/// Favorite and recently opened objects per connection; saved with the
+/// workspace.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Marks {
+    pub favorites: std::collections::BTreeMap<String, Vec<ObjectRef>>,
+    pub recent: std::collections::BTreeMap<String, Vec<ObjectRef>>,
+}
+
+impl Marks {
+    const RECENT: usize = 12;
+
+    /// Remembers an object as just opened.
+    pub fn touch(&mut self, connection: &str, object: ObjectRef) {
+        let list = self.recent.entry(connection.to_owned()).or_default();
+        list.retain(|o| *o != object);
+        list.insert(0, object);
+        list.truncate(Self::RECENT);
+    }
+
+    fn toggle_favorite(&mut self, connection: &str, object: ObjectRef) {
+        let list = self.favorites.entry(connection.to_owned()).or_default();
+        if let Some(i) = list.iter().position(|o| *o == object) {
+            list.remove(i);
+        } else {
+            list.push(object);
+            list.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+    }
+
+    fn is_favorite(&self, connection: &str, object: &ObjectRef) -> bool {
+        self.favorites
+            .get(connection)
+            .is_some_and(|l| l.contains(object))
+    }
+}
+
+/// Which objects the folders list besides the name filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Changed {
+    #[default]
+    Any,
+    Day,
+    Week,
+    Month,
+}
+
+impl Changed {
+    fn days(self) -> Option<i64> {
+        match self {
+            Changed::Any => None,
+            Changed::Day => Some(1),
+            Changed::Week => Some(7),
+            Changed::Month => Some(30),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Group {
+    Indexes,
+    Constraints,
+    Triggers,
+    ReferencedBy,
+}
+
+impl Group {
+    fn label(self) -> &'static str {
+        match self {
+            Group::Indexes => "Indexes",
+            Group::Constraints => "Constraints",
+            Group::Triggers => "Triggers",
+            Group::ReferencedBy => "Referenced by",
+        }
+    }
+}
+
+enum Pending {
+    Schemas,
+    Folder(String, ObjectType),
+    Children(ObjectRef),
+    /// Indexes, constraints and triggers of a table.
+    Parts(ObjectRef),
+    Action {
+        object: ObjectRef,
+        verb: &'static str,
+    },
+    /// Columns for a generated statement.
+    Generate {
+        object: ObjectRef,
+        kind: Template,
+    },
+    RecompileSchema(String),
+    /// Parameters of `member` (or the standalone unit) for a test script.
+    Test {
+        object: ObjectRef,
+        member: Option<String>,
+    },
+}
+
+/// One visible line of the tree.
+enum Row<'a> {
+    Folder {
+        owner: &'a str,
+        object_type: ObjectType,
+        count: Option<usize>,
+        open: bool,
+    },
+    Object {
+        object: &'a DbObject,
+        open: bool,
+        expandable: bool,
+    },
+    /// A table column; whether it's part of a foreign key.
+    Column(&'a TableColumn, bool),
+    Group {
+        table: ObjectRef,
+        group: Group,
+        count: usize,
+        open: bool,
+    },
+    Part(&'a Part, ObjectRef),
+    Member(&'a Member, ObjectRef),
+    Section {
+        section: Section,
+        count: usize,
+        open: bool,
+    },
+    /// An object listed under Favorites or Recent.
+    Shortcut(&'a ObjectRef),
+    Message {
+        depth: usize,
+        text: String,
+        error: bool,
+    },
+}
+
+#[derive(Default)]
+pub struct Browser {
+    pub connection: Option<String>,
+    schema: Option<String>,
+    schemas: Option<Loaded<Vec<String>>>,
+    filter: String,
+    invalid_only: bool,
+    changed: Changed,
+    pub marks: Marks,
+    folders: HashMap<(String, ObjectType), Loaded<Vec<DbObject>>>,
+    children: HashMap<ObjectRef, Loaded<Children>>,
+    parts: HashMap<ObjectRef, TableParts>,
+    expanded: HashSet<Node>,
+    pending: HashMap<u64, Pending>,
+    selected: Option<ObjectRef>,
+    confirm_drop: Option<ObjectRef>,
+}
+
+impl Browser {
+    /// Shows a (newly connected) connection, starting in its current schema.
+    pub fn attach(&mut self, connection: String, schema: String) -> Effects {
+        let marks = std::mem::take(&mut self.marks);
+        *self = Self {
+            connection: Some(connection),
+            schema: Some(schema),
+            marks,
+            ..Self::default()
+        };
+        self.load_schemas()
+    }
+
+    pub fn detach(&mut self, connection: &str) {
+        if self.connection.as_deref() == Some(connection) {
+            *self = Self::default();
+        }
+    }
+
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by screenshot tests"))]
+    pub fn is_loading(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Expands the given folders of the current schema.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by screenshot tests"))]
+    pub fn expand(&mut self, types: &[ObjectType]) -> Effects {
+        let mut effects = Effects::default();
+        let owner = self.schema.clone().unwrap_or_default();
+        for t in types {
+            if self.expanded.insert(Node::Folder(owner.clone(), *t)) {
+                self.load_folder(&mut effects, &owner, *t);
+            }
+        }
+        effects
+    }
+
+    /// Opens Favorites and Recent, marks `favorite` and filters invalid objects.
+    #[cfg(test)]
+    pub fn test_marks(&mut self, favorite: ObjectRef) {
+        let connection = self.connection.clone().unwrap_or_default();
+        self.marks.toggle_favorite(&connection, favorite);
+        self.expanded.insert(Node::Section(Section::Favorites));
+        self.expanded.insert(Node::Section(Section::Recent));
+        self.invalid_only = true;
+    }
+
+    #[cfg(test)]
+    pub fn selected(&self) -> Option<&ObjectRef> {
+        self.selected.as_ref()
+    }
+
+    /// Expands a table with all its groups.
+    #[cfg(test)]
+    pub fn expand_table(&mut self, table: ObjectRef) -> Effects {
+        let mut effects = Effects::default();
+        self.load_children(&mut effects, &table);
+        for group in [
+            Group::Indexes,
+            Group::Constraints,
+            Group::Triggers,
+            Group::ReferencedBy,
+        ] {
+            self.expanded.insert(Node::Group(table.clone(), group));
+        }
+        self.expanded.insert(Node::Object(table));
+        effects
+    }
+
+    pub fn owns(&self, id: u64) -> bool {
+        self.pending.contains_key(&id)
+    }
+
+    fn load_schemas(&mut self) -> Effects {
+        let mut effects = Effects::default();
+        self.schemas = Some(Loaded::Loading);
+        self.meta(&mut effects, Pending::Schemas, MetaQuery::Schemas);
+        effects
+    }
+
+    fn meta(&mut self, effects: &mut Effects, pending: Pending, query: MetaQuery) {
+        let id = request_id();
+        self.pending.insert(id, pending);
+        effects.request(Target::Main, DbRequest::Meta { id, query });
+    }
+
+    fn load_folder(&mut self, effects: &mut Effects, owner: &str, object_type: ObjectType) {
+        self.folders
+            .insert((owner.to_owned(), object_type), Loaded::Loading);
+        self.meta(
+            effects,
+            Pending::Folder(owner.to_owned(), object_type),
+            MetaQuery::Objects {
+                owner: owner.to_owned(),
+                object_type,
+                filter: None,
+            },
+        );
+    }
+
+    fn load_children(&mut self, effects: &mut Effects, object: &ObjectRef) {
+        let query = match object.object_type {
+            t if t.has_data() => MetaQuery::Columns {
+                owner: object.owner.clone(),
+                table: object.name.clone(),
+            },
+            ObjectType::Package | ObjectType::Type => MetaQuery::Members {
+                owner: object.owner.clone(),
+                package: object.name.clone(),
+            },
+            _ => return,
+        };
+        self.children.insert(object.clone(), Loaded::Loading);
+        self.meta(effects, Pending::Children(object.clone()), query);
+        if object.object_type == ObjectType::Table {
+            let id = request_id();
+            self.pending.insert(id, Pending::Parts(object.clone()));
+            let (owner, table) = (object.owner.clone(), object.name.clone());
+            let task: pythia_db::TaskFn = Box::new(move |conn: &pythia_db::oracle::Connection| {
+                let parts = crate::table_parts::load(conn, &owner, &table)?;
+                Ok(Box::new(parts) as Box<dyn std::any::Any + Send>)
+            });
+            effects.request(Target::Main, DbRequest::Task { id, task });
+        }
+    }
+
+    /// Reloads expanded folders (after compile/drop or on demand).
+    fn refresh(&mut self, effects: &mut Effects) {
+        self.children.clear();
+        self.parts.clear();
+        let open: Vec<(String, ObjectType)> = self
+            .expanded
+            .iter()
+            .filter_map(|n| match n {
+                Node::Folder(owner, t) => Some((owner.clone(), *t)),
+                Node::Object(_) | Node::Group(..) | Node::Section(_) => None,
+            })
+            .collect();
+        self.folders.clear();
+        for (owner, t) in open {
+            self.load_folder(effects, &owner, t);
+        }
+        let objects: Vec<ObjectRef> = self
+            .expanded
+            .iter()
+            .filter_map(|n| match n {
+                Node::Object(o) => Some(o.clone()),
+                Node::Folder(..) | Node::Group(..) | Node::Section(_) => None,
+            })
+            .collect();
+        for o in objects {
+            self.load_children(effects, &o);
+        }
+    }
+
+    fn open_test(
+        &self,
+        answer: crate::catalog::Answer,
+        object: &ObjectRef,
+        member: Option<&str>,
+        effects: &mut Effects,
+        log: &mut Vec<String>,
+    ) {
+        let crate::catalog::Answer::Members(_, _, members) = answer else {
+            return;
+        };
+        let wanted = member.unwrap_or(&object.name);
+        let Some(found) = members.iter().find(|m| m.name.eq_ignore_ascii_case(wanted)) else {
+            log.push(format!("No parameters found for {wanted}"));
+            return;
+        };
+        let qualified = match member {
+            Some(name) => format!(
+                "{}.{}",
+                object.qualified(),
+                crate::documents::quote_ident(name)
+            ),
+            None => object.qualified(),
+        };
+        let text = crate::test_script::test_block(&qualified.to_lowercase(), found);
+        if let Some(connection) = self.connection.clone() {
+            effects.open.push(OpenRequest::Sql {
+                connection,
+                text,
+                run: false,
+            });
+        }
+    }
+
+    pub fn on_event(&mut self, event: DbEvent, log: &mut Vec<String>) -> Effects {
+        let mut effects = Effects::default();
+        if let DbEvent::TaskDone { id, result } = event {
+            if let Some(Pending::Parts(object)) = self.pending.get(&id) {
+                let object = object.clone();
+                self.pending.remove(&id);
+                // Without the parts the table still shows its columns.
+                if let Ok(Ok(parts)) = result.map(|any| any.downcast::<TableParts>()) {
+                    self.parts.insert(object, *parts);
+                }
+                return effects;
+            }
+            if let Some(Pending::Test { object, member }) = self.pending.remove(&id) {
+                match result.map(|any| any.downcast::<crate::catalog::Answer>()) {
+                    Ok(Ok(answer)) => {
+                        self.open_test(*answer, &object, member.as_deref(), &mut effects, log)
+                    }
+                    Ok(Err(_)) => {}
+                    Err(e) => log.push(format!("Test script: {e}")),
+                }
+            }
+            return effects;
+        }
+        if let DbEvent::Meta { id, result } = &event
+            && let Some(Pending::Generate { object, kind }) = self.pending.get(id)
+        {
+            let (object, kind) = (object.clone(), *kind);
+            self.pending.remove(id);
+            match result {
+                Ok(MetaResult::Columns(cols)) => {
+                    effects.open.push(OpenRequest::InsertText {
+                        text: template(kind, &object, cols),
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => log.push(format!("Generate: {e}")),
+            }
+            return effects;
+        }
+        let (id, result) = match event {
+            DbEvent::Meta { id, result } => (id, result.map(Some)),
+            DbEvent::Executed { id, .. } => (id, Ok(None)),
+            DbEvent::Failed { id, error, .. } => (id, Err(error)),
+            _ => return effects,
+        };
+        let Some(pending) = self.pending.remove(&id) else {
+            return effects;
+        };
+        match (pending, result) {
+            (Pending::Schemas, Ok(Some(MetaResult::Schemas(s)))) => {
+                self.schemas = Some(Loaded::Ready(s))
+            }
+            (Pending::Schemas, Err(e)) => self.schemas = Some(Loaded::Failed(e.to_string())),
+            (Pending::Folder(owner, t), Ok(Some(MetaResult::Objects(objects)))) => {
+                self.folders.insert((owner, t), Loaded::Ready(objects));
+            }
+            (Pending::Folder(owner, t), Err(e)) => {
+                self.folders
+                    .insert((owner, t), Loaded::Failed(e.to_string()));
+            }
+            (Pending::Children(o), Ok(Some(MetaResult::Columns(c)))) => {
+                self.children.insert(o, Loaded::Ready(Children::Columns(c)));
+            }
+            (Pending::Children(o), Ok(Some(MetaResult::Members(m)))) => {
+                self.children.insert(o, Loaded::Ready(Children::Members(m)));
+            }
+            (Pending::Children(o), Err(e)) => {
+                self.children.insert(o, Loaded::Failed(e.to_string()));
+            }
+            (Pending::Action { object, verb }, Ok(_)) => {
+                let ty = object.object_type.dictionary_name().to_lowercase();
+                log.push(format!("{ty} {} {verb}", object.qualified()));
+                self.refresh(&mut effects);
+            }
+            (Pending::RecompileSchema(owner), Ok(_)) => {
+                log.push(format!("Recompiled invalid objects in {owner}"));
+                self.refresh(&mut effects);
+            }
+            (Pending::RecompileSchema(owner), Err(e)) => {
+                log.push(format!("Recompiling {owner} failed: {e}"));
+            }
+            (Pending::Action { object, verb }, Err(e)) => {
+                log.push(format!("{} {} failed: {e}", verb, object.qualified()));
+                self.refresh(&mut effects);
+            }
+            _ => {}
+        }
+        effects
+    }
+
+    fn run(&mut self, effects: &mut Effects, object: &ObjectRef, verb: &'static str, sql: String) {
+        let id = request_id();
+        self.pending.insert(
+            id,
+            Pending::Action {
+                object: object.clone(),
+                verb,
+            },
+        );
+        effects.request(
+            Target::Main,
+            DbRequest::Execute {
+                id,
+                sql,
+                max_rows: 1,
+                binds: Vec::new(),
+            },
+        );
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui, connections: &[String]) -> Effects {
+        let mut effects = Effects::default();
+        let Some(connection) = self.connection.clone() else {
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                ui.weak("Not connected");
+                ui.add_space(4.0);
+                ui.weak("Connect to browse tables, packages and other objects.");
+                ui.add_space(8.0);
+                if pythia_ui::icons::icon_text_button(ui, Icon::Connect, "Connect…").clicked() {
+                    effects.open.push(OpenRequest::ConnectDialog);
+                }
+            });
+            return effects;
+        };
+
+        // Header: connection, schema, refresh, filter.
+        ui.horizontal(|ui| {
+            if connections.len() > 1 {
+                egui::ComboBox::from_id_salt("browser-connection")
+                    .selected_text(&connection)
+                    .show_ui(ui, |ui| {
+                        for c in connections {
+                            if ui.selectable_label(*c == connection, c).clicked()
+                                && *c != connection
+                            {
+                                effects.open.push(OpenRequest::Browse {
+                                    connection: c.clone(),
+                                });
+                            }
+                        }
+                    });
+            }
+            let schema = self.schema.clone().unwrap_or_default();
+            let mut chosen = None;
+            egui::ComboBox::from_id_salt("browser-schema")
+                .selected_text(&schema)
+                .height(400.0)
+                .show_ui(ui, |ui| match &self.schemas {
+                    Some(Loaded::Ready(list)) => {
+                        for s in list {
+                            if ui.selectable_label(*s == schema, s).clicked() {
+                                chosen = Some(s.clone());
+                            }
+                        }
+                    }
+                    Some(Loaded::Failed(e)) => {
+                        ui.colored_label(ui.visuals().error_fg_color, e);
+                    }
+                    _ => {
+                        ui.spinner();
+                    }
+                });
+            if let Some(s) = chosen
+                && Some(&s) != self.schema.as_ref()
+            {
+                self.schema = Some(s);
+                self.expanded.retain(|n| matches!(n, Node::Folder(..)));
+                let folders: Vec<ObjectType> = self
+                    .expanded
+                    .drain()
+                    .filter_map(|n| {
+                        if let Node::Folder(_, t) = n {
+                            Some(t)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let owner = self.schema.clone().unwrap_or_default();
+                for t in folders {
+                    self.expanded.insert(Node::Folder(owner.clone(), t));
+                }
+                self.refresh(&mut effects);
+            }
+            if pythia_ui::icons::icon_button(ui, Icon::Refresh, "Refresh").clicked() {
+                self.refresh(&mut effects);
+            }
+            if pythia_ui::icons::icon_button(
+                ui,
+                Icon::Compile,
+                "Recompile invalid objects in this schema",
+            )
+            .clicked()
+                && let Some(owner) = self.schema.clone()
+            {
+                let id = request_id();
+                let sql = format!(
+                    "begin dbms_utility.compile_schema(schema => '{}', compile_all => false); end;",
+                    owner.replace('\'', "''")
+                );
+                self.pending.insert(id, Pending::RecompileSchema(owner));
+                effects.request(
+                    Target::Main,
+                    DbRequest::Execute {
+                        id,
+                        sql,
+                        max_rows: 1,
+                        binds: Vec::new(),
+                    },
+                );
+            }
+        });
+        ui.horizontal(|ui| {
+            let filtered = self.invalid_only || self.changed != Changed::Any;
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .hint_text(if filtered {
+                        "Filter objects… (more filters on)"
+                    } else {
+                        "Filter objects…"
+                    })
+                    .desired_width(ui.available_width() - 34.0),
+            );
+            let icon = if filtered {
+                Icon::Filter.image(ui).tint(ui.visuals().hyperlink_color)
+            } else {
+                Icon::Filter.image(ui)
+            };
+            ui.menu_image_button(icon, |ui| {
+                ui.checkbox(&mut self.invalid_only, "Invalid objects only");
+                ui.separator();
+                ui.label(RichText::new("Changed").strong());
+                for (value, label) in [
+                    (Changed::Any, "Any time"),
+                    (Changed::Day, "Last 24 hours"),
+                    (Changed::Week, "Last 7 days"),
+                    (Changed::Month, "Last 30 days"),
+                ] {
+                    ui.radio_value(&mut self.changed, value, label);
+                }
+            })
+            .response
+            .on_hover_text("Filter by status and change date");
+        });
+        ui.add_space(2.0);
+
+        let owner = self.schema.clone().unwrap_or_default();
+        let rows = self.rows(&owner);
+        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let mut toggles = Vec::new();
+        let mut actions = Vec::new();
+        egui::ScrollArea::both().auto_shrink(false).show_rows(
+            ui,
+            row_height,
+            rows.len(),
+            |ui, range| {
+                for row in &rows[range] {
+                    self.row_ui(ui, row, row_height, &mut toggles, &mut actions);
+                }
+            },
+        );
+        drop(rows);
+
+        for node in toggles {
+            if !self.expanded.remove(&node) {
+                match &node {
+                    Node::Folder(owner, t) if !self.folders.contains_key(&(owner.clone(), *t)) => {
+                        self.load_folder(&mut effects, &owner.clone(), *t);
+                    }
+                    Node::Object(o) if !self.children.contains_key(o) => {
+                        self.load_children(&mut effects, &o.clone())
+                    }
+                    _ => {}
+                }
+                self.expanded.insert(node);
+            }
+        }
+        for action in actions {
+            self.action(action, &connection, ui.ctx(), &mut effects);
+        }
+        self.drop_confirm_ui(ui.ctx(), &mut effects);
+        effects
+    }
+
+    fn rows<'a>(&'a self, owner: &'a str) -> Vec<Row<'a>> {
+        let filter = self.filter.trim().to_uppercase();
+        let mut rows = Vec::new();
+        let connection = self.connection.as_deref().unwrap_or_default();
+        for (section, list) in [
+            (Section::Favorites, self.marks.favorites.get(connection)),
+            (Section::Recent, self.marks.recent.get(connection)),
+        ] {
+            let Some(list) = list.filter(|l| !l.is_empty()) else {
+                continue;
+            };
+            let matching: Vec<&ObjectRef> = list
+                .iter()
+                .filter(|o| filter.is_empty() || o.name.contains(&filter))
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            let open = self.expanded.contains(&Node::Section(section));
+            rows.push(Row::Section {
+                section,
+                count: matching.len(),
+                open,
+            });
+            if open {
+                rows.extend(matching.into_iter().map(Row::Shortcut));
+            }
+        }
+        // Change date cutoff, compared as text with LAST_DDL_TIME.
+        let cutoff = self.changed.days().map(|d| {
+            (chrono::Local::now() - chrono::Duration::days(d))
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        });
+        let shown = |o: &DbObject| {
+            (filter.is_empty() || o.name.contains(&filter))
+                && (!self.invalid_only || !o.valid)
+                && cutoff.as_deref().is_none_or(|c| o.last_ddl.as_str() >= c)
+        };
+        let filtering = !filter.is_empty() || self.invalid_only || cutoff.is_some();
+        for &object_type in ObjectType::BROWSER {
+            let node = Node::Folder(owner.to_owned(), object_type);
+            let open = self.expanded.contains(&node);
+            let folder = self.folders.get(&(owner.to_owned(), object_type));
+            let matching: Vec<&DbObject> = match folder {
+                Some(Loaded::Ready(objects)) => objects.iter().filter(|o| shown(o)).collect(),
+                _ => Vec::new(),
+            };
+            let count = matches!(folder, Some(Loaded::Ready(_))).then_some(matching.len());
+            if filtering && count == Some(0) {
+                continue;
+            }
+            rows.push(Row::Folder {
+                owner,
+                object_type,
+                count,
+                open,
+            });
+            if !open {
+                continue;
+            }
+            match folder {
+                Some(Loaded::Loading) | None => rows.push(Row::Message {
+                    depth: 1,
+                    text: "Loading…".into(),
+                    error: false,
+                }),
+                Some(Loaded::Failed(e)) => rows.push(Row::Message {
+                    depth: 1,
+                    text: e.clone(),
+                    error: true,
+                }),
+                Some(Loaded::Ready(_)) if matching.is_empty() => rows.push(Row::Message {
+                    depth: 1,
+                    text: "(none)".into(),
+                    error: false,
+                }),
+                Some(Loaded::Ready(_)) => {}
+            }
+            for object in matching {
+                let r = object_ref(object);
+                let expandable = object_type.has_data()
+                    || matches!(object_type, ObjectType::Package | ObjectType::Type);
+                let open = expandable && self.expanded.contains(&Node::Object(r.clone()));
+                rows.push(Row::Object {
+                    object,
+                    open,
+                    expandable,
+                });
+                if !open {
+                    continue;
+                }
+                match self.children.get(&r) {
+                    Some(Loaded::Ready(Children::Columns(cols))) => {
+                        let parts = self.parts.get(&r);
+                        rows.extend(cols.iter().map(|c| {
+                            let fk = parts.is_some_and(|p| p.fk_columns.contains(&c.name));
+                            Row::Column(c, fk)
+                        }));
+                        if let Some(parts) = parts {
+                            for (group, items) in [
+                                (Group::Indexes, &parts.indexes),
+                                (Group::Constraints, &parts.constraints),
+                                (Group::Triggers, &parts.triggers),
+                                (Group::ReferencedBy, &parts.referenced_by),
+                            ] {
+                                if items.is_empty() {
+                                    continue;
+                                }
+                                let open = self.expanded.contains(&Node::Group(r.clone(), group));
+                                rows.push(Row::Group {
+                                    table: r.clone(),
+                                    group,
+                                    count: items.len(),
+                                    open,
+                                });
+                                if open {
+                                    rows.extend(items.iter().map(|p| Row::Part(p, r.clone())));
+                                }
+                            }
+                        }
+                    }
+                    Some(Loaded::Ready(Children::Members(members))) if members.is_empty() => rows
+                        .push(Row::Message {
+                            depth: 2,
+                            text: "(no subprograms)".into(),
+                            error: false,
+                        }),
+                    Some(Loaded::Ready(Children::Members(members))) => {
+                        rows.extend(members.iter().map(|m| Row::Member(m, r.clone())))
+                    }
+                    Some(Loaded::Failed(e)) => rows.push(Row::Message {
+                        depth: 2,
+                        text: e.clone(),
+                        error: true,
+                    }),
+                    _ => rows.push(Row::Message {
+                        depth: 2,
+                        text: "Loading…".into(),
+                        error: false,
+                    }),
+                }
+            }
+        }
+        rows
+    }
+
+    fn row_ui(
+        &self,
+        ui: &mut Ui,
+        row: &Row,
+        height: f32,
+        toggles: &mut Vec<Node>,
+        actions: &mut Vec<Action>,
+    ) {
+        const INDENT: f32 = 18.0;
+        let small = IconSize::Small;
+        // Chevron toggle, or the same space when there's nothing to expand.
+        let chevron = |ui: &mut Ui, open: bool, expandable: bool| -> bool {
+            if !expandable {
+                ui.add_space(small.points());
+                return false;
+            }
+            let icon = if open {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            };
+            let color = ui.visuals().weak_text_color();
+            ui.add(
+                icon.mono(color)
+                    .fit_to_exact_size(egui::vec2(small.points(), small.points()))
+                    .sense(Sense::click()),
+            )
+            .clicked()
+        };
+        ui.horizontal(|ui| {
+            ui.set_height(height);
+            ui.spacing_mut().item_spacing.x = 5.0;
+            match row {
+                Row::Folder {
+                    owner,
+                    object_type,
+                    count,
+                    open,
+                } => {
+                    let toggle = chevron(ui, *open, true);
+                    let folder = if *open {
+                        Icon::FolderOpen
+                    } else {
+                        Icon::Folder
+                    };
+                    ui.add(folder.sized(ui, small));
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(object_type.plural()).strong())
+                            .sense(Sense::click()),
+                    );
+                    if let Some(n) = count {
+                        ui.weak(n.to_string());
+                    }
+                    if toggle || label.clicked() {
+                        toggles.push(Node::Folder((*owner).to_owned(), *object_type));
+                    }
+                    if has_editor(*object_type) {
+                        label.context_menu(|ui| {
+                            let kind = object_type.dictionary_name().to_lowercase();
+                            if ui.button(format!("New {kind}…")).clicked() {
+                                actions.push(Action::New((*owner).to_owned(), *object_type));
+                                ui.close();
+                            }
+                        });
+                    }
+                }
+                Row::Object {
+                    object,
+                    open,
+                    expandable,
+                } => {
+                    ui.add_space(INDENT);
+                    let r = object_ref(object);
+                    if chevron(ui, *open, *expandable) {
+                        toggles.push(Node::Object(r.clone()));
+                    }
+                    let icon = Icon::for_object_type(object.object_type.dictionary_name())
+                        .unwrap_or(Icon::Text);
+                    let icon_response = ui.add(icon.sized(ui, small));
+                    if !object.valid {
+                        paint_invalid_badge(ui, icon_response.rect);
+                    }
+                    let mut text = RichText::new(object.name.to_lowercase()).monospace();
+                    if !object.valid {
+                        text = text.color(ui.visuals().error_fg_color);
+                    }
+                    let selected = self.selected.as_ref() == Some(&r);
+                    let response = self.drag_source(ui, &r, |ui| {
+                        ui.add(
+                            egui::Button::selectable(selected, text)
+                                .frame_when_inactive(false)
+                                .sense(Sense::click_and_drag()),
+                        )
+                    });
+                    let response = response.on_hover_ui(|ui| {
+                        ui.label(RichText::new(r.qualified()).strong());
+                        ui.label(object.object_type.dictionary_name().to_lowercase());
+                        if !object.valid {
+                            ui.colored_label(ui.visuals().error_fg_color, "Invalid");
+                        }
+                        ui.weak(format!("Last DDL: {}", object.last_ddl));
+                    });
+                    if response.clicked() {
+                        actions.push(Action::Select(r.clone()));
+                    }
+                    if response.double_clicked() {
+                        actions.push(Action::Default(r.clone()));
+                    }
+                    response.context_menu(|ui| self.context_menu(ui, &r, actions));
+                }
+                Row::Column(c, fk) => {
+                    ui.add_space(INDENT * 2.0 + small.points());
+                    let icon = if c.pk_position.is_some() {
+                        Icon::PrimaryKey
+                    } else if *fk {
+                        Icon::ForeignKey
+                    } else {
+                        Icon::Column
+                    };
+                    ui.add(icon.sized(ui, small));
+                    let name = c.name.to_lowercase();
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(&name).monospace())
+                            .sense(Sense::drag())
+                            .selectable(false),
+                    );
+                    drag_text(ui, &label, name);
+                    let null = if c.nullable { "" } else { " not null" };
+                    let label = ui.weak(format!("{}{null}", c.data_type.to_lowercase()));
+                    if let Some(comment) = &c.comment {
+                        label.on_hover_text(comment);
+                    }
+                }
+                Row::Group {
+                    table,
+                    group,
+                    count,
+                    open,
+                } => {
+                    ui.add_space(INDENT * 2.0);
+                    if chevron(ui, *open, true) {
+                        toggles.push(Node::Group(table.clone(), *group));
+                    }
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(group.label()).strong())
+                            .sense(Sense::click()),
+                    );
+                    if label.clicked() {
+                        toggles.push(Node::Group(table.clone(), *group));
+                    }
+                    ui.weak(count.to_string());
+                }
+                Row::Part(part, table) => {
+                    ui.add_space(INDENT * 3.0 + small.points());
+                    let icon = match part.kind {
+                        PartKind::Index { .. } => Icon::Index,
+                        PartKind::Constraint { kind: 'P' } => Icon::PrimaryKey,
+                        PartKind::Constraint { kind: 'R' } => Icon::ForeignKey,
+                        PartKind::Constraint { .. } => Icon::Constraint,
+                        PartKind::Trigger => Icon::Trigger,
+                    };
+                    ui.add(icon.sized(ui, small));
+                    let mut text = RichText::new(part.name.to_lowercase()).monospace();
+                    if !part.enabled {
+                        text = text.strikethrough().color(ui.visuals().weak_text_color());
+                    }
+                    let label = ui.add(egui::Label::new(text).sense(Sense::click()));
+                    let tag = match part.kind {
+                        PartKind::Index { unique: true } => "unique ",
+                        PartKind::Constraint { kind: 'U' } => "unique ",
+                        PartKind::Constraint { kind: 'C' } => "check ",
+                        _ => "",
+                    };
+                    ui.weak(format!("{tag}{}", part.detail));
+                    let state = if part.enabled { "" } else { " (disabled)" };
+                    let label = label.on_hover_text(format!(
+                        "{}{state}\n{tag}{}",
+                        part.name.to_lowercase(),
+                        part.detail
+                    ));
+                    let trigger = ObjectRef {
+                        owner: table.owner.clone(),
+                        name: part.name.clone(),
+                        object_type: ObjectType::Trigger,
+                    };
+                    if part.kind == PartKind::Trigger && label.double_clicked() {
+                        actions.push(Action::Edit(trigger.clone()));
+                    }
+                    label.context_menu(|ui| {
+                        if part.kind == PartKind::Trigger && ui.button("Edit trigger").clicked() {
+                            actions.push(Action::Edit(trigger.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Copy name").clicked() {
+                            ui.ctx().copy_text(part.name.to_lowercase());
+                            ui.close();
+                        }
+                    });
+                }
+                Row::Member(m, package) => {
+                    ui.add_space(INDENT * 2.0 + small.points());
+                    let icon = if m.is_function {
+                        Icon::Function
+                    } else {
+                        Icon::Procedure
+                    };
+                    ui.add(icon.sized(ui, small));
+                    let label = ui.add(
+                        egui::Label::new(RichText::new(m.name.to_lowercase()).monospace())
+                            .sense(Sense::click()),
+                    );
+                    ui.weak(&m.signature);
+                    label.context_menu(|ui| {
+                        if ui.button("Test…").clicked() {
+                            actions.push(Action::Test(package.clone(), Some(m.name.clone())));
+                            ui.close();
+                        }
+                        if ui.button("Edit package body").clicked() {
+                            let body = ObjectRef {
+                                object_type: ObjectType::PackageBody,
+                                ..package.clone()
+                            };
+                            actions.push(Action::Edit(body));
+                            ui.close();
+                        }
+                    });
+                }
+                Row::Section {
+                    section,
+                    count,
+                    open,
+                } => {
+                    if chevron(ui, *open, true) {
+                        toggles.push(Node::Section(*section));
+                    }
+                    let (icon, label) = match section {
+                        Section::Favorites => (Icon::Star, "Favorites"),
+                        Section::Recent => (Icon::History, "Recent"),
+                    };
+                    ui.add(icon.sized(ui, small));
+                    let r = ui
+                        .add(egui::Label::new(RichText::new(label).strong()).sense(Sense::click()));
+                    if r.clicked() {
+                        toggles.push(Node::Section(*section));
+                    }
+                    ui.weak(count.to_string());
+                }
+                Row::Shortcut(object) => {
+                    ui.add_space(INDENT);
+                    ui.add_space(small.points());
+                    let icon = Icon::for_object_type(object.object_type.dictionary_name())
+                        .unwrap_or(Icon::Text);
+                    ui.add(icon.sized(ui, small));
+                    let selected = self.selected.as_ref() == Some(*object);
+                    let mut text = RichText::new(object.name.to_lowercase()).monospace();
+                    if Some(object.owner.as_str()) != self.schema.as_deref() {
+                        text = RichText::new(format!(
+                            "{}.{}",
+                            object.owner.to_lowercase(),
+                            object.name.to_lowercase()
+                        ))
+                        .monospace();
+                    }
+                    let response = self.drag_source(ui, object, |ui| {
+                        ui.add(
+                            egui::Button::selectable(selected, text)
+                                .frame_when_inactive(false)
+                                .sense(Sense::click_and_drag()),
+                        )
+                    });
+                    let response = response.on_hover_text(format!(
+                        "{} {}",
+                        object.object_type.dictionary_name().to_lowercase(),
+                        object.qualified()
+                    ));
+                    if response.clicked() {
+                        actions.push(Action::Select((*object).clone()));
+                    }
+                    if response.double_clicked() {
+                        actions.push(Action::Default((*object).clone()));
+                    }
+                    response.context_menu(|ui| self.context_menu(ui, object, actions));
+                }
+                Row::Message { depth, text, error } => {
+                    ui.add_space(INDENT * *depth as f32 + small.points());
+                    if *error {
+                        ui.colored_label(ui.visuals().error_fg_color, text);
+                    } else {
+                        ui.weak(text);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Lets an object's row be dragged into an editor, which inserts its
+    /// name (qualified when it's in another schema). `add` must sense drags.
+    fn drag_source(
+        &self,
+        ui: &mut Ui,
+        object: &ObjectRef,
+        add: impl FnOnce(&mut Ui) -> egui::Response,
+    ) -> egui::Response {
+        let name = if Some(object.owner.as_str()) == self.schema.as_deref() {
+            crate::documents::quote_ident(&object.name).to_lowercase()
+        } else {
+            object.qualified().to_lowercase()
+        };
+        let response = add(ui);
+        drag_text(ui, &response, name);
+        response
+    }
+
+    fn context_menu(&self, ui: &mut Ui, object: &ObjectRef, actions: &mut Vec<Action>) {
+        let t = object.object_type;
+        let mut item = |ui: &mut Ui, label: &str, action: Action| {
+            if ui.button(label).clicked() {
+                actions.push(action);
+                ui.close();
+            }
+        };
+        if t.has_data() {
+            item(ui, "Query data", Action::Query(object.clone()));
+        }
+        if t.has_source() {
+            item(ui, "Edit", Action::Edit(object.clone()));
+        }
+        if matches!(t, ObjectType::Procedure | ObjectType::Function) {
+            item(ui, "Test…", Action::Test(object.clone(), None));
+        }
+        item(ui, "Describe", Action::Describe(object.clone()));
+        if t == ObjectType::Table {
+            item(ui, "Edit table…", Action::EditTable(object.clone()));
+        }
+        if has_editor(t) {
+            item(ui, "Edit…", Action::EditObject(object.clone()));
+        }
+        if has_grants(t) {
+            item(ui, "Grants…", Action::Grants(object.clone()));
+        }
+        let mut generate = None;
+        if t.has_data() {
+            ui.menu_button("Generate", |ui| {
+                for kind in [
+                    Template::Select,
+                    Template::Insert,
+                    Template::Update,
+                    Template::ColumnList,
+                ] {
+                    if ui.button(kind.label()).clicked() {
+                        generate = Some(Action::Generate(object.clone(), kind));
+                        ui.close();
+                    }
+                }
+            });
+        }
+        ui.separator();
+        if t.has_source() || matches!(t, ObjectType::View | ObjectType::MaterializedView) {
+            item(ui, "Compile", Action::Compile(object.clone()));
+        }
+        let connection = self.connection.as_deref().unwrap_or_default();
+        let favorite = if self.marks.is_favorite(connection, object) {
+            "Remove from favorites"
+        } else {
+            "Add to favorites"
+        };
+        item(ui, favorite, Action::ToggleFavorite(object.clone()));
+        item(ui, "Copy name", Action::CopyName(object.clone()));
+        item(
+            ui,
+            "Copy qualified name",
+            Action::CopyQualified(object.clone()),
+        );
+        ui.separator();
+        item(ui, "Drop…", Action::Drop(object.clone()));
+        actions.extend(generate);
+    }
+
+    fn action(
+        &mut self,
+        action: Action,
+        connection: &str,
+        ctx: &egui::Context,
+        effects: &mut Effects,
+    ) {
+        let connection = connection.to_owned();
+        match action {
+            Action::Select(o) => self.selected = Some(o),
+            Action::Default(o) if o.object_type.has_source() => {
+                effects.open.push(OpenRequest::Program {
+                    connection,
+                    object: o,
+                });
+            }
+            Action::Default(o) | Action::Describe(o) => effects.open.push(OpenRequest::Object {
+                connection,
+                object: o,
+            }),
+            Action::Query(o) => effects.open.push(OpenRequest::Sql {
+                connection,
+                text: format!("select * from {}", o.qualified()),
+                run: true,
+            }),
+            Action::Edit(o) => effects.open.push(OpenRequest::Program {
+                connection,
+                object: o,
+            }),
+            Action::Compile(o) => {
+                let sql = match o.object_type {
+                    ObjectType::PackageBody => {
+                        format!("alter package {} compile body", o.qualified())
+                    }
+                    ObjectType::TypeBody => format!("alter type {} compile body", o.qualified()),
+                    ObjectType::JavaSource => {
+                        format!("alter java source {} compile", o.qualified())
+                    }
+                    t => format!(
+                        "alter {} {} compile",
+                        t.dictionary_name().to_lowercase(),
+                        o.qualified()
+                    ),
+                };
+                self.run(effects, &o, "compiled", sql);
+            }
+            Action::CopyName(o) => ctx.copy_text(o.name.clone()),
+            Action::CopyQualified(o) => ctx.copy_text(o.qualified()),
+            Action::Drop(o) => self.confirm_drop = Some(o),
+            Action::ToggleFavorite(o) => {
+                let opening = !self.marks.is_favorite(&connection, &o);
+                self.marks.toggle_favorite(&connection, o);
+                if opening {
+                    self.expanded.insert(Node::Section(Section::Favorites));
+                }
+            }
+            Action::EditTable(object) => effects
+                .open
+                .push(OpenRequest::EditTable { connection, object }),
+            Action::New(owner, object_type) => effects.open.push(OpenRequest::EditObject {
+                connection,
+                target: EditTarget::New { owner, object_type },
+            }),
+            Action::EditObject(object) => effects.open.push(OpenRequest::EditObject {
+                connection,
+                target: EditTarget::Edit(object),
+            }),
+            Action::Grants(object) => effects.open.push(OpenRequest::EditObject {
+                connection,
+                target: EditTarget::Grants(object),
+            }),
+            Action::Generate(object, kind) => {
+                let id = request_id();
+                let query = MetaQuery::Columns {
+                    owner: object.owner.clone(),
+                    table: object.name.clone(),
+                };
+                self.pending.insert(id, Pending::Generate { object, kind });
+                effects.request(Target::Main, DbRequest::Meta { id, query });
+            }
+            Action::Test(object, member) => {
+                let id = request_id();
+                let request = pythia_lsp_core::CatalogRequest::Members {
+                    owner: object.owner.clone(),
+                    name: object.name.clone(),
+                };
+                self.pending.insert(id, Pending::Test { object, member });
+                effects.request(
+                    Target::Main,
+                    DbRequest::Task {
+                        id,
+                        task: crate::catalog::task(request),
+                    },
+                );
+            }
+        }
+    }
+
+    fn drop_confirm_ui(&mut self, ctx: &egui::Context, effects: &mut Effects) {
+        let Some(object) = self.confirm_drop.clone() else {
+            return;
+        };
+        let mut decision = None;
+        let modal = egui::Modal::new(egui::Id::new("drop-object")).show(ctx, |ui| {
+            ui.set_max_width(380.0);
+            ui.heading("Drop object");
+            ui.add_space(6.0);
+            ui.label(format!(
+                "Drop {} {}? This cannot be undone.",
+                object.object_type.dictionary_name().to_lowercase(),
+                object.qualified()
+            ));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let drop = egui::Button::new(RichText::new("Drop").color(Color32::WHITE))
+                    .fill(Color32::from_rgb(0xc0, 0x30, 0x30));
+                if ui.add(drop).clicked() {
+                    decision = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    decision = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && decision.is_none() {
+            decision = Some(false);
+        }
+        if let Some(yes) = decision {
+            self.confirm_drop = None;
+            if yes {
+                let sql = format!(
+                    "drop {} {}",
+                    object.object_type.dictionary_name().to_lowercase(),
+                    object.qualified()
+                );
+                self.run(effects, &object, "dropped", sql);
+            }
+        }
+    }
+}
+
+enum Action {
+    Select(ObjectRef),
+    Default(ObjectRef),
+    Query(ObjectRef),
+    Edit(ObjectRef),
+    Describe(ObjectRef),
+    Compile(ObjectRef),
+    CopyName(ObjectRef),
+    CopyQualified(ObjectRef),
+    Drop(ObjectRef),
+    Test(ObjectRef, Option<String>),
+    Generate(ObjectRef, Template),
+    EditTable(ObjectRef),
+    /// Form editor for a new object of this type in this schema.
+    New(String, ObjectType),
+    EditObject(ObjectRef),
+    Grants(ObjectRef),
+    ToggleFavorite(ObjectRef),
+}
+
+/// Statements generated from a table's columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Template {
+    Select,
+    Insert,
+    Update,
+    ColumnList,
+}
+
+impl Template {
+    fn label(self) -> &'static str {
+        match self {
+            Template::Select => "SELECT statement",
+            Template::Insert => "INSERT statement",
+            Template::Update => "UPDATE statement",
+            Template::ColumnList => "Column list",
+        }
+    }
+}
+
+/// Builds the statement for `kind` with binds named after the columns.
+fn template(kind: Template, object: &ObjectRef, cols: &[TableColumn]) -> String {
+    let name = |c: &TableColumn| crate::documents::quote_ident(&c.name).to_lowercase();
+    let table = object.qualified().to_lowercase();
+    let names: Vec<String> = cols.iter().map(name).collect();
+    match kind {
+        Template::ColumnList => names.join(", "),
+        Template::Select => {
+            let alias = object
+                .name
+                .chars()
+                .next()
+                .unwrap_or('t')
+                .to_ascii_lowercase();
+            let list: Vec<String> = names.iter().map(|n| format!("{alias}.{n}")).collect();
+            format!("select {}\n  from {table} {alias}", list.join(",\n       "))
+        }
+        Template::Insert => {
+            let binds: Vec<String> = cols
+                .iter()
+                .map(|c| format!(":{}", c.name.to_lowercase()))
+                .collect();
+            format!(
+                "insert into {table}\n  ({})\nvalues\n  ({})",
+                names.join(", "),
+                binds.join(", ")
+            )
+        }
+        Template::Update => {
+            let mut keys: Vec<&TableColumn> =
+                cols.iter().filter(|c| c.pk_position.is_some()).collect();
+            keys.sort_by_key(|c| c.pk_position);
+            let sets: Vec<String> = cols
+                .iter()
+                .filter(|c| c.pk_position.is_none())
+                .map(|c| format!("{} = :{}", name(c), c.name.to_lowercase()))
+                .collect();
+            let wheres: Vec<String> = if keys.is_empty() {
+                vec!["1 = 0 -- TODO: no primary key".into()]
+            } else {
+                keys.iter()
+                    .map(|c| format!("{} = :{}", name(c), c.name.to_lowercase()))
+                    .collect()
+            };
+            format!(
+                "update {table}\n   set {}\n where {}",
+                sets.join(",\n       "),
+                wheres.join("\n   and ")
+            )
+        }
+    }
+}
+
+fn object_ref(o: &DbObject) -> ObjectRef {
+    ObjectRef {
+        owner: o.owner.clone(),
+        name: o.name.clone(),
+        object_type: o.object_type,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col(name: &str, pk: Option<u32>) -> TableColumn {
+        TableColumn {
+            name: name.into(),
+            data_type: "NUMBER".into(),
+            nullable: pk.is_none(),
+            default: None,
+            comment: None,
+            pk_position: pk,
+        }
+    }
+
+    #[test]
+    fn templates() {
+        let object = ObjectRef {
+            owner: "HR".into(),
+            name: "EMP".into(),
+            object_type: ObjectType::Table,
+        };
+        let cols = [col("ID", Some(1)), col("NAME", None), col("SAL", None)];
+        assert_eq!(
+            template(Template::ColumnList, &object, &cols),
+            "id, name, sal"
+        );
+        assert_eq!(
+            template(Template::Select, &object, &cols),
+            "select e.id,\n       e.name,\n       e.sal\n  from hr.emp e"
+        );
+        assert_eq!(
+            template(Template::Insert, &object, &cols),
+            "insert into hr.emp\n  (id, name, sal)\nvalues\n  (:id, :name, :sal)"
+        );
+        assert_eq!(
+            template(Template::Update, &object, &cols),
+            "update hr.emp\n   set name = :name,\n       sal = :sal\n where id = :id"
+        );
+    }
+}
+
+/// Starts dragging `text` (for editors to insert) when `response` is
+/// dragged, with the text following the pointer.
+fn drag_text(ui: &Ui, response: &egui::Response, text: String) {
+    if response.drag_started() {
+        egui::DragAndDrop::set_payload(ui.ctx(), crate::editor::DroppedText(text.clone()));
+    }
+    if response.dragged()
+        && let Some(pos) = ui.ctx().pointer_interact_pos()
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        egui::Area::new(response.id.with("drag"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(pos + egui::vec2(12.0, 4.0))
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(RichText::new(text).monospace());
+                });
+            });
+    }
+}
+
+#[cfg(test)]
+mod marks_tests {
+    use super::*;
+
+    fn object(name: &str) -> ObjectRef {
+        ObjectRef {
+            owner: "HR".into(),
+            name: name.into(),
+            object_type: ObjectType::Table,
+        }
+    }
+
+    #[test]
+    fn recent_and_favorites() {
+        let mut marks = Marks::default();
+        for i in 0..20 {
+            marks.touch("db", object(&format!("T{i}")));
+        }
+        marks.touch("db", object("T5"));
+        let recent = &marks.recent["db"];
+        assert_eq!(recent.len(), Marks::RECENT);
+        assert_eq!(recent[0].name, "T5");
+        assert_eq!(recent.iter().filter(|o| o.name == "T5").count(), 1);
+
+        marks.toggle_favorite("db", object("B"));
+        marks.toggle_favorite("db", object("A"));
+        assert!(marks.is_favorite("db", &object("A")));
+        assert!(!marks.is_favorite("other", &object("A")));
+        assert_eq!(marks.favorites["db"][0].name, "A");
+        marks.toggle_favorite("db", object("A"));
+        assert!(!marks.is_favorite("db", &object("A")));
+    }
+}

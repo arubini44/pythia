@@ -1,4 +1,4 @@
-# Releasing orui
+# Releasing Pythia
 
 ## Cutting a release
 
@@ -6,7 +6,7 @@
    `cargo check` so `Cargo.lock` follows.
 2. Move the `[Unreleased]` entries in `CHANGELOG.md` under a new version
    heading with today's date and update the compare links at the bottom.
-3. Update `<releases>` in `assets/linux/com.ortic.orui.metainfo.xml`.
+3. Update `<releases>` in `assets/linux/com.ortic.pythia.metainfo.xml`.
 4. Commit, then tag and push:
 
    ```sh
@@ -28,14 +28,14 @@ workflow*); without a tag it only uploads the packages as workflow artifacts.
 |---|---|---|
 | Linux | `.deb`, `.AppImage`, `.tar.gz` | `.deb` depends on `libaio1t64 \| libaio1` for the Instant Client |
 | Windows | `.msi` (WiX), `-setup.exe` (NSIS), `.zip` | per-machine install |
-| macOS | `.dmg` (containing `orui.app`), `.tar.gz` | minimum macOS 11 |
+| macOS | `.dmg` (containing `Pythia.app`), `.tar.gz` | minimum macOS 11 |
 
-Build locally with `cargo packager --release -p orui-app [-f deb]`; output
+Build locally with `cargo packager --release -p pythia-app [-f deb]`; output
 goes to `target/packages`.
 
 The Oracle Instant Client is **not** bundled: its license doesn't allow
 redistribution in third-party installers. The README explains how to
-install it, and orui shows the download link when the client is missing.
+install it, and Pythia shows the download link when the client is missing.
 
 ## Signing and notarization
 
@@ -56,7 +56,7 @@ passes them to cargo-packager:
 **Windows** (Authenticode): import the certificate into the runner's store
 in a step before packaging and set `certificateThumbprint`, `digestAlgorithm`
 (`sha256`) and `timestampUrl` under `[package.metadata.packager.windows]` in
-`crates/orui-app/Cargo.toml`, or use `signCommand` with a cloud signing
+`crates/pythia-app/Cargo.toml`, or use `signCommand` with a cloud signing
 service (e.g. Azure Trusted Signing).
 
 **Linux**: packages are unsigned; `SHA256SUMS.txt` lets users verify

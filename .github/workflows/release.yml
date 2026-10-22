@@ -66,7 +66,7 @@ jobs:
       - name: Build packages
         shell: bash
         run: |
-          cargo packager --release -p orui-app \
+          cargo packager --release -p pythia-app \
             --target ${{ matrix.target }} \
             --formats ${{ matrix.formats }} \
             --out-dir dist
@@ -82,20 +82,20 @@ jobs:
       - name: Plain binary archive
         shell: bash
         run: |
-          bin=orui
-          [ "${{ runner.os }}" = "Windows" ] && bin=orui.exe
+          bin=pythia
+          [ "${{ runner.os }}" = "Windows" ] && bin=pythia.exe
           mkdir -p dist/archive
           cp "target/${{ matrix.target }}/release/$bin" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE dist/archive/
           cd dist/archive
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "../orui-${{ github.ref_name }}-${{ matrix.name }}.zip" .
+            7z a "../pythia-${{ github.ref_name }}-${{ matrix.name }}.zip" .
           else
-            tar czf "../orui-${{ github.ref_name }}-${{ matrix.name }}.tar.gz" .
+            tar czf "../pythia-${{ github.ref_name }}-${{ matrix.name }}.tar.gz" .
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: orui-${{ matrix.name }}
+          name: pythia-${{ matrix.name }}
           path: |
             dist/*.deb
             dist/*.AppImage

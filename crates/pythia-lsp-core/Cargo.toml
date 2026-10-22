@@ -1,0 +1,11 @@
+[package]
+name = "pythia-lsp-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pythia-plsql.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

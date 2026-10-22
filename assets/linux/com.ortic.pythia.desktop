@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Pythia
+GenericName=Oracle PL/SQL IDE
+Comment=Fast, native IDE for Oracle SQL and PL/SQL
+Exec={{exec}} %F
+Icon={{icon}}
+Terminal=false
+Categories=Development;IDE;Database;
+Keywords=oracle;sql;plsql;database;ide;
+MimeType=application/sql;text/x-sql;text/x-plsql;
+StartupWMClass=pythia

@@ -1,0 +1,80 @@
+---
+source: crates/pythia-plsql/src/parser/tests.rs
+expression: dump(SCRIPT)
+---
+S0 Root
+  S1 Block
+    S2 Loop
+      LoopIndex R query=Q15
+  S3 Block
+Q0 Select in S0
+  cte DEPT_TOTALS (DEPT_ID,TOTAL) = Some(1)
+  cte TOP_DEPTS () = Some(2)
+  from DEPARTMENTS D
+  from DEPT_TOTALS T
+  from LOCATIONS L
+  items DEPARTMENT_NAME, TOTAL, CNT
+  clauses With Select From Where OrderBy
+Q1 Select in S0 parent=Q0
+  from EMPLOYEES
+  items DEPARTMENT_ID, ?
+  clauses Select From GroupBy
+Q2 Select in S0 parent=Q0
+  from DEPT_TOTALS
+  items DEPT_ID
+  clauses Select From Where
+Q3 Select in S0 parent=Q0
+  from EMPLOYEES X
+  items ?
+  clauses Select From Where
+Q4 Select in S0 parent=Q0
+  from TOP_DEPTS
+  items DEPT_ID
+  clauses Select From
+Q5 Select in S0 next=Q7
+  from (Q6) V
+  from HR.EMPLOYEES E
+  items V.*, FIRST_NAME
+  clauses Select From Where
+Q6 Select in S0 parent=Q5
+  from EMPLOYEES
+  items EMPLOYEE_ID, ANNUAL
+  clauses Select From Where
+Q7 Select in S0
+  from DUAL
+  items ?, ?, ?
+  clauses Select From
+Q8 Insert in S0
+  from SALARY_LOG
+  clauses Into Into InsertColumns
+Q9 Select in S0 parent=Q8
+  from EMPLOYEES
+  items EMPLOYEE_ID, SALARY, ?
+  clauses Select From Where
+Q10 Update in S0
+  from EMPLOYEES E
+  clauses Target Set Where
+Q11 Select in S0 parent=Q10
+  from DEPARTMENTS D
+  items ?
+  clauses Select From Where
+Q12 Delete in S0
+  from SALARY_LOG L
+  clauses Target Target Where
+Q13 Select in S0
+  from EMPLOYEES E
+  from DEPARTMENTS D
+  items EMPLOYEE_ID, FULL_NAME, DEPARTMENT_NAME
+  clauses Select From Where
+Q14 Select in S0
+  from EMPLOYEES
+  items *
+  clauses Select From Where
+Q15 Select in S2
+  from EMP_V
+  items *
+  clauses Select From
+Q16 Select in S0
+  from Weird Table W
+  items QUOTED, Mixed Case
+  clauses Select From

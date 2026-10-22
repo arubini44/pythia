@@ -1,0 +1,105 @@
+[package]
+name = "pythia-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fast, native IDE for Oracle SQL and PL/SQL"
+authors = ["Remo Laubacher"]
+homepage = "https://github.com/ortic/orui"
+repository = "https://github.com/ortic/orui"
+
+[[bin]]
+name = "pythia"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+csv = "1"
+regex.workspace = true
+anyhow.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_dock.workspace = true
+egui_extras.workspace = true
+egui_plot = "0.37"
+keyring.workspace = true
+rfd = "0.17"
+pythia-compare.workspace = true
+pythia-config.workspace = true
+pythia-data.workspace = true
+pythia-db.workspace = true
+pythia-debugger.workspace = true
+pythia-lsp-core.workspace = true
+pythia-monitor.workspace = true
+pythia-plsql.workspace = true
+pythia-ui.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+serde_json = "1"
+egui_kittest = { version = "0.36", features = ["eframe", "wgpu", "snapshot"] }
+
+# Installers and packages: `cargo packager --release -p pythia-app` (see README).
+[package.metadata.packager]
+productName = "Pythia"
+identifier = "com.ortic.pythia"
+publisher = "Remo Laubacher"
+copyright = "Copyright © 2026 Remo Laubacher"
+category = "DeveloperTool"
+description = "Fast, native IDE for Oracle SQL and PL/SQL"
+longDescription = """
+Pythia covers the daily work of an Oracle developer: writing and running SQL,
+editing and compiling PL/SQL, debugging, browsing objects, editing data,
+comparing schemas and monitoring sessions. Requires the Oracle Instant Client,
+which is installed separately."""
+homepage = "https://github.com/ortic/orui"
+licenseFile = "../../LICENSE-MIT"
+beforePackagingCommand = "cargo build --release -p pythia-app"
+outDir = "../../target/packages"
+binariesDir = "../../target/release"
+icons = ["../../assets/icon/pythia-32.png", "../../assets/icon/pythia-128.png", "../../assets/icon/pythia-256.png", "../../assets/icon/pythia-512.png", "../../assets/icon/pythia.ico", "../../assets/icon/pythia.icns"]
+resources = ["../../README.md", "../../CHANGELOG.md", "../../LICENSE-MIT", "../../LICENSE-APACHE"]
+
+[[package.metadata.packager.binaries]]
+path = "pythia"
+main = true
+
+[[package.metadata.packager.fileAssociations]]
+extensions = ["sql"]
+mimeType = "application/sql"
+description = "SQL script"
+name = "SQL script"
+role = "editor"
+
+[[package.metadata.packager.fileAssociations]]
+extensions = ["pks", "pkb", "prc", "fnc", "tps", "tpb", "trg", "pls", "plb"]
+mimeType = "text/x-plsql"
+description = "PL/SQL source"
+name = "PL/SQL source"
+role = "editor"
+
+[package.metadata.packager.deb]
+desktopTemplate = "../../assets/linux/com.ortic.pythia.desktop"
+section = "devel"
+# The Oracle Instant Client needs libaio at runtime (not bundled).
+depends = ["libaio1t64 | libaio1"]
+
+[package.metadata.packager.deb.files]
+"../../assets/linux/com.ortic.pythia.metainfo.xml" = "usr/share/metainfo/com.ortic.pythia.metainfo.xml"
+"../../assets/icon/pythia.svg" = "usr/share/icons/hicolor/scalable/apps/pythia.svg"
+
+[package.metadata.packager.appimage.files]
+"../../assets/linux/com.ortic.pythia.metainfo.xml" = "usr/share/metainfo/com.ortic.pythia.metainfo.xml"
+
+[package.metadata.packager.macos]
+minimumSystemVersion = "11.0"
+
+[package.metadata.packager.nsis]
+installerIcon = "../../assets/icon/pythia.ico"
+installMode = "perMachine"
+
+[package.metadata.packager.wix]
+languages = ["en-US"]

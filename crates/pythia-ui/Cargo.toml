@@ -1,0 +1,22 @@
+[package]
+name = "pythia-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+egui_extras = { workspace = true, features = ["svg", "datepicker", "serde"] }
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
+pythia-data.workspace = true
+pythia-db.workspace = true
+pythia-plsql.workspace = true
+regex.workspace = true
+ropey.workspace = true
+serde.workspace = true
+serde_json = "1"
+
+[dev-dependencies]
+eframe.workspace = true
+resvg = { version = "0.45", default-features = false }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "png-format"] }

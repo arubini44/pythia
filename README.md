@@ -1,4 +1,4 @@
-# orui
+# Pythia
 
 A fast, native Oracle PL/SQL IDE written in Rust (egui on wgpu). It covers the
 daily work of an Oracle developer — writing and running SQL, editing and
@@ -121,7 +121,7 @@ Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
 macOS (`.dmg`) are attached to each [GitHub
 release](https://github.com/ortic/orui/releases).
 
-orui talks to Oracle through the **Oracle Instant Client**, which Oracle's
+Pythia talks to Oracle through the **Oracle Instant Client**, which Oracle's
 license doesn't allow us to bundle. Install it once:
 
 1. Download *Basic* for your platform from
@@ -140,14 +140,14 @@ license doesn't allow us to bundle. Install it once:
    - **macOS:** set `DYLD_LIBRARY_PATH` or copy the libraries next to the app
      as described in Oracle's instructions.
 4. Optional: put your `tnsnames.ora` into `network/admin` inside the Instant
-   Client directory or point `TNS_ADMIN` at it; orui then offers the aliases
+   Client directory or point `TNS_ADMIN` at it; Pythia then offers the aliases
    when connecting.
 
 Proxy authentication works with the usual `proxy_user[target_user]` user
 name; an empty user name with a wallet or OS authentication connects as
 `/@alias`.
 
-If the client can't be loaded, orui says so when you connect and shows these
+If the client can't be loaded, Pythia says so when you connect and shows these
 steps.
 
 ## Building from source
@@ -156,15 +156,15 @@ Requirements: Rust (stable) and the Instant Client as above.
 
 ```sh
 cargo build --release
-LD_LIBRARY_PATH=/path/to/instantclient ./target/release/orui
+LD_LIBRARY_PATH=/path/to/instantclient ./target/release/pythia
 ```
 
 Packages are built with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager)
 (`cargo install cargo-packager --locked`):
 
 ```sh
-cargo packager --release -p orui-app            # all formats of this platform
-cargo packager --release -p orui-app -f deb     # just one
+cargo packager --release -p pythia-app            # all formats of this platform
+cargo packager --release -p pythia-app -f deb     # just one
 ```
 
 The output lands in `target/packages`. Releases are built by
@@ -182,34 +182,34 @@ Tests that need the database are skipped unless configured:
 
 ```sh
 export LD_LIBRARY_PATH=/path/to/instantclient
-ORUI_TEST_DB=orui/orui@localhost:1521/FREEPDB1 cargo test
+PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 ```
 
 | Variable | Used by |
 |---|---|
-| `ORUI_TEST_DB` | integration tests (app user) |
-| `ORUI_TEST_DB_DBA` | monitor, compare and debugger tests (`system/oracle@…`) |
-| `ORUI_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local container) |
-| `ORUI_SCREENSHOT_DIR` | renders the real UI offscreen into PNGs (`cargo test -p orui-app screenshots`) |
+| `PYTHIA_TEST_DB` | integration tests (app user) |
+| `PYTHIA_TEST_DB_DBA` | monitor, compare and debugger tests (`system/oracle@…`) |
+| `PYTHIA_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local container) |
+| `PYTHIA_SCREENSHOT_DIR` | renders the real UI offscreen into PNGs (`cargo test -p pythia-app screenshots`) |
 
 The debugger needs `DEBUG CONNECT SESSION`, `DEBUG ANY PROCEDURE` and a JDWP
-network ACL; `orui_debugger::target::setup_script` prints what a DBA has to
+network ACL; `pythia_debugger::target::setup_script` prints what a DBA has to
 run.
 
 ### Workspace
 
 | Crate | Purpose |
 |---|---|
-| `orui-app` | the application: documents, docking, commands, dialogs |
-| `orui-ui` | code editor, data grid, icon set |
-| `orui-db` | sessions on worker threads, dictionary queries |
-| `orui-plsql` | lexer, statement splitter, error-tolerant parser |
-| `orui-lsp-core` | completion, hover, navigation, outline, diagnostics |
-| `orui-data` | export and import |
-| `orui-debugger` | JDWP debugger and panel |
-| `orui-monitor` | dashboard, sessions, AWR/ASH, trace analyzer |
-| `orui-compare` | schema and data compare |
-| `orui-config` | settings and saved connections |
+| `pythia-app` | the application: documents, docking, commands, dialogs |
+| `pythia-ui` | code editor, data grid, icon set |
+| `pythia-db` | sessions on worker threads, dictionary queries |
+| `pythia-plsql` | lexer, statement splitter, error-tolerant parser |
+| `pythia-lsp-core` | completion, hover, navigation, outline, diagnostics |
+| `pythia-data` | export and import |
+| `pythia-debugger` | JDWP debugger and panel |
+| `pythia-monitor` | dashboard, sessions, AWR/ASH, trace analyzer |
+| `pythia-compare` | schema and data compare |
+| `pythia-config` | settings and saved connections |
 
 See [CONCEPT.md](CONCEPT.md) for the full plan and status.
 

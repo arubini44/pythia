@@ -1,0 +1,58 @@
+---
+source: crates/pythia-plsql/src/lexer.rs
+expression: "kinds(\"x := :new.id || &var; y => a <> b\")"
+---
+[
+    (
+        Ident,
+        "x",
+    ),
+    (
+        Operator,
+        ":=",
+    ),
+    (
+        BindVar,
+        ":new",
+    ),
+    (
+        Dot,
+        ".",
+    ),
+    (
+        Ident,
+        "id",
+    ),
+    (
+        Operator,
+        "||",
+    ),
+    (
+        SubstVar,
+        "&var",
+    ),
+    (
+        Semicolon,
+        ";",
+    ),
+    (
+        Ident,
+        "y",
+    ),
+    (
+        Operator,
+        "=>",
+    ),
+    (
+        Ident,
+        "a",
+    ),
+    (
+        Operator,
+        "<>",
+    ),
+    (
+        Ident,
+        "b",
+    ),
+]
