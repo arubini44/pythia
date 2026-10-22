@@ -52,6 +52,9 @@ impl ObjectType {
         ObjectType::Library,
     ];
 
+    /// What the pseudo-schema `PUBLIC` owns, as browser folders.
+    pub const PUBLIC: &[ObjectType] = &[ObjectType::Synonym, ObjectType::DatabaseLink];
+
     /// Name as used in `ALL_OBJECTS.OBJECT_TYPE` and `DBMS_METADATA`.
     pub fn dictionary_name(self) -> &'static str {
         match self {
@@ -267,6 +270,13 @@ pub enum MetaQuery {
     ExplainPlan {
         sql: String,
     },
+    /// Queries over a database link: the remote database's global name.
+    /// Rolls back the session's transaction, so it runs on the metadata
+    /// session.
+    TestLink {
+        owner: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -277,6 +287,8 @@ pub enum Detail {
     Grants,
     Uses,
     UsedBy,
+    /// A database link's user, host and creation time.
+    Link,
 }
 
 impl Detail {
@@ -288,6 +300,7 @@ impl Detail {
         Detail::UsedBy,
     ];
     pub const CODE: &[Detail] = &[Detail::Uses, Detail::UsedBy, Detail::Grants];
+    pub const LINK: &[Detail] = &[Detail::Link];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -297,6 +310,7 @@ impl Detail {
             Detail::Grants => "Grants",
             Detail::Uses => "Uses",
             Detail::UsedBy => "Used by",
+            Detail::Link => "Details",
         }
     }
 }
@@ -355,6 +369,7 @@ pub(crate) fn run(conn: &Connection, query: &MetaQuery) -> Result<MetaResult, Db
         } => MetaResult::Errors(errors(conn, owner, name, object_type.dictionary_name())?),
         MetaQuery::Find { pattern, limit } => MetaResult::Objects(find(conn, pattern, *limit)?),
         MetaQuery::ExplainPlan { sql } => explain_plan(conn, sql)?,
+        MetaQuery::TestLink { owner, name } => MetaResult::Text(test_link(conn, owner, name)?),
     })
 }
 
@@ -390,6 +405,9 @@ fn objects(
     // Scheduler jobs aren't in ALL_OBJECTS under a type of their own name
     // in every version; the dictionary name still matches on 12c+.
     let pattern = like_pattern(filter.unwrap_or(""));
+    if object_type == ObjectType::DatabaseLink {
+        return links(conn, owner, &pattern);
+    }
     let sql = format!(
         "select {OBJECT_COLUMNS} from all_objects \
          where owner = :1 and object_type = :2 and object_name like :3 escape '\\' \
@@ -397,6 +415,28 @@ fn objects(
          order by object_name"
     );
     object_rows(conn.query(&sql, &[&owner, &object_type.dictionary_name(), &pattern])?)
+}
+
+/// Database links from `ALL_OBJECTS`, which has other schemas' private
+/// links the user may see, plus `ALL_DB_LINKS` for versions whose
+/// `ALL_OBJECTS` leaves links out. Links have no `LAST_DDL_TIME`: the
+/// creation time stands in.
+fn links(conn: &Connection, owner: &str, pattern: &str) -> Result<Vec<DbObject>, DbError> {
+    let sql = "select owner, object_name, object_type, status, \
+                      to_char(nvl(last_ddl_time, created), 'YYYY-MM-DD HH24:MI:SS') \
+                 from all_objects \
+                where owner = :owner and object_type = 'DATABASE LINK' \
+                  and object_name like :pattern escape '\\' \
+               union all \
+               select l.owner, l.db_link, 'DATABASE LINK', 'VALID', \
+                      to_char(l.created, 'YYYY-MM-DD HH24:MI:SS') \
+                 from all_db_links l \
+                where l.owner = :owner and l.db_link like :pattern escape '\\' \
+                  and not exists (select 1 from all_objects o \
+                                   where o.owner = l.owner and o.object_name = l.db_link \
+                                     and o.object_type = 'DATABASE LINK') \
+                order by 2";
+    object_rows(conn.query_named(sql, &[("owner", &owner), ("pattern", &pattern)])?)
 }
 
 fn find(conn: &Connection, pattern: &str, limit: usize) -> Result<Vec<DbObject>, DbError> {
@@ -574,8 +614,80 @@ fn details(
               where referenced_owner = :1 and referenced_name = :2 \
               order by 1, 3, 2"
         }
+        Detail::Link => return link_details(conn, owner, name),
     };
     table_result(conn.query(sql, &[&owner, &name])?, &[])
+}
+
+/// A database link as property/value rows. `ALL_DB_LINKS` has the user's
+/// own and public links; another schema's private link comes from
+/// `DBA_DB_LINKS` where the user may read it.
+fn link_details(conn: &Connection, owner: &str, name: &str) -> Result<MetaResult, DbError> {
+    type Link = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let read = |view: &str| -> Result<Option<Link>, oracle::Error> {
+        let sql = format!(
+            "select owner, db_link, username, host, to_char(created, 'YYYY-MM-DD HH24:MI:SS') \
+               from {view} where owner = :1 and db_link = :2"
+        );
+        conn.query_as::<Link>(&sql, &[&owner, &name])?
+            .next()
+            .transpose()
+    };
+    let link = match read("all_db_links")? {
+        Some(link) => Some(link),
+        // ORA-00942: no access to DBA_DB_LINKS.
+        None => read("dba_db_links").or_else(|e| match e.db_error().map(|d| d.code()) {
+            Some(942) => Ok(None),
+            _ => Err(e),
+        })?,
+    };
+    let column = |name: &str| Column {
+        name: name.into(),
+        type_name: "VARCHAR2".into(),
+        numeric: false,
+    };
+    let rows = match link {
+        Some((owner, name, user, host, created)) => vec![
+            ("Owner", Some(owner)),
+            ("Name", Some(name)),
+            ("Connects as", user),
+            ("Host", host),
+            ("Created", created),
+        ]
+        .into_iter()
+        .map(|(property, value)| vec![Some(property.to_owned()), value])
+        .collect(),
+        None => Vec::new(),
+    };
+    Ok(MetaResult::Table {
+        columns: vec![column("PROPERTY"), column("VALUE")],
+        rows,
+    })
+}
+
+/// Runs a query over a database link and closes it again. Only the user's
+/// own and public links can be used; a private link of the same name
+/// takes precedence over a public one.
+fn test_link(conn: &Connection, owner: &str, name: &str) -> Result<String, DbError> {
+    let user = conn.query_row_as::<String>("select user from dual", &[])?;
+    if owner != "PUBLIC" && owner != user {
+        return Err(DbError::new(format!(
+            "{owner}'s private database links can only be used by {owner}"
+        )));
+    }
+    let link = format!("\"{}\"", name.replace('"', "\"\""));
+    let result =
+        conn.query_row_as::<String>(&format!("select global_name from global_name@{link}"), &[]);
+    // A remote query opens a transaction; end it before closing the link.
+    let _ = conn.rollback();
+    let _ = conn.execute(&format!("alter session close database link {link}"), &[]);
+    Ok(result?)
 }
 
 fn explain_plan(conn: &Connection, sql: &str) -> Result<MetaResult, DbError> {

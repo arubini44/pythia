@@ -58,6 +58,8 @@ struct State {
     grids: HashMap<Detail, pythia_ui::GridState>,
     ddl: Option<Loaded<Editor>>,
     pending: HashMap<u64, Tab>,
+    /// Testing a database link: the request, then the remote global name.
+    link_test: Option<(u64, Loaded<String>)>,
 }
 
 impl ObjectView {
@@ -96,7 +98,7 @@ impl ObjectView {
     }
 
     pub fn is_loading(&self) -> bool {
-        !self.state.pending.is_empty()
+        !self.state.pending.is_empty() || matches!(self.state.link_test, Some((_, Loaded::Loading)))
     }
 
     fn has_columns(&self) -> bool {
@@ -116,10 +118,10 @@ impl ObjectView {
         if self.has_columns() {
             tabs.push(Tab::Columns);
         }
-        let details = if self.is_table() {
-            Detail::TABLE
-        } else {
-            Detail::CODE
+        let details = match self.object.object_type {
+            ObjectType::Table => Detail::TABLE,
+            ObjectType::DatabaseLink => Detail::LINK,
+            _ => Detail::CODE,
         };
         tabs.extend(details.iter().map(|d| Tab::Detail(*d)));
         if self.is_table() {
@@ -178,6 +180,16 @@ impl ObjectView {
         let DbEvent::Meta { id, result } = event else {
             return Effects::default();
         };
+        if let Some((test, outcome)) = &mut self.state.link_test
+            && *test == id
+        {
+            *outcome = match result {
+                Ok(MetaResult::Text(remote)) => Loaded::Ready(remote),
+                Ok(_) => Loaded::Failed("unexpected result".into()),
+                Err(e) => Loaded::Failed(e.to_string()),
+            };
+            return Effects::default();
+        }
         let Some(tab) = self.state.pending.remove(&id) else {
             return Effects::default();
         };
@@ -228,6 +240,17 @@ impl ObjectView {
                         object: self.object.clone(),
                     });
                 }
+                if self.object.object_type == ObjectType::DatabaseLink
+                    && ui.button("Test link").clicked()
+                {
+                    let id = request_id();
+                    let query = MetaQuery::TestLink {
+                        owner: self.object.owner.clone(),
+                        name: self.object.name.clone(),
+                    };
+                    self.state.link_test = Some((id, Loaded::Loading));
+                    effects.request(Target::Meta, DbRequest::Meta { id, query });
+                }
                 if self.object.object_type.has_data() && ui.button("Query data").clicked() {
                     effects.open.push(OpenRequest::Sql {
                         connection: connection.to_owned(),
@@ -237,6 +260,21 @@ impl ObjectView {
                 }
             });
         });
+        match self.state.link_test.as_ref().map(|(_, outcome)| outcome) {
+            Some(Loaded::Loading) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("Testing the link…");
+                });
+            }
+            Some(Loaded::Ready(remote)) => {
+                ui.label(format!("The link works: connected to {remote}"));
+            }
+            Some(Loaded::Failed(e)) => {
+                ui.colored_label(ui.visuals().error_fg_color, format!("The link failed: {e}"));
+            }
+            None => {}
+        }
         ui.horizontal(|ui| {
             for t in &tabs {
                 if ui.selectable_value(&mut tab, *t, t.label()).clicked() {

@@ -456,3 +456,126 @@ fn killed_session_is_reported_as_lost() {
         other => panic!("expected failure, got {other:?}"),
     }
 }
+
+/// Public links and another schema's private link: listed, described and
+/// tested. Needs `PYTHIA_TEST_DB_DBA` to create them.
+#[test]
+fn database_links() {
+    let Some(dba) = std::env::var("PYTHIA_TEST_DB_DBA").ok().and_then(|spec| {
+        let (credentials, connect_string) = spec.rsplit_once('@')?;
+        let (user, password) = credentials.split_once('/')?;
+        pythia_db::oracle::Connection::connect(user, password, connect_string).ok()
+    }) else {
+        return;
+    };
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    let target = params().unwrap().connect_string;
+    for sql in [
+        "drop public database link pythia_t_pub",
+        "drop database link pythia_t_sys",
+    ] {
+        let _ = dba.execute(sql, &[]);
+    }
+    for sql in [
+        format!(
+            "create public database link pythia_t_pub connect to pythia identified by pythia using '{target}'"
+        ),
+        format!(
+            "create database link pythia_t_sys connect to pythia identified by pythia using '{target}'"
+        ),
+    ] {
+        dba.execute(&sql, &[]).unwrap();
+    }
+    let dba_user = dba
+        .query_row_as::<String>("select user from dual", &[])
+        .unwrap();
+    let mut next_id = 100;
+    let mut meta = |h: &mut Harness, query| {
+        next_id += 1;
+        h.session.send(DbRequest::Meta { id: next_id, query });
+        match h.next_result() {
+            DbEvent::Meta { result, .. } => result,
+            other => panic!("expected Meta, got {other:?}"),
+        }
+    };
+    let links = |owner: &str| MetaQuery::Objects {
+        owner: owner.into(),
+        object_type: ObjectType::DatabaseLink,
+        filter: Some("PYTHIA_T_".into()),
+    };
+    let details = |owner: &str, name: &str| MetaQuery::Details {
+        owner: owner.into(),
+        name: name.into(),
+        detail: pythia_db::Detail::Link,
+    };
+    let test = |owner: &str, name: &str| MetaQuery::TestLink {
+        owner: owner.into(),
+        name: name.into(),
+    };
+
+    let Ok(MetaResult::Objects(public)) = meta(&mut h, links("PUBLIC")) else {
+        panic!()
+    };
+    assert_eq!(public.len(), 1, "{public:?}");
+    assert_eq!(public[0].name, "PYTHIA_T_PUB");
+    assert!(
+        !public[0].last_ddl.is_empty(),
+        "the creation time stands in"
+    );
+    let Ok(MetaResult::Objects(private)) = meta(&mut h, links(&dba_user)) else {
+        panic!()
+    };
+    assert_eq!(private.len(), 1, "{private:?}");
+
+    // Public from ALL_DB_LINKS, the other schema's from DBA_DB_LINKS.
+    for (owner, name) in [("PUBLIC", "PYTHIA_T_PUB"), (&dba_user, "PYTHIA_T_SYS")] {
+        let Ok(MetaResult::Table { rows, .. }) = meta(&mut h, details(owner, name)) else {
+            panic!()
+        };
+        let host = rows.iter().find(|r| r[0].as_deref() == Some("Host"));
+        assert_eq!(
+            host.and_then(|r| r[1].clone()),
+            Some(target.clone()),
+            "{rows:?}"
+        );
+    }
+
+    let Ok(MetaResult::Text(remote)) = meta(&mut h, test("PUBLIC", "PYTHIA_T_PUB")) else {
+        panic!()
+    };
+    assert!(!remote.is_empty());
+    let Err(e) = meta(&mut h, test(&dba_user, "PYTHIA_T_SYS")) else {
+        panic!("another schema's private link can't be used")
+    };
+    assert!(e.to_string().contains("private"), "{e}");
+
+    let Ok(MetaResult::Text(ddl)) = meta(
+        &mut h,
+        MetaQuery::Ddl {
+            owner: "PUBLIC".into(),
+            name: "PYTHIA_T_PUB".into(),
+            object_type: ObjectType::DatabaseLink,
+        },
+    ) else {
+        panic!()
+    };
+    assert!(ddl.contains("CREATE PUBLIC DATABASE LINK"), "{ddl}");
+
+    let Ok(MetaResult::Objects(synonyms)) = meta(
+        &mut h,
+        MetaQuery::Objects {
+            owner: "PUBLIC".into(),
+            object_type: ObjectType::Synonym,
+            filter: Some("DBMS_OUTPUT".into()),
+        },
+    ) else {
+        panic!()
+    };
+    assert!(synonyms.iter().any(|s| s.name == "DBMS_OUTPUT"));
+
+    dba.execute("drop public database link pythia_t_pub", &[])
+        .unwrap();
+    dba.execute("drop database link pythia_t_sys", &[]).unwrap();
+}

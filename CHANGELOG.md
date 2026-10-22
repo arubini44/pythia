@@ -63,8 +63,17 @@ All notable changes to Pythia are documented here. The format follows
   New rules: CASE arms, subqueries, parameter lists and INSERT column and
   VALUES lists each fit on one line or always break, and THEN/LOOP on their
   own line.
+- Database links: the object view has a Details tab (connects as, host,
+  created; another schema's private link from DBA_DB_LINKS where you may
+  read it) and Test link, also in the context menu, which queries over the
+  link and says whether it works.
 
 ### Fixed
+- Object browser: public database links and public synonyms are listed,
+  under a PUBLIC entry in the schema list. Database links are also read
+  from ALL_DB_LINKS, for versions whose ALL_OBJECTS leaves them out. Drop
+  works for public synonyms and links and for links with dots in their
+  name.
 - Windows: no console window with log output next to the app (also none for
   `git` and other helper programs). Started from a terminal, the logs still
   show there. Problems at startup are shown in a message box, and About has

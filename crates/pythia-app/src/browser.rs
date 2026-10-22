@@ -13,7 +13,7 @@ use pythia_db::{
 
 use pythia_ui::icons::{Icon, IconSize, paint_invalid_badge};
 
-use crate::documents::{Effects, ObjectRef, OpenRequest, Target, request_id};
+use crate::documents::{Effects, ObjectRef, OpenRequest, Target, quote_ident, request_id};
 use crate::object_editor::{EditTarget, has_editor, has_grants};
 use crate::table_parts::{Part, PartKind, TableParts};
 
@@ -140,6 +140,16 @@ enum Pending {
         object: ObjectRef,
         member: Option<String>,
     },
+    TestLink(ObjectRef),
+}
+
+/// The folders of a schema; `PUBLIC` only owns synonyms and links.
+fn folders(owner: &str) -> &'static [ObjectType] {
+    if owner == "PUBLIC" {
+        ObjectType::PUBLIC
+    } else {
+        ObjectType::BROWSER
+    }
 }
 
 /// One visible line of the tree.
@@ -499,7 +509,11 @@ impl Browser {
             return effects;
         };
         match (pending, result) {
-            (Pending::Schemas, Ok(Some(MetaResult::Schemas(s)))) => {
+            (Pending::Schemas, Ok(Some(MetaResult::Schemas(mut s)))) => {
+                // Public synonyms and links belong to PUBLIC, which isn't a user.
+                if let Err(at) = s.binary_search_by(|u| u.as_str().cmp("PUBLIC")) {
+                    s.insert(at, "PUBLIC".into());
+                }
                 self.schemas = Some(Loaded::Ready(s))
             }
             (Pending::Schemas, Err(e)) => self.schemas = Some(Loaded::Failed(e.to_string())),
@@ -528,6 +542,12 @@ impl Browser {
             (Pending::Action { object, verb }, Err(e)) => {
                 log.push(format!("{} {} failed: {e}", verb, object.qualified()));
                 self.refresh(&mut effects);
+            }
+            (Pending::TestLink(object), Ok(Some(MetaResult::Text(remote)))) => {
+                log.push(format!("Database link {} works: {remote}", object.name));
+            }
+            (Pending::TestLink(object), Err(e)) => {
+                log.push(format!("Database link {} failed: {e}", object.name));
             }
             _ => {}
         }
@@ -613,12 +633,13 @@ impl Browser {
             if pythia_ui::icons::icon_button(ui, Icon::Refresh, "Refresh").clicked() {
                 self.refresh(&mut effects);
             }
-            if pythia_ui::icons::icon_button(
-                ui,
-                Icon::Compile,
-                "Recompile invalid objects in this schema",
-            )
-            .clicked()
+            if schema != "PUBLIC"
+                && pythia_ui::icons::icon_button(
+                    ui,
+                    Icon::Compile,
+                    "Recompile invalid objects in this schema",
+                )
+                .clicked()
                 && let Some(owner) = self.schema.clone()
             {
                 // In the invalid objects window: dependency order, progress.
@@ -765,7 +786,7 @@ impl Browser {
                 && cutoff.as_deref().is_none_or(|c| o.last_ddl.as_str() >= c)
         };
         let filtering = !filter.is_empty() || self.invalid_only || cutoff.is_some();
-        for &object_type in ObjectType::BROWSER {
+        for &object_type in folders(owner) {
             let node = Node::Folder(owner.to_owned(), object_type);
             let open = self.expanded.contains(&node);
             let folder = self.folders.get(&(owner.to_owned(), object_type));
@@ -1296,6 +1317,15 @@ impl Browser {
                 parameter: None,
             }),
             ObjectAction::Reveal(object) => self.reveal(object, effects),
+            ObjectAction::TestLink(object) => {
+                let id = request_id();
+                let query = MetaQuery::TestLink {
+                    owner: object.owner.clone(),
+                    name: object.name.clone(),
+                };
+                self.pending.insert(id, Pending::TestLink(object));
+                effects.request(Target::Meta, DbRequest::Meta { id, query });
+            }
             ObjectAction::Test(object, member) => {
                 let id = request_id();
                 let request = pythia_lsp_core::CatalogRequest::Members {
@@ -1346,14 +1376,20 @@ impl Browser {
         if let Some(yes) = decision {
             self.confirm_drop = None;
             if yes {
-                let sql = format!(
-                    "drop {} {}",
-                    object.object_type.dictionary_name().to_lowercase(),
-                    object.qualified()
-                );
-                self.run(effects, &object, "dropped", sql);
+                self.run(effects, &object, "dropped", drop_sql(&object));
             }
         }
+    }
+}
+
+/// `DROP` for an object. Public synonyms and links have their own syntax,
+/// and a link's name can't be qualified: its dots belong to the name.
+fn drop_sql(o: &ObjectRef) -> String {
+    let kind = o.object_type.dictionary_name().to_lowercase();
+    match (o.owner.as_str(), o.object_type) {
+        ("PUBLIC", _) => format!("drop public {kind} {}", quote_ident(&o.name)),
+        (_, ObjectType::DatabaseLink) => format!("drop {kind} {}", quote_ident(&o.name)),
+        _ => format!("drop {kind} {}", o.qualified()),
     }
 }
 
@@ -1432,6 +1468,9 @@ pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Op
     if t.has_source() || matches!(t, ObjectType::View | ObjectType::MaterializedView) {
         item(ui, "Compile", ObjectAction::Compile(object.clone()));
     }
+    if t == ObjectType::DatabaseLink {
+        item(ui, "Test link", ObjectAction::TestLink(object.clone()));
+    }
     let favorite = if options.favorite {
         "Remove from favorites"
     } else {
@@ -1482,6 +1521,8 @@ pub enum ObjectAction {
     EditObject(ObjectRef),
     Grants(ObjectRef),
     ToggleFavorite(ObjectRef),
+    /// Query over a database link and report whether it works.
+    TestLink(ObjectRef),
 }
 
 /// Statements generated from a table's columns.
@@ -1568,6 +1609,32 @@ fn object_ref(o: &DbObject) -> ObjectRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drops_public_objects_and_links() {
+        let o = |owner: &str, name: &str, object_type| ObjectRef {
+            owner: owner.into(),
+            name: name.into(),
+            object_type,
+        };
+        assert_eq!(
+            drop_sql(&o("PUBLIC", "DUAL2", ObjectType::Synonym)),
+            "drop public synonym DUAL2"
+        );
+        assert_eq!(
+            drop_sql(&o("PUBLIC", "REMOTE.EXAMPLE.COM", ObjectType::DatabaseLink)),
+            "drop public database link \"REMOTE.EXAMPLE.COM\""
+        );
+        assert_eq!(
+            drop_sql(&o("HR", "REMOTE", ObjectType::DatabaseLink)),
+            "drop database link REMOTE"
+        );
+        assert_eq!(
+            drop_sql(&o("HR", "EMP", ObjectType::Table)),
+            "drop table HR.EMP"
+        );
+        assert_eq!(folders("PUBLIC"), ObjectType::PUBLIC);
+    }
 
     fn col(name: &str, pk: Option<u32>) -> TableColumn {
         TableColumn {

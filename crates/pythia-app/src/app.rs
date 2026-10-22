@@ -1220,8 +1220,15 @@ impl PythiaApp {
             ..
         } = effects;
         if let Some(name) = connection {
-            for (_, request) in requests {
-                self.conns.send_main(&name, request);
+            for (target, request) in requests {
+                match (target, request_key(&request), self.conns.get_mut(&name)) {
+                    (Target::Meta, Some(id), Some(conn)) => {
+                        conn.send_meta(id, request, &self.notify)
+                    }
+                    _ => {
+                        self.conns.send_main(&name, request);
+                    }
+                }
             }
         }
         for line in log {
@@ -1890,12 +1897,9 @@ impl PythiaApp {
                 self.log(format!("{name}: connection lost, reconnecting"));
             }
             match key {
-                SessionKey::Main => self.main_event(&name, event),
-                SessionKey::Meta => {
-                    if let Some(doc) = event_id(&event).and_then(|id| self.routes.remove(&id)) {
-                        self.deliver(doc, event);
-                    }
-                }
+                // The metadata session's answers go where the main
+                // session's would: to a document or the browser.
+                SessionKey::Main | SessionKey::Meta => self.main_event(&name, event),
                 SessionKey::Doc(id) => match event {
                     DbEvent::TaskDone { id: task, result }
                         if self.debug_run.is_some_and(|(_, t)| t == task) =>
