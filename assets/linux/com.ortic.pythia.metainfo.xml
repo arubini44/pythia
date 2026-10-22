@@ -25,7 +25,7 @@
     <p>Requires the Oracle Instant Client, which is installed separately.</p>
   </description>
   <launchable type="desktop-id">pythia.desktop</launchable>
-  <url type="homepage">https://github.com/ortic/orui</url>
+  <url type="homepage">https://github.com/ortic/pythia</url>
   <categories>
     <category>Development</category>
     <category>Database</category>
@@ -36,7 +36,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>SQL window with object browser and result grid</caption>
-      <image>https://raw.githubusercontent.com/ortic/orui/master/docs/screenshots/sql-window.png</image>
+      <image>https://raw.githubusercontent.com/ortic/pythia/master/docs/screenshots/sql-window.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1"/>

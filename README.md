@@ -119,7 +119,7 @@ for Linux, Windows and macOS.
 
 Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
 macOS (`.dmg`) are attached to each [GitHub
-release](https://github.com/ortic/orui/releases).
+release](https://github.com/ortic/pythia/releases).
 
 Pythia talks to Oracle through the **Oracle Instant Client**, which Oracle's
 license doesn't allow us to bundle. Install it once:

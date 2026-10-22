@@ -113,5 +113,5 @@ First release.
   compare by key.
 - Import from CSV and Excel with type inference into new or existing tables.
 
-[Unreleased]: https://github.com/ortic/orui/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/ortic/orui/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ortic/pythia/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/ortic/pythia/releases/tag/v0.1.0

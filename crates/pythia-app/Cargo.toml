@@ -5,8 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "Fast, native IDE for Oracle SQL and PL/SQL"
 authors = ["Remo Laubacher"]
-homepage = "https://github.com/ortic/orui"
-repository = "https://github.com/ortic/orui"
+homepage = "https://github.com/ortic/pythia"
+repository = "https://github.com/ortic/pythia"
 
 [[bin]]
 name = "pythia"
@@ -55,7 +55,7 @@ Pythia covers the daily work of an Oracle developer: writing and running SQL,
 editing and compiling PL/SQL, debugging, browsing objects, editing data,
 comparing schemas and monitoring sessions. Requires the Oracle Instant Client,
 which is installed separately."""
-homepage = "https://github.com/ortic/orui"
+homepage = "https://github.com/ortic/pythia"
 licenseFile = "../../LICENSE-MIT"
 beforePackagingCommand = "cargo build --release -p pythia-app"
 outDir = "../../target/packages"
