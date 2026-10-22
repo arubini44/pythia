@@ -1,5 +1,9 @@
 //! Pythia – a fast, native Oracle PL/SQL IDE.
 
+// Release builds are GUI programs on Windows, without a console window;
+// debug builds keep it for development.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod assist;
 mod browser;
@@ -10,6 +14,7 @@ mod compare_window;
 mod connections;
 mod data_edit;
 mod data_search;
+mod desktop;
 mod dialogs;
 mod documents;
 mod editor;
@@ -53,18 +58,73 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 fn main() -> anyhow::Result<()> {
-    let paths = Paths::detect()
-        .inspect_err(|e| eprintln!("pythia: {e:#}"))
-        .ok();
+    attach_parent_console();
+    let paths = Paths::detect();
+    // Before logging creates the new directories.
+    let moved = paths.as_ref().map(Paths::adopt_legacy).unwrap_or_default();
+    let paths = match paths {
+        Ok(paths) => Some(paths),
+        Err(e) => {
+            startup_error(&format!(
+                "Pythia could not find its settings folder ({e:#}). It starts without saved settings and connections."
+            ));
+            None
+        }
+    };
     init_logging(paths.as_ref());
     install_panic_hook(paths.as_ref());
     info!(version = env!("CARGO_PKG_VERSION"), "starting Pythia");
+    for problem in moved {
+        warn!("settings from before the rename to Pythia: {problem}");
+    }
 
-    match run(eframe::Renderer::Wgpu, paths.clone()) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            warn!("wgpu renderer failed ({e}), falling back to OpenGL");
-            run(eframe::Renderer::Glow, paths).map_err(|e| anyhow::anyhow!("{e}"))
+    let result = run(eframe::Renderer::Wgpu, paths.clone()).or_else(|e| {
+        warn!("wgpu renderer failed ({e}), falling back to OpenGL");
+        run(eframe::Renderer::Glow, paths.clone())
+    });
+    if let Err(e) = &result {
+        let log = paths
+            .as_ref()
+            .map(|p| {
+                format!(
+                    "\n\nDetails are in {}",
+                    p.log_dir().join("pythia.log").display()
+                )
+            })
+            .unwrap_or_default();
+        startup_error(&format!(
+            "Pythia could not open its window: neither Vulkan/DirectX/Metal nor OpenGL works here ({e}).{log}"
+        ));
+    }
+    result.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Reports a problem at startup where it's seen: there may be no console
+/// (a GUI program on Windows, or started from the desktop), so also in a
+/// message box.
+fn startup_error(text: &str) {
+    error!("{text}");
+    eprintln!("pythia: {text}");
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Pythia")
+        .set_description(text)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+/// Started from a terminal, a Windows GUI program has no console of its own;
+/// attaching to the terminal's shows the log output there.
+fn attach_parent_console() {
+    #[cfg(all(windows, not(debug_assertions)))]
+    {
+        unsafe extern "system" {
+            fn AttachConsole(process_id: u32) -> i32;
+        }
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        // Fails when there's no parent console, e.g. started from Explorer.
+        unsafe {
+            AttachConsole(ATTACH_PARENT_PROCESS);
         }
     }
 }

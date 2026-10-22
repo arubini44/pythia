@@ -14,6 +14,10 @@ All notable changes to Pythia are documented here. The format follows
   and the package initialization section.
 
 ### Fixed
+- Windows: no console window with log output next to the app (also none for
+  `git` and other helper programs). Started from a terminal, the logs still
+  show there. Problems at startup are shown in a message box, and About has
+  an "Open log folder" button.
 - Connect dialog: without the Oracle Instant Client it lists the steps for
   this platform, with the download page as a working link (copying the old
   one picked up a trailing comma and led to a 404) and the Visual C++

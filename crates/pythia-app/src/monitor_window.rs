@@ -113,16 +113,7 @@ impl MonitorWindow {
 
 /// Opens a file with the system's default application.
 fn open_path(path: &std::path::Path, effects: &mut Effects) {
-    #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(path)
-        .spawn();
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open").arg(path).spawn();
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let result = std::process::Command::new("xdg-open").arg(path).spawn();
-    if let Err(e) = result {
+    if let Err(e) = crate::desktop::open_path(path) {
         effects
             .log
             .push(format!("Could not open {}: {e}", path.display()));

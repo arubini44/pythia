@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {
@@ -49,7 +48,7 @@ pub struct Repo {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let out = Command::new("git")
+    let out = crate::desktop::command("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -126,7 +125,11 @@ mod tests {
 
     #[test]
     fn reads_a_real_repository() {
-        if Command::new("git").arg("--version").output().is_err() {
+        if crate::desktop::command("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return;
         }
         let dir = std::env::temp_dir().join(format!("pythia-git-{}", std::process::id()));

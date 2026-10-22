@@ -2032,10 +2032,24 @@ impl PythiaApp {
             ui.heading("Pythia");
             ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
             ui.label("A fast, native Oracle PL/SQL IDE.");
+            let mut problem = None;
             if let Some(paths) = &self.paths {
                 ui.add_space(6.0);
                 ui.weak(format!("Config: {}", paths.config_dir.display()));
-                ui.weak(format!("Logs: {}", paths.log_dir().display()));
+                ui.horizontal(|ui| {
+                    ui.weak(format!("Logs: {}", paths.log_dir().display()));
+                    if ui
+                        .small_button("Open log folder")
+                        .on_hover_text("The log and crash reports, e.g. for a bug report")
+                        .clicked()
+                        && let Err(e) = crate::desktop::open_path(&paths.log_dir())
+                    {
+                        problem = Some(format!("Could not open the log folder: {e}"));
+                    }
+                });
+            }
+            if let Some(problem) = problem {
+                self.log(problem);
             }
             ui.add_space(6.0);
             if ui.button("Close").clicked() {

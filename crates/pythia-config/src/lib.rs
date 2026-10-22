@@ -26,14 +26,23 @@ pub struct Paths {
 
 impl Paths {
     pub fn detect() -> Result<Self> {
-        let paths = Self::for_app("pythia")?;
-        // Carry over settings, connections and the workspace from before the
-        // app was renamed from orui to Pythia.
-        if let Ok(legacy) = Self::for_app("orui") {
-            move_if_absent(&legacy.config_dir, &paths.config_dir);
-            move_if_absent(&legacy.data_dir, &paths.data_dir);
-        }
-        Ok(paths)
+        Self::for_app("pythia")
+    }
+
+    /// Carries over settings, connections and the workspace from before the
+    /// app was renamed from orui to Pythia. Call before anything creates the
+    /// new directories. Returns what couldn't be moved.
+    pub fn adopt_legacy(&self) -> Vec<String> {
+        let Ok(legacy) = Self::for_app("orui") else {
+            return Vec::new();
+        };
+        [
+            (&legacy.config_dir, &self.config_dir),
+            (&legacy.data_dir, &self.data_dir),
+        ]
+        .into_iter()
+        .filter_map(|(from, to)| move_if_absent(from, to).err())
+        .collect()
     }
 
     fn for_app(name: &str) -> Result<Self> {
@@ -63,18 +72,16 @@ impl Paths {
     }
 }
 
-/// Moves the directory `from` to `to` unless `to` already exists. Best effort:
-/// on failure the app starts with fresh directories.
-fn move_if_absent(from: &Path, to: &Path) {
+/// Moves the directory `from` to `to` unless `to` already exists. On
+/// failure the app starts with fresh directories.
+fn move_if_absent(from: &Path, to: &Path) -> Result<(), String> {
     if to.exists() || !from.is_dir() {
-        return;
+        return Ok(());
     }
     if let Some(parent) = to.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Err(e) = fs::rename(from, to) {
-        eprintln!("moving {} to {}: {e}", from.display(), to.display());
-    }
+    fs::rename(from, to).map_err(|e| format!("moving {} to {}: {e}", from.display(), to.display()))
 }
 
 /// Loads a TOML file, returning the default value if it doesn't exist.
@@ -126,12 +133,12 @@ mod tests {
         fs::create_dir_all(&old).unwrap();
         fs::write(old.join("settings.toml"), "theme = \"light\"\n").unwrap();
 
-        move_if_absent(&old, &new);
+        move_if_absent(&old, &new).unwrap();
         assert!(!old.exists());
         assert!(new.join("settings.toml").exists());
 
         fs::create_dir_all(&old).unwrap();
-        move_if_absent(&old, &new);
+        move_if_absent(&old, &new).unwrap();
         assert!(old.exists(), "an existing target is left alone");
         fs::remove_dir_all(dir).unwrap();
     }
