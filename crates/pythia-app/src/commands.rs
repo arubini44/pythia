@@ -99,6 +99,7 @@ commands! {
     AiFix => "AI: Fix Statement",
     AiRewrite => "AI: Rewrite Statement",
     AiAnalyzePlan => "AI: Analyze Execution Plan",
+    AiFormat => "AI: Format Unsupported Statements",
     ShowAssistant => "View: AI Assistant",
     ShowPalette => "View: Command Palette",
     ShowBrowser => "View: Object Browser",

@@ -123,6 +123,9 @@ pub enum Task {
     AnalyzePlan,
     /// Slow SQL, a session or a report, e.g. "top SQL 7h35uxf5uhmm1".
     AnalyzeSlow(String),
+    /// Lay out a statement by these rules (one per line), changing nothing
+    /// but whitespace and case.
+    Format(String),
 }
 
 impl Task {
@@ -136,6 +139,7 @@ impl Task {
             Task::Rewrite => "Rewrite the statement".into(),
             Task::AnalyzePlan => "Analyze the execution plan".into(),
             Task::AnalyzeSlow(what) => format!("Analyze {what}"),
+            Task::Format(_) => "Format the statement".into(),
         }
     }
 
@@ -169,6 +173,13 @@ impl Task {
                  explain where the time goes and why, and suggest concrete improvements \
                  (rewrites, indexes, statistics to gather, configuration), each with its \
                  reasoning; put SQL and DDL in sql code blocks."
+            ),
+            Task::Format(rules) => format!(
+                "Lay out the statement in the context by these rules:\n{rules}\n\n\
+                 Change only whitespace, line breaks and the case of keywords and unquoted \
+                 identifiers. Never add, remove, reorder or rename anything, and keep comments, \
+                 quoted identifiers and string literals exactly as written. Answer with the \
+                 statement in one sql code block and nothing else."
             ),
         }
     }

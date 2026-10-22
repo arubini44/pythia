@@ -71,8 +71,9 @@ for Linux, Windows and macOS.
 - Find in database source (Ctrl+Alt+F) with regular expressions.
 - **Formatter** (Ctrl+Shift+F) with a live preview of its rules, profiles
   to share a team style, rules learned from existing code (an editor or a
-  whole schema), and formatting on save, on paste or when a statement's
-  `;` is typed.
+  whole schema), formatting on save, on paste or when a statement's `;` is
+  typed, and the AI for statements the rules can't lay out (only
+  whitespace and case may change).
 
 ![Debugger stopped at a breakpoint](docs/screenshots/debugger.png)
 

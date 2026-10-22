@@ -119,6 +119,72 @@ pub struct Formatted {
     pub changed: bool,
 }
 
+/// The rules as plain sentences, for layout done elsewhere: a model asked
+/// to lay out what [`format`] keeps as written.
+pub fn describe(o: &FormatOptions) -> String {
+    let case = |c: Case| match c {
+        Case::Upper => "in upper case",
+        Case::Lower => "in lower case",
+        Case::Preserve => "as written",
+    };
+    let wrap = |w: Wrap, what: &str| match w {
+        Wrap::Fit => format!("{what}: on one line if they fit, otherwise one item per line."),
+        Wrap::Always => format!("{what}: always one item per line."),
+    };
+    let mut rules = vec![
+        format!("Indent by {} spaces per level, never with tabs.", o.indent),
+        format!(
+            "Keywords {}, unquoted identifiers {}; quoted identifiers, string literals and \
+             comments exactly as written.",
+            case(o.keyword_case),
+            case(o.identifier_case)
+        ),
+        format!(
+            "Lines up to {} characters; longer lists and conditions wrap.",
+            o.max_width
+        ),
+        match o.comma {
+            CommaStyle::Trailing => "In wrapped lists, commas end the line.".into(),
+            CommaStyle::Leading => "In wrapped lists, commas start the next line.".into(),
+        },
+    ];
+    if o.align_aliases {
+        rules.push("Align the column aliases of a wrapped select list.".into());
+    }
+    if o.align_assignments {
+        rules.push("Align the := of consecutive assignments.".into());
+    }
+    if o.align_declarations {
+        rules.push("Align the names and types of declarations, parameters and columns.".into());
+    }
+    if o.on_new_line {
+        rules.push("Put the ON of a join on its own line.".into());
+    }
+    rules.push(if o.blank_lines == 0 {
+        "No blank lines.".into()
+    } else {
+        "Keep a single blank line where the statement has blank lines.".into()
+    });
+    rules.push(wrap(o.case_arms, "WHEN and ELSE arms of CASE"));
+    rules.push(wrap(
+        o.subqueries,
+        "Subqueries, inline views and WITH queries",
+    ));
+    rules.push(wrap(
+        o.parameters,
+        "Parameters of procedures, functions and cursors",
+    ));
+    rules.push(wrap(o.insert_lists, "Column and VALUES lists of INSERT"));
+    if o.then_on_new_line {
+        rules.push("THEN and LOOP on their own line below IF, ELSIF, WHILE and FOR.".into());
+    }
+    rules
+        .iter()
+        .map(|r| format!("- {r}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Formats a whole script.
 pub fn format(src: &str, options: &FormatOptions) -> Formatted {
     let text = format_script(src, options);

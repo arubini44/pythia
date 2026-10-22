@@ -522,3 +522,24 @@ fn kept_as_written_lists_what_could_be_formatted() {
     assert!(equivalent("select a\nfrom   t", "SELECT A FROM T"));
     assert!(!equivalent("select a from t", "select b from t"));
 }
+
+#[test]
+fn rules_in_words() {
+    let rules = describe(&FormatOptions {
+        indent: 4,
+        keyword_case: Case::Upper,
+        comma: CommaStyle::Leading,
+        case_arms: Wrap::Always,
+        then_on_new_line: true,
+        ..FormatOptions::default()
+    });
+    for expected in [
+        "- Indent by 4 spaces per level",
+        "Keywords in upper case, unquoted identifiers as written",
+        "commas start the next line",
+        "- WHEN and ELSE arms of CASE: always one item per line.",
+        "THEN and LOOP on their own line",
+    ] {
+        assert!(rules.contains(expected), "{expected}\n{rules}");
+    }
+}

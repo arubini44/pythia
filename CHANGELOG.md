@@ -88,7 +88,10 @@ All notable changes to Pythia are documented here. The format follows
   what changes is replaced, as one undo step, and the caret stays put).
   New rules: CASE arms, subqueries, parameter lists and INSERT column and
   VALUES lists each fit on one line or always break, and THEN/LOOP on their
-  own line.
+  own line. AI: Format Unsupported Statements hands the statements the
+  formatter keeps as written (unsupported constructs, failed safety checks)
+  to the AI with the same rules; an answer is applied only if it changes
+  nothing but whitespace and case, as one undo step.
 - Database links: the object view has a Details tab (connects as, host,
   created; another schema's private link from DBA_DB_LINKS where you may
   read it) and Test link, also in the context menu, which queries over the

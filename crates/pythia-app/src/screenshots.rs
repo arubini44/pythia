@@ -2437,6 +2437,78 @@ fn learn_the_style_from_a_schema() {
     );
 }
 
+/// Statements the formatter keeps as written go to the AI with the rules;
+/// an answer is applied only if it changes nothing but the layout.
+#[test]
+fn format_with_ai() {
+    use std::sync::{Arc, Mutex};
+    let mut h = headless_harness();
+    let requests: Arc<Mutex<Vec<String>>> = Default::default();
+    let seen = requests.clone();
+    h.state_mut()
+        .test_ai(Arc::new(move |request: &pythia_ai::ChatRequest| {
+            let sent = request.messages.last().unwrap().content.clone();
+            seen.lock().unwrap().push(sent.clone());
+            Ok(if sent.contains("t_a") {
+                "```sql\nCREATE OR REPLACE TRIGGER t_a\n  FOR UPDATE ON t\n  COMPOUND TRIGGER\n  \
+                 BEFORE STATEMENT IS\n  BEGIN\n    NULL;\n  END BEFORE STATEMENT;\nEND t_a;\n```"
+                    .into()
+            } else {
+                // Not just layout: a comment was added.
+                "```sql\ncreate or replace trigger t_b for update on t compound trigger\n\
+                 -- fires once\nbefore statement is begin null; end before statement;\nend t_b;\n```"
+                    .into()
+            })
+        }));
+    let t_b = "create or replace trigger t_b for update on t compound trigger\n\
+               before statement is begin null; end before statement;\nend t_b;";
+    let text = format!(
+        "SELECT 1 FROM dual;\n\
+         create or replace trigger t_a for update on t compound trigger\n\
+         before statement is begin null; end before statement;\nend t_a;\n/\n{t_b}\n/\n"
+    );
+    h.state_mut().test_sql_window().editor.set_text(&text);
+    h.run_steps(2);
+
+    h.state_mut()
+        .test_command(crate::commands::Command::AiFormat);
+    wait_until(&mut h, "the answers", |app| {
+        app.test_log()
+            .iter()
+            .any(|l| l.starts_with("Format with AI: laid out"))
+    });
+    let log = h.state().test_log().last().unwrap().clone();
+    assert_eq!(
+        log,
+        "Format with AI: laid out 1 of 2 statement(s); kept as written: \
+         line 11: the answer changed more than the layout"
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0].contains("- Indent by 2 spaces per level"),
+        "{}",
+        requests[0]
+    );
+    assert_eq!(
+        h.state_mut().test_sql_window().editor.text(),
+        format!(
+            "select 1 from dual;\nCREATE OR REPLACE TRIGGER t_a\n  FOR UPDATE ON t\n  COMPOUND TRIGGER\n  \
+             BEFORE STATEMENT IS\n  BEGIN\n    NULL;\n  END BEFORE STATEMENT;\nEND t_a;\n/\n{t_b}\n/\n"
+        )
+    );
+    // One undo step back to what the rules made of it.
+    h.state_mut().test_sql_window().editor.inner().undo();
+    h.run_steps(1);
+    assert!(
+        h.state_mut()
+            .test_sql_window()
+            .editor
+            .text()
+            .starts_with("select 1 from dual;\ncreate or replace trigger t_a")
+    );
+}
+
 /// Commit and Rollback follow the focused window's transaction, and never
 /// open a session just to end nothing.
 #[test]

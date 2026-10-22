@@ -100,6 +100,8 @@ pub struct PythiaApp {
     catalog_inflight: HashMap<u64, String>,
     /// Reading a schema's source to learn formatter settings from: request id.
     learn_inflight: Option<u64>,
+    /// Statements the formatter keeps as written, being laid out by the AI.
+    ai_format: Option<AiFormatRun>,
     /// Invalid objects per connection, for the status bar.
     invalid: HashMap<String, InvalidCount>,
     /// Count requests in flight: request id → connection.
@@ -180,6 +182,7 @@ impl PythiaApp {
             catalog_revision: 0,
             catalog_inflight: HashMap::new(),
             learn_inflight: None,
+            ai_format: None,
             invalid: HashMap::new(),
             invalid_inflight: HashMap::new(),
             catalog_requested: std::collections::HashSet::new(),
@@ -1173,6 +1176,158 @@ impl PythiaApp {
         }
     }
 
+    /// Formats the focused editor, then asks the AI to lay out each
+    /// statement the formatter keeps as written (unsupported constructs,
+    /// failed safety checks), by the same rules.
+    fn ai_format(&mut self) {
+        let Some(doc) = self.focused else {
+            return;
+        };
+        let part = match self.docs.get(&doc).map(|d| &d.kind) {
+            Some(DocKind::Program(w)) => w.active,
+            _ => 0,
+        };
+        if self.ai_format.is_some() {
+            self.log("Format with AI: already running");
+            return;
+        }
+        let Some(backend) = self.assistant.backend(&self.settings.ai).cloned() else {
+            self.log("Format with AI: set up a model in Settings → AI first");
+            return;
+        };
+        let options = self.settings.format.clone();
+        let Some(editor) = self.editor_mut(doc, part) else {
+            self.log("Format with AI: put the cursor in a SQL or program window");
+            return;
+        };
+        editor.format_all(&options);
+        let text = editor.text().to_owned();
+        let kept = pythia_plsql::kept_as_written(&text, &options);
+        if kept.is_empty() {
+            self.log("Format with AI: the formatter handles every statement here");
+            return;
+        }
+        let ai = &self.settings.ai;
+        let rules = pythia_plsql::describe_format(&options);
+        let timeout = std::time::Duration::from_secs(ai.timeout_secs.max(5));
+        let mut jobs = Vec::new();
+        for range in kept {
+            let original = text[range.clone()].to_owned();
+            let turn = pythia_ai::Turn::new(
+                pythia_ai::Task::Format(rules.clone()),
+                vec![pythia_ai::Part::code("Statement", original.clone())],
+            );
+            let (request, _) = pythia_ai::prompt::request(
+                &[turn],
+                pythia_ai::Policy::new(ai),
+                backend.context_chars.max(2000),
+            );
+            let job = crate::ai::spawn(
+                backend.clone(),
+                request,
+                timeout,
+                self.notify.callback(),
+                self.assistant.responder.clone(),
+            );
+            jobs.push(AiFormatJob {
+                range,
+                original,
+                job,
+                result: None,
+            });
+        }
+        self.log(format!(
+            "Format with AI: asking {} to lay out {} statement(s) the formatter keeps as written",
+            backend.name,
+            jobs.len()
+        ));
+        self.ai_format = Some(AiFormatRun { doc, part, jobs });
+    }
+
+    /// Applies the AI's layouts once every answer is in: each only if it
+    /// changes nothing but whitespace and case, and the statement wasn't
+    /// edited meanwhile; all in one undo step.
+    fn poll_ai_format(&mut self) {
+        let Some(run) = &mut self.ai_format else {
+            return;
+        };
+        for j in &mut run.jobs {
+            if j.result.is_none() {
+                j.result = j.job.poll();
+            }
+        }
+        if run.jobs.iter().any(|j| j.result.is_none()) {
+            return;
+        }
+        let Some(run) = self.ai_format.take() else {
+            return;
+        };
+        let Some(editor) = self.editor_mut(run.doc, run.part) else {
+            self.log("Format with AI: the window was closed");
+            return;
+        };
+        let mut text = editor.text().to_owned();
+        let total = run.jobs.len();
+        let mut laid_out = 0;
+        // Where kept statements start, and why they were kept.
+        let mut kept = Vec::new();
+        // Replacements made: where, and how much longer the text got.
+        let mut grown: Vec<(usize, isize)> = Vec::new();
+        // From the last statement back, so the earlier ranges stay valid.
+        for j in run.jobs.into_iter().rev() {
+            let code = j
+                .result
+                .unwrap_or_else(|| Err("no answer".into()))
+                .and_then(|answer| {
+                    pythia_ai::answer::blocks(&answer)
+                        .into_iter()
+                        .find_map(|b| match b {
+                            pythia_ai::answer::Block::Code { code, .. } => {
+                                Some(crate::ai::fit_terminator(&j.original, code))
+                            }
+                            pythia_ai::answer::Block::Text(_) => None,
+                        })
+                        .ok_or_else(|| "the answer had no code".to_owned())
+                });
+            let problem = match code {
+                Err(e) => e,
+                Ok(_) if text.get(j.range.clone()) != Some(j.original.as_str()) => {
+                    "it was edited meanwhile".into()
+                }
+                Ok(code) if !pythia_plsql::only_layout_differs(&j.original, &code) => {
+                    "the answer changed more than the layout".into()
+                }
+                Ok(code) => {
+                    grown.push((j.range.start, code.len() as isize - j.range.len() as isize));
+                    text.replace_range(j.range, &code);
+                    laid_out += 1;
+                    continue;
+                }
+            };
+            kept.push((j.range.start, problem));
+        }
+        editor.apply_format(&text);
+        let mut message = format!("Format with AI: laid out {laid_out} of {total} statement(s)");
+        if !kept.is_empty() {
+            let lines: Vec<String> = kept
+                .into_iter()
+                .rev()
+                .map(|(start, problem)| {
+                    let shift: isize = grown
+                        .iter()
+                        .filter(|(at, _)| *at < start)
+                        .map(|(_, d)| d)
+                        .sum();
+                    let at = start.saturating_add_signed(shift).min(text.len());
+                    let line = text[..at].matches('\n').count() + 1;
+                    format!("line {line}: {problem}")
+                })
+                .collect();
+            message.push_str(&format!("; kept as written: {}", lines.join("; ")));
+        }
+        self.log(message);
+    }
+
     /// Inserts code from an answer at the cursor of the editor the request
     /// came from (or the focused one, or a new SQL window).
     fn ai_insert(&mut self, origin: Option<crate::ai::Origin>, text: &str) {
@@ -1780,6 +1935,7 @@ impl PythiaApp {
             }
             Command::Format => {
                 let options = self.settings.format.clone();
+                let has_ai = !self.settings.ai.backends.is_empty();
                 let editor = match self
                     .focused
                     .and_then(|id| self.docs.get_mut(&id))
@@ -1790,7 +1946,21 @@ impl PythiaApp {
                     _ => None,
                 };
                 let message = match editor {
-                    Some(editor) => format_editor(editor, &options),
+                    Some(editor) => {
+                        let mut message = format_editor(editor, &options);
+                        let kept = pythia_plsql::kept_as_written(editor.text(), &options).len();
+                        if kept > 0 {
+                            message.push_str(&format!(
+                                "; {kept} statement(s) kept as written (unsupported or not safe to change)"
+                            ));
+                            if has_ai {
+                                message.push_str(
+                                    ": AI: Format Unsupported Statements can lay them out",
+                                );
+                            }
+                        }
+                        message
+                    }
                     None => "Nothing to format".into(),
                 };
                 self.log(message);
@@ -1868,6 +2038,7 @@ impl PythiaApp {
             Command::AiFix => self.ai_ask(pythia_ai::Task::Fix),
             Command::AiRewrite => self.ai_ask(pythia_ai::Task::Rewrite),
             Command::AiAnalyzePlan => self.ai_ask(pythia_ai::Task::AnalyzePlan),
+            Command::AiFormat => self.ai_format(),
             Command::ShowPalette => self.palette.toggle(),
             Command::ShowBrowser => self.open_tab(Tab::Browser),
             Command::ShowProject => self.open_tab(Tab::Project),
@@ -2370,6 +2541,7 @@ impl PythiaApp {
                 item(ui, Command::AiFix);
                 item(ui, Command::AiRewrite);
                 item(ui, Command::AiAnalyzePlan);
+                item(ui, Command::AiFormat);
                 ui.separator();
                 item(ui, Command::ShowAssistant);
             });
@@ -3229,6 +3401,7 @@ impl eframe::App for PythiaApp {
             .map(|(n, c)| (n.clone(), c.profile.privilege))
             .collect();
         self.assistant.poll();
+        self.poll_ai_format();
         let focused_title = self
             .focused
             .and_then(|id| self.docs.get(&id))
@@ -3892,6 +4065,22 @@ fn rename_symbol(editor: &mut crate::editor::Editor) -> Option<String> {
 }
 
 /// Formats the selection (or the whole text) as one undo step.
+/// Statements of an editor the AI is laying out (AI: Format Unsupported
+/// Statements).
+struct AiFormatRun {
+    doc: DocId,
+    part: usize,
+    jobs: Vec<AiFormatJob>,
+}
+
+struct AiFormatJob {
+    range: std::ops::Range<usize>,
+    /// The statement's text when asked; the answer replaces only this.
+    original: String,
+    job: crate::ai::Job,
+    result: Option<Result<String, String>>,
+}
+
 fn format_editor(
     editor: &mut crate::editor::Editor,
     options: &pythia_plsql::FormatOptions,

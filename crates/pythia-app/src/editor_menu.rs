@@ -105,6 +105,7 @@ pub fn show(
                     Command::AiFix,
                     Command::AiRewrite,
                     Command::AiAnalyzePlan,
+                    Command::AiFormat,
                 ] {
                     command(ui, c);
                 }
