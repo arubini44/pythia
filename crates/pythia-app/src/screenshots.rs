@@ -1165,7 +1165,8 @@ fn result_chart() {
         return;
     };
     let mut h = harness(false);
-    h.state_mut().test_connect(profile, password);
+    h.state_mut()
+        .test_connect(profile.clone(), password.clone());
     wait_until(&mut h, "connection", |app| app.test_connected());
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
@@ -1188,6 +1189,26 @@ select to_char(add_months(date '2025-01-01', level - 1), 'Mon YYYY') as month,
     let w = h.state_mut().test_sql_window();
     w.state.results[0].chart.as_mut().unwrap().kind = crate::chart_view::ChartKind::Line;
     save(&mut h, "result-chart-lines");
+    let text = h.state_mut().test_sql_window().editor.text().to_owned();
+    drop(h);
+
+    // A narrow window: the twelve months' labels thin out evenly (#22).
+    let mut h = sized_harness(egui::vec2(600.0, 700.0));
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text,
+        run: true,
+    });
+    wait_until(&mut h, "query", |app| !app.test_focused_busy());
+    let w = h.state_mut().test_sql_window();
+    let result = &mut w.state.results[0];
+    result.chart = Some(crate::chart_view::ChartState::guess(
+        &result.columns,
+        result.rows.len(),
+    ));
+    save(&mut h, "result-chart-narrow");
 }
 
 /// A result of a table with foreign keys offers its parent and child rows.

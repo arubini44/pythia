@@ -43,6 +43,9 @@ All notable changes to Pythia are documented here. The format follows
   row count share what's left (truncated, hidden when there's no room, the
   status bar has the count too), and without room for them the buttons show
   icons only, labels as tooltips.
+- Charts: with many categories in a narrow chart, the x axis labelled only
+  the first one. Labels now thin out evenly (every 2nd, 3rd, … category),
+  as many as fit.
 - Oracle 11.2 to 21c (#16, tested against 11.2 XE, 18c XE, 21c XE and
   23ai Free). Queries no longer use `FETCH FIRST` or dictionary columns
   that came with 12.1, so find object, completion and go to definition,

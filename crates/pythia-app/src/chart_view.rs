@@ -3,12 +3,19 @@
 //! numeric columns. The chart follows the grid's filter and sort order.
 
 use egui::{Color32, RichText, Ui};
-use egui_plot::{Bar, BarChart, Line, Plot, PlotPoints};
+use egui_plot::{Bar, BarChart, GridInput, GridMark, Line, Plot, PlotPoints};
 use pythia_db::{Cell, Column};
 use pythia_ui::GridState;
 
 /// Points beyond this are not drawn; the chart says so.
 const MAX_POINTS: usize = 20_000;
+
+/// The plot's smallest grid spacing (points), which `GridInput::base_step_size`
+/// is measured in.
+const GRID_SPACING_MIN: f32 = 8.0;
+/// egui_plot draws an x label at full strength once its mark's step is this
+/// many points wide (it fades them in from 60).
+const X_LABEL_SPACING: f32 = 80.0;
 
 /// Categorical series colors (light, dark), assigned in this fixed order.
 const SERIES: [(&str, &str); 8] = [
@@ -80,6 +87,34 @@ pub fn parse_number(cell: &Cell) -> Option<f64> {
 fn series_color(slot: usize, dark: bool) -> Color32 {
     let (light, dark_hex) = SERIES[slot % SERIES.len()];
     Color32::from_hex(if dark { dark_hex } else { light }).unwrap_or(Color32::GRAY)
+}
+
+/// Characters an x label keeps: fewer the more categories are visible.
+fn label_chars(visible: f64) -> usize {
+    if visible > 30.0 { 10 } else { 18 }
+}
+
+/// Marks for the x axis on category positions only, every `step`th so that
+/// labels `label_width` points wide fit at the current zoom. (The default
+/// spacer's steps are powers of ten: once every category doesn't fit, it
+/// jumps to every tenth, so ten categories get one label.)
+fn category_marks(input: GridInput, categories: usize, label_width: f32) -> Vec<GridMark> {
+    if categories == 0 || input.base_step_size <= 0.0 {
+        return Vec::new();
+    }
+    let points_per_unit = f64::from(GRID_SPACING_MIN) / input.base_step_size;
+    let needed = f64::from(label_width.max(X_LABEL_SPACING));
+    let step = (needed / points_per_unit).ceil().max(1.0);
+    let (lo, hi) = input.bounds;
+    let first = (lo.max(0.0) / step).ceil() * step;
+    let last = hi.min(categories as f64 - 1.0);
+    std::iter::successors(Some(first), |v| Some(v + step))
+        .take_while(|v| *v <= last)
+        .map(|value| GridMark {
+            value,
+            step_size: step,
+        })
+        .collect()
 }
 
 fn short(label: &str, max: usize) -> String {
@@ -196,6 +231,20 @@ pub fn ui(
             }
         });
     }
+    // Widest label at either length, for spacing the x axis marks.
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let widest = |max: usize| {
+        let longest = labels
+            .iter()
+            .map(|l| short(l, max))
+            .max_by_key(|l| l.chars().count())
+            .unwrap_or_default();
+        let galley = ui
+            .painter()
+            .layout_no_wrap(longest, font.clone(), Color32::WHITE);
+        galley.size().x + 12.0
+    };
+    let label_width = (widest(label_chars(31.0)), widest(label_chars(0.0)));
     let tick_labels = labels.clone();
     let hover_labels = labels.clone();
     let hover_names = names.clone();
@@ -206,15 +255,23 @@ pub fn ui(
         .include_y(0.0)
         .show_grid([false, true])
         .y_axis_min_width(40.0)
+        .grid_spacing(GRID_SPACING_MIN..=300.0)
+        .x_grid_spacer(move |input| {
+            let visible = input.bounds.1 - input.bounds.0;
+            let width = if label_chars(visible) == label_chars(31.0) {
+                label_width.0
+            } else {
+                label_width.1
+            };
+            category_marks(input, n_labels, width)
+        })
         .x_axis_formatter(move |mark, range| {
             let i = mark.value.round();
             if (mark.value - i).abs() > 1e-6 || i < 0.0 || i as usize >= n_labels {
                 return String::new();
             }
-            // Fewer characters per label the more labels are visible.
             let visible = (range.end() - range.start()).max(1.0);
-            let max = if visible > 30.0 { 10 } else { 18 };
-            short(&tick_labels[i as usize], max)
+            short(&tick_labels[i as usize], label_chars(visible))
         })
         .label_formatter(move |hover| match hover {
             egui_plot::HoverPosition::NearDataPoint {
@@ -294,6 +351,36 @@ mod tests {
             type_name: type_name.into(),
             numeric,
         }
+    }
+
+    #[test]
+    fn category_marks_thin_out_evenly() {
+        // 10 categories over 300 points: 30 points per category.
+        let input = |bounds: (f64, f64), width: f64| GridInput {
+            bounds,
+            base_step_size: (bounds.1 - bounds.0) / width * f64::from(GRID_SPACING_MIN),
+        };
+        let values = |marks: Vec<GridMark>| marks.iter().map(|m| m.value).collect::<Vec<_>>();
+        let marks = category_marks(input((-0.5, 9.5), 300.0), 10, 40.0);
+        // 80 points needed: every third category.
+        assert_eq!(values(marks.clone()), [0.0, 3.0, 6.0, 9.0]);
+        assert!(marks.iter().all(|m| m.step_size == 3.0));
+        // Wide enough for all of them.
+        assert_eq!(
+            values(category_marks(input((-0.5, 9.5), 1000.0), 10, 40.0)),
+            (0..10).map(f64::from).collect::<Vec<_>>()
+        );
+        // Long labels need more room than the minimum.
+        assert_eq!(
+            values(category_marks(input((-0.5, 9.5), 1000.0), 10, 150.0)),
+            [0.0, 2.0, 4.0, 6.0, 8.0]
+        );
+        // Only categories inside the visible range, none past the last.
+        assert_eq!(
+            values(category_marks(input((3.2, 20.0), 2000.0), 10, 40.0)),
+            [4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        );
+        assert!(category_marks(input((-0.5, 9.5), 300.0), 0, 40.0).is_empty());
     }
 
     #[test]
