@@ -7,6 +7,10 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- User and role form: quotas on any number of tablespaces, the admin
+  option of granted roles and system privileges, a user's default roles,
+  and object privileges (with grant option for users) to add and revoke
+  (#39).
 - Table editor: a Partitions tab (#37). A new table can be partitioned by
   range, interval, list or hash, with its key, partitions (and a MAXVALUE
   or DEFAULT one) and tablespaces; a copy of a partitioned table is

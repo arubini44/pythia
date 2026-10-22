@@ -1715,8 +1715,14 @@ mod tests {
                for r in (select role from dba_roles where role = 'PYTHIA_OB_ROLE') loop
                  execute immediate 'drop role pythia_ob_role';
                end loop;
+               for t in (select table_name from dba_tables
+                          where owner = 'SYSTEM' and table_name = 'PYTHIA_OB_ACC_T') loop
+                 execute immediate 'drop table system.pythia_ob_acc_t purge';
+               end loop;
              end;";
         conn.execute(cleanup, &[]).unwrap();
+        conn.execute("create table system.pythia_ob_acc_t (id number)", &[])
+            .unwrap();
         let run = |statements: Vec<String>| {
             apply(&conn, &statements, None).unwrap_or_else(|e| {
                 panic!("{}: {}", e.statement, e.error);
@@ -1726,6 +1732,7 @@ mod tests {
         account::lists(&conn, &mut base).unwrap();
         assert!(base.privileges.iter().any(|p| p == "CREATE TABLE"));
         assert!(base.roles.iter().any(|r| r == "CONNECT"));
+        assert!(base.owners.iter().any(|o| o == "SYSTEM"));
         assert!(base.session_privileges.iter().any(|p| p == "CREATE USER"));
         let tablespace = base
             .tablespaces
@@ -1733,44 +1740,93 @@ mod tests {
             .find(|t| *t == "USERS")
             .cloned()
             .unwrap_or_else(|| base.tablespaces[0].clone());
+        let other = base
+            .tablespaces
+            .iter()
+            .find(|t| **t != tablespace && *t != "SYSTEM")
+            .cloned()
+            .unwrap_or_else(|| "SYSTEM".into());
+        let table = ("SYSTEM".to_owned(), "PYTHIA_OB_ACC_T".to_owned());
+        let object = |p: &str| (table.0.clone(), table.1.clone(), p.to_owned());
 
         let mut role = account::AccountDef::new_role();
         role.name = "pythia_ob_role".into();
-        role.privileges.insert("CREATE SESSION".into());
+        role.privileges.insert("CREATE SESSION".into(), false);
+        role.objects.insert(object("SELECT"), false);
         run(account::statements(None, &role).unwrap());
         let loaded = account::load_role(&conn, "PYTHIA_OB_ROLE").unwrap();
         assert_eq!(loaded.auth, account::Auth::None);
         assert_eq!(loaded.privileges, role.privileges);
+        assert_eq!(loaded.objects, role.objects);
 
         let mut user = account::AccountDef::new_user();
         user.name = "pythia_ob_user".into();
         user.password = "Pythia_ob_1".into();
         user.default_tablespace = tablespace.clone();
-        user.quota = "10M".into();
-        user.roles.insert("PYTHIA_OB_ROLE".into());
-        user.privileges.insert("CREATE TABLE".into());
+        user.quotas = vec![
+            (tablespace.clone(), "10M".into()),
+            (other.clone(), "unlimited".into()),
+        ];
+        user.roles.insert(
+            "PYTHIA_OB_ROLE".into(),
+            account::RoleGrant {
+                admin: true,
+                default: true,
+            },
+        );
+        user.roles.insert(
+            "CONNECT".into(),
+            account::RoleGrant {
+                admin: false,
+                default: false,
+            },
+        );
+        user.privileges.insert("CREATE TABLE".into(), true);
+        user.objects.insert(object("UPDATE"), true);
         run(account::statements(None, &user).unwrap());
         let loaded = account::load_user(&conn, "PYTHIA_OB_USER").unwrap();
         assert_eq!(loaded.auth, account::Auth::Password);
         assert_eq!(ident(&loaded.default_tablespace), tablespace);
-        assert_eq!(loaded.quota, "10M");
-        assert!(loaded.roles.contains("PYTHIA_OB_ROLE"), "{loaded:?}");
-        assert!(loaded.privileges.contains("CREATE TABLE"));
+        let mut quotas: Vec<(String, String)> = loaded
+            .quotas
+            .iter()
+            .map(|(t, s)| (ident(t), s.clone()))
+            .collect();
+        quotas.sort();
+        let mut expected = vec![
+            (tablespace.clone(), "10M".to_owned()),
+            (other.clone(), "unlimited".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(quotas, expected);
+        assert_eq!(loaded.roles, user.roles, "admin option and default roles");
+        assert_eq!(loaded.privileges, user.privileges);
+        assert_eq!(loaded.objects, user.objects);
         assert!(!loaded.locked && !loaded.expire);
         // Nothing to do on the loaded user.
         assert_eq!(account::statements(Some(&loaded), &loaded), Ok(Vec::new()));
 
         let mut edited = loaded.clone();
         edited.locked = true;
-        edited.quota = "unlimited".into();
-        edited.privileges.remove("CREATE TABLE");
-        edited.roles.clear();
+        edited.quotas.retain(|(t, _)| ident(t) == tablespace);
+        edited.quotas[0].1 = "unlimited".into();
+        edited.privileges.insert("CREATE TABLE".into(), false);
+        edited.roles.get_mut("CONNECT").unwrap().default = true;
+        edited.roles.get_mut("PYTHIA_OB_ROLE").unwrap().admin = false;
+        edited.objects.insert(object("UPDATE"), false);
+        edited.objects.insert(object("SELECT"), false);
         run(account::statements(Some(&loaded), &edited).unwrap());
         let reloaded = account::load_user(&conn, "PYTHIA_OB_USER").unwrap();
         assert!(reloaded.locked);
-        assert_eq!(reloaded.quota, "unlimited");
-        assert!(!reloaded.privileges.contains("CREATE TABLE"));
-        assert!(reloaded.roles.is_empty(), "{reloaded:?}");
+        assert_eq!(reloaded.quotas.len(), 1);
+        assert_eq!(reloaded.quotas[0].1, "unlimited");
+        assert_eq!(reloaded.privileges, edited.privileges);
+        assert_eq!(reloaded.roles, edited.roles);
+        assert_eq!(reloaded.objects, edited.objects);
+        assert_eq!(
+            account::statements(Some(&reloaded), &reloaded),
+            Ok(Vec::new())
+        );
         conn.execute(cleanup, &[]).unwrap();
     }
 }

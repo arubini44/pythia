@@ -2393,9 +2393,13 @@ create table pythia_nof_items (id number primary key, label varchar2(40), price 
             .unwrap();
         d.name = "app_reader".into();
         d.password = "Secret_1".into();
-        d.quota = "100M".into();
+        d.quotas = vec![("USERS".into(), "100M".into())];
         d.default_tablespace = "USERS".into();
-        d.roles.insert("CONNECT".into());
+        d.roles.insert("CONNECT".into(), Default::default());
+        d.objects.insert(
+            ("PYTHIA".into(), "PYTHIA_NOF_ITEMS".into(), "SELECT".into()),
+            false,
+        );
     });
     h.run_steps(3);
     save(&mut h, "new-user");
