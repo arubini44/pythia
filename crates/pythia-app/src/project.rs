@@ -435,8 +435,7 @@ impl Project {
                 text = text.color(ui.visuals().weak_text_color());
             }
             let selected = self.state.selected.as_ref() == Some(&entry.path);
-            let response =
-                ui.add(egui::Button::selectable(selected, text).frame_when_inactive(false));
+            let response = ui.add(egui::Button::selectable(selected, text));
             if let Some(s) = status
                 && !entry.dir
             {

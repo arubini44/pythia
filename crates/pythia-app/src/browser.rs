@@ -1116,9 +1116,7 @@ impl Browser {
                     let selected = self.selected.as_ref() == Some(&r);
                     let response = self.drag_source(ui, &r, |ui| {
                         ui.add(
-                            egui::Button::selectable(selected, text)
-                                .frame_when_inactive(false)
-                                .sense(Sense::click_and_drag()),
+                            egui::Button::selectable(selected, text).sense(Sense::click_and_drag()),
                         )
                     });
                     let response = response.on_hover_ui(|ui| {
@@ -1302,13 +1300,10 @@ impl Browser {
                         object_type: *object_type,
                     };
                     let selected = self.selected.as_ref() == Some(&account);
-                    let response = ui.add(
-                        egui::Button::selectable(
-                            selected,
-                            RichText::new(name.to_lowercase()).monospace(),
-                        )
-                        .frame_when_inactive(false),
-                    );
+                    let response = ui.add(egui::Button::selectable(
+                        selected,
+                        RichText::new(name.to_lowercase()).monospace(),
+                    ));
                     if response.clicked() {
                         actions.push(ObjectAction::Select(account.clone()));
                     }
@@ -1335,9 +1330,7 @@ impl Browser {
                     }
                     let response = self.drag_source(ui, object, |ui| {
                         ui.add(
-                            egui::Button::selectable(selected, text)
-                                .frame_when_inactive(false)
-                                .sense(Sense::click_and_drag()),
+                            egui::Button::selectable(selected, text).sense(Sense::click_and_drag()),
                         )
                     });
                     let response = response.on_hover_text(format!(

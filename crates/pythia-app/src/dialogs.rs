@@ -193,9 +193,7 @@ impl ConnectDialog {
                             if p.production {
                                 text = text.color(ui.visuals().error_fg_color);
                             }
-                            let r = ui.add(
-                                egui::Button::selectable(selected, text).frame_when_inactive(false),
-                            );
+                            let r = ui.add(egui::Button::selectable(selected, text));
                             r.on_hover_text(format!(
                                 "{}@{}{}",
                                 p.username,
