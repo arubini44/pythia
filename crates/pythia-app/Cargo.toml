@@ -24,6 +24,7 @@ egui_extras.workspace = true
 egui_plot = "0.37"
 keyring.workspace = true
 rfd = "0.17"
+pythia-ai.workspace = true
 pythia-compare.workspace = true
 pythia-config.workspace = true
 pythia-data.workspace = true

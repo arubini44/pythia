@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.95"
 
 [workspace.dependencies]
+pythia-ai = { path = "crates/pythia-ai" }
 pythia-config = { path = "crates/pythia-config" }
 pythia-compare = { path = "crates/pythia-compare" }
 pythia-data = { path = "crates/pythia-data" }
@@ -36,6 +37,9 @@ keyring = "4"
 anyhow = "1"
 thiserror = "2"
 insta = "1"
+serde_json = "1"
+# Blocking HTTP for the AI backends (rustls, no async runtime).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 # Keep dev builds small and fast: full debug info only for our own crates.
 [profile.dev]

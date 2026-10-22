@@ -16,8 +16,8 @@ pub mod tns;
 
 pub use connections::{ConnectionProfile, Connections, Privilege};
 pub use settings::{
-    EditorSettings, FormatTriggers, InvalidObjectSettings, InvalidScope, KeymapPreset, Settings,
-    ThemeChoice,
+    AiBackend, AiKind, AiSettings, EditorSettings, FormatTriggers, InvalidObjectSettings,
+    InvalidScope, KeymapPreset, Settings, ThemeChoice,
 };
 
 /// Platform directories used by Pythia.
@@ -144,6 +144,35 @@ mod tests {
         move_if_absent(&old, &new).unwrap();
         assert!(old.exists(), "an existing target is left alone");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ai_settings() {
+        let settings: Settings = toml::from_str(
+            "[ai]\nsend_bind_values = true\n\n[[ai.backends]]\nid = \"b1\"\nname = \"Ollama\"\n\
+             kind = \"local-server\"\nmodel = \"llama3.1\"\n",
+        )
+        .unwrap();
+        let ai = &settings.ai;
+        assert!(ai.send_bind_values && !ai.send_result_data);
+        assert_eq!(ai.timeout_secs, 300);
+        let backend = ai.default_backend().unwrap();
+        assert_eq!(
+            (backend.kind, backend.model.as_str()),
+            (AiKind::LocalServer, "llama3.1")
+        );
+        assert!(ai.backend("nope").is_none());
+
+        let mut settings = Settings::default();
+        settings.ai.backends = vec![
+            AiBackend::new(AiKind::Anthropic, "a".into()),
+            AiBackend::new(AiKind::Cli, "c".into()),
+        ];
+        settings.ai.default_backend = "c".into();
+        let text = toml::to_string_pretty(&settings).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back, settings);
+        assert_eq!(back.ai.default_backend().unwrap().kind, AiKind::Cli);
     }
 
     #[test]
