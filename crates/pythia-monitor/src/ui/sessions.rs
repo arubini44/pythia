@@ -642,25 +642,27 @@ fn session_menu(
         ui.close();
     }
     ui.separator();
-    let control = caps.map_or(Err("Checking privileges…".to_owned()), |c| {
-        c.session_control()
-    });
-    let enabled = control.is_ok() && !s.is_self && !s.background;
-    let hint = control
-        .err()
-        .unwrap_or_else(|| "Not possible for this session".into());
-    let item = |ui: &mut Ui, label: &str| {
-        ui.add_enabled(enabled, egui::Button::new(label))
-            .on_disabled_hover_text(&hint)
+    let possible = !s.is_self && !s.background;
+    let item = |ui: &mut Ui, label: &str, allowed: std::result::Result<(), String>| {
+        let hint = allowed
+            .as_ref()
+            .err()
+            .cloned()
+            .unwrap_or_else(|| "Not possible for this session".into());
+        ui.add_enabled(allowed.is_ok() && possible, egui::Button::new(label))
+            .on_disabled_hover_text(hint)
     };
-    if item(ui, "Cancel current SQL").clicked() {
+    let checking = || Err("Checking privileges…".to_owned());
+    let control = caps.map_or_else(checking, |c| c.session_control());
+    let cancel = caps.map_or_else(checking, |c| c.cancel_sql());
+    if item(ui, "Cancel current SQL", cancel).clicked() {
         actions.push(RowAction::Want(Want::CancelSql {
             sid: s.sid,
             serial: s.serial,
         }));
         ui.close();
     }
-    if item(ui, "Kill session…").clicked() {
+    if item(ui, "Kill session…", control.clone()).clicked() {
         actions.push(RowAction::Kill(KillConfirm {
             sid: s.sid,
             serial: s.serial,
@@ -669,7 +671,7 @@ fn session_menu(
         }));
         ui.close();
     }
-    if item(ui, "Kill session immediately…").clicked() {
+    if item(ui, "Kill session immediately…", control).clicked() {
         actions.push(RowAction::Kill(KillConfirm {
             sid: s.sid,
             serial: s.serial,

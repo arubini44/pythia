@@ -390,7 +390,13 @@ pub fn column_name(header: &str) -> String {
     if name.is_empty() || !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
         name = format!("C_{name}");
     }
-    name.chars().take(128).collect()
+    // Identifiers are limited to 128 bytes (12.2+), not characters.
+    let mut end = name.len().min(128);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name.truncate(end);
+    name
 }
 
 /// The SQL expression that converts the bind `:n` for a column.
@@ -492,6 +498,7 @@ mod tests {
     fn names() {
         assert_eq!(column_name("Order date"), "ORDER_DATE");
         assert_eq!(column_name(" 2nd value! "), "C_2ND_VALUE");
+        assert_eq!(column_name(&"Ä".repeat(100)).len(), 128);
     }
 
     #[test]

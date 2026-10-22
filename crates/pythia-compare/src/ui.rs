@@ -75,10 +75,13 @@ fn take<T: Any>(result: TaskResult) -> Result<T, String> {
     }
 }
 
-const SCHEMAS_SQL: &str = "select username from all_users where oracle_maintained = 'N' or username = user order by username";
-
 fn load_schemas(conn: &pythia_db::oracle::Connection) -> Result<Vec<String>, crate::Error> {
-    let rows = conn.query_as::<String>(SCHEMAS_SQL, &[])?;
+    let release = pythia_db::compat::release(conn)?;
+    let sql = format!(
+        "select username from all_users where username in ({}) or username = user order by username",
+        pythia_db::compat::schemas_query(release, false)
+    );
+    let rows = conn.query_as::<String>(&sql, &[])?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 

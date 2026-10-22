@@ -1243,7 +1243,7 @@ fn scheduler_jobs() {
     dbms_scheduler.drop_job(j.job_name, force => true);
   end loop;
   dbms_scheduler.create_job('PYTHIA_NIGHTLY_STATS', 'PLSQL_BLOCK',
-    'begin dbms_session.sleep(0.2); end;',
+    'declare t timestamp := systimestamp + interval ''0.2'' second; begin while systimestamp < t loop null; end loop; end;',
     repeat_interval => 'FREQ=DAILY;BYHOUR=2', enabled => true,
     comments => 'Refreshes optimizer statistics of the schema every night');
   dbms_scheduler.create_job('PYTHIA_PURGE_LOGS', 'PLSQL_BLOCK', 'begin null; end;',
@@ -1666,8 +1666,8 @@ end pythia_prof_pkg;
             );
             assert!(p.rows.iter().any(|r| r.object().is_some()));
         }
-        // No EXECUTE on DBMS_HPROF here.
-        Err(e) if e.contains("grant execute") => return,
+        // No EXECUTE on DBMS_HPROF here, or a database before 18c.
+        Err(e) if e.contains("grant execute") || e.contains("needs Oracle 18c") => return,
         Err(e) => panic!("{e}"),
     }
     save(&mut h, "profiler");

@@ -282,10 +282,12 @@ mod tests {
         let (cred, db) = spec.rsplit_once('@').unwrap();
         let (user, pw) = cred.split_once('/').unwrap();
         let conn = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+        let release = pythia_db::compat::release(&conn).unwrap();
         let mut failed = Vec::new();
         for r in REPORTS {
+            let sql = pythia_db::compat::for_release(r.sql, release);
             if let Err(e) = conn
-                .query(r.sql.trim_end_matches(';'), &[])
+                .query(sql.trim_end_matches(';'), &[])
                 .and_then(|mut rows| rows.next().transpose())
             {
                 failed.push(format!("{}: {e}", r.name));

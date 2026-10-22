@@ -433,12 +433,14 @@ fn query(conn: &Connection, pattern: &str, f: &Filter) -> Result<Found, DbError>
         (false, true) => format!("instr({col}, :pattern) > 0"),
         (false, false) => format!("instr(upper({col}), upper(:pattern)) > 0"),
     };
+    let release = pythia_db::compat::release(conn)?;
     let oracle_filter = |col: &str| {
         if f.include_oracle {
             String::new()
         } else {
             format!(
-                " and {col} not in (select username from all_users where oracle_maintained = 'Y')"
+                " and {col} not in ({})",
+                pythia_db::compat::schemas_query(release, true)
             )
         }
     };
@@ -453,12 +455,11 @@ fn query(conn: &Connection, pattern: &str, f: &Filter) -> Result<Found, DbError>
             "select s.owner, s.name, s.type, s.line, s.text from all_source s \
               where {} and (:owner is null or s.owner = :owner) \
                 and (:name is null or s.name like :name){types}{} \
-              order by s.owner, s.name, s.type, s.line \
-              fetch first {} rows only",
+              order by s.owner, s.name, s.type, s.line",
             condition("s.text"),
             oracle_filter("s.owner"),
-            MAX_HITS + 1
         );
+        let sql = pythia_db::compat::first_rows(&sql, MAX_HITS + 1);
         for row in conn.query_named(&sql, &binds)? {
             let row = row?;
             let (owner, name, ty, line, text): (String, String, String, u32, Option<String>) =
@@ -495,18 +496,41 @@ fn query(conn: &Connection, pattern: &str, f: &Filter) -> Result<Found, DbError>
             found.job_actions.insert((owner, name), text);
         }
     };
-    if matches!(f.kind, SourceKind::All | SourceKind::Views) {
+    if matches!(f.kind, SourceKind::All | SourceKind::Views) && release >= (12, 1) {
         let sql = format!(
             "select v.owner, v.view_name, v.text_vc from all_views v \
               where {} and (:owner is null or v.owner = :owner) \
                 and (:name is null or v.view_name like :name){} \
-              order by v.owner, v.view_name fetch first 500 rows only",
+              order by v.owner, v.view_name",
             condition("v.text_vc"),
             oracle_filter("v.owner")
         );
+        let sql = pythia_db::compat::first_rows(&sql, 500);
         for row in conn.query_named(&sql, &binds)? {
             let (owner, name, text): (String, String, Option<String>) = row?.get_as()?;
             whole(owner, name, "VIEW", text.unwrap_or_default());
+        }
+    } else if matches!(f.kind, SourceKind::All | SourceKind::Views) {
+        // Before 12.1 the text is only a LONG, which SQL can't search:
+        // match its lines here.
+        let sql = format!(
+            "select v.owner, v.view_name, v.text from all_views v \
+              where (:owner is null or v.owner = :owner) \
+                and (:name is null or v.view_name like :name){} \
+              order by v.owner, v.view_name",
+            oracle_filter("v.owner")
+        );
+        let mut hits = 0;
+        for row in conn.query_named(&sql, &binds[1..])? {
+            let (owner, name, text): (String, String, Option<String>) = row?.get_as()?;
+            let text = text.unwrap_or_default();
+            if text.lines().any(&line_matches) {
+                whole(owner, name, "VIEW", text);
+                hits += 1;
+                if hits == 500 {
+                    break;
+                }
+            }
         }
     }
     if matches!(f.kind, SourceKind::All | SourceKind::Jobs) {
@@ -514,10 +538,11 @@ fn query(conn: &Connection, pattern: &str, f: &Filter) -> Result<Found, DbError>
             "select j.owner, j.job_name, j.job_action from all_scheduler_jobs j \
               where {} and (:owner is null or j.owner = :owner) \
                 and (:name is null or j.job_name like :name){} \
-              order by j.owner, j.job_name fetch first 500 rows only",
+              order by j.owner, j.job_name",
             condition("j.job_action"),
             oracle_filter("j.owner")
         );
+        let sql = pythia_db::compat::first_rows(&sql, 500);
         for row in conn.query_named(&sql, &binds)? {
             let (owner, name, text): (String, String, Option<String>) = row?.get_as()?;
             whole(owner, name, "JOB", text.unwrap_or_default());

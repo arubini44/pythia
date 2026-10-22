@@ -108,7 +108,10 @@ pub fn setup(conn: &Connection) {
         try_run(conn, &format!("drop user {schema} cascade"));
         run(
             conn,
-            &format!("create user {schema} identified by \"Cmp_Test_1\" quota unlimited on users;"),
+            &format!(
+                "create user {schema} identified by \"Cmp_Test_1\" \
+                 default tablespace users quota unlimited on users;"
+            ),
         );
     }
     run(conn, "alter session set current_schema = pythia_cmp_a;");

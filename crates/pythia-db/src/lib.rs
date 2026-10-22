@@ -6,6 +6,7 @@
 //! bypasses the queue is [`Session::cancel`], which has to interrupt the
 //! worker while it is busy.
 
+pub mod compat;
 mod meta;
 pub mod recompile;
 mod session;

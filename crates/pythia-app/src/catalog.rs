@@ -98,7 +98,7 @@ fn objects(conn: &Connection, schema: Option<&str>) -> Result<Vec<CatalogObject>
         );
     }
     let rows = conn.query_as::<(String, String, String)>(
-        &format!("{sql} fetch first 50000 rows only"),
+        &pythia_db::compat::first_rows(&sql, 50000),
         &[&owner],
     )?;
     let mut out = Vec::new();
@@ -156,9 +156,9 @@ fn object_in(conn: &Connection, owner: &str, name: &str) -> Result<Option<Catalo
     let sql = format!(
         "select owner, object_name, object_type from all_objects \
           where owner = :1 and object_name = :2 and object_type in ({TYPES}) \
-          order by decode(object_type, 'TABLE', 1, 'VIEW', 2, 'PACKAGE', 3, 'TYPE', 4, 5) \
-          fetch first 1 row only"
+          order by decode(object_type, 'TABLE', 1, 'VIEW', 2, 'PACKAGE', 3, 'TYPE', 4, 5)"
     );
+    let sql = pythia_db::compat::first_rows(&sql, 1);
     match conn.query_row_as::<(String, String, String)>(&sql, &[&owner, &name]) {
         Ok((owner, name, object_type)) => Ok(Some(CatalogObject {
             owner,
@@ -217,19 +217,34 @@ fn columns(conn: &Connection, owner: &str, name: &str) -> Result<Vec<CatalogColu
 /// Subprograms of a package or type, or a standalone procedure/function
 /// as its single member, with parameters from ALL_ARGUMENTS.
 fn members(conn: &Connection, owner: &str, name: &str) -> Result<Vec<CatalogMember>, DbError> {
-    let rows = conn.query_as::<(String, Option<String>, u32, Option<String>, String, String, String, u32)>(
-        "select a.object_name, a.overload, a.position, a.argument_name, a.in_out, \
-                nvl(a.pls_type, nvl(a.type_name, a.data_type)), nvl(a.defaulted, 'N'), a.subprogram_id \
+    // The type is NULL in the row 11g has for a parameterless subprogram.
+    #[allow(clippy::type_complexity)]
+    let rows = conn.query_as::<(
+        String,
+        Option<String>,
+        u32,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        u32,
+    )>(
+        &format!(
+            "select a.object_name, a.overload, a.position, a.argument_name, a.in_out, \
+                {}, nvl(a.defaulted, 'N'), a.subprogram_id \
            from all_arguments a \
           where a.owner = :1 and a.data_level = 0 \
             and ((a.package_name = :2) or (a.package_name is null and a.object_name = :2)) \
           order by a.subprogram_id, a.overload, a.position",
+            pythia_db::compat::ARGUMENT_TYPE
+        ),
         &[&owner, &name],
     )?;
     let mut out: Vec<CatalogMember> = Vec::new();
     let mut current: Option<(u32, Option<String>)> = None;
     for row in rows {
         let (proc, overload, position, arg, in_out, data_type, defaulted, subprogram) = row?;
+        let data_type = data_type.unwrap_or_default();
         let key = (subprogram, overload.clone());
         if current.as_ref() != Some(&key) {
             current = Some(key);

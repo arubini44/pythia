@@ -448,10 +448,10 @@ fn find(conn: &Connection, pattern: &str, limit: usize) -> Result<Vec<DbObject>,
         "select {OBJECT_COLUMNS} from all_objects \
          where object_name like :1 escape '\\' and object_type in ({}) \
          order by case when owner = sys_context('USERENV', 'CURRENT_SCHEMA') then 0 else 1 end, \
-                  length(object_name), object_name, owner \
-         fetch first {limit} rows only",
+                  length(object_name), object_name, owner",
         types.join(", ")
     );
+    let sql = crate::compat::first_rows(&sql, limit);
     object_rows(conn.query(&sql, &[&like_pattern(pattern)])?)
 }
 
@@ -530,25 +530,29 @@ fn columns(
 }
 
 fn members(conn: &Connection, owner: &str, package: &str) -> Result<Vec<Member>, DbError> {
-    let sql = "select p.procedure_name, p.overload, \
+    // 11g has a row without a name for a parameterless subprogram.
+    let sql = format!(
+        "select p.procedure_name, p.overload, \
                 (select count(*) from all_arguments a \
                   where a.owner = p.owner and a.package_name = p.object_name \
                     and a.object_name = p.procedure_name \
                     and nvl(a.overload, '-') = nvl(p.overload, '-') \
                     and a.position = 0 and a.data_level = 0), \
                 (select listagg(lower(a.argument_name) || ' ' || a.in_out || ' ' || \
-                        nvl(a.pls_type, nvl(a.type_name, a.data_type)), ', ') \
+                        {}, ', ') \
                         within group (order by a.position) \
                    from all_arguments a \
                   where a.owner = p.owner and a.package_name = p.object_name \
                     and a.object_name = p.procedure_name \
                     and nvl(a.overload, '-') = nvl(p.overload, '-') \
-                    and a.position > 0 and a.data_level = 0) \
+                    and a.position > 0 and a.data_level = 0 and a.argument_name is not null) \
                from all_procedures p \
               where p.owner = :1 and p.object_name = :2 and p.procedure_name is not null \
-              order by p.subprogram_id";
+              order by p.subprogram_id",
+        crate::compat::ARGUMENT_TYPE
+    );
     let mut out = Vec::new();
-    for row in conn.query(sql, &[&owner, &package])? {
+    for row in conn.query(&sql, &[&owner, &package])? {
         let row = row?;
         let (name, overload, returns, args): (String, Option<String>, u32, Option<String>) =
             row.get_as()?;
@@ -579,21 +583,7 @@ fn details(
               group by i.index_name, i.index_type, i.uniqueness, i.status, i.tablespace_name \
               order by i.index_name"
         }
-        Detail::Constraints => {
-            "select k.constraint_name, \
-                    decode(k.constraint_type, 'P', 'Primary key', 'U', 'Unique', 'R', 'Foreign key', \
-                           'C', 'Check', k.constraint_type) as type, \
-                    (select listagg(c.column_name, ', ') within group (order by c.position) \
-                       from all_cons_columns c \
-                      where c.owner = k.owner and c.constraint_name = k.constraint_name) as columns, \
-                    (select r.table_name from all_constraints r \
-                      where r.owner = k.r_owner and r.constraint_name = k.r_constraint_name) as references, \
-                    k.search_condition_vc as condition, k.status, k.delete_rule \
-               from all_constraints k \
-              where k.owner = :1 and k.table_name = :2 \
-                and not (k.constraint_type = 'C' and k.search_condition_vc like '% IS NOT NULL') \
-              order by decode(k.constraint_type, 'P', 1, 'U', 2, 'R', 3, 4), k.constraint_name"
-        }
+        Detail::Constraints => return constraints(conn, owner, name),
         Detail::Triggers => {
             "select trigger_name, trigger_type, triggering_event, status \
                from all_triggers where table_owner = :1 and table_name = :2 order by trigger_name"
@@ -617,6 +607,42 @@ fn details(
         Detail::Link => return link_details(conn, owner, name),
     };
     table_result(conn.query(sql, &[&owner, &name])?, &[])
+}
+
+/// Constraints of a table, without the NOT NULL checks of its columns.
+/// The condition is `SEARCH_CONDITION_VC` from 12.1 on; before, there is
+/// only the LONG `SEARCH_CONDITION`, which SQL can't filter, so the NOT
+/// NULL checks are left out here.
+fn constraints(conn: &Connection, owner: &str, name: &str) -> Result<MetaResult, DbError> {
+    let condition = if crate::compat::at_least(conn, 12, 1)? {
+        "k.search_condition_vc"
+    } else {
+        "k.search_condition"
+    };
+    let sql = format!(
+        "select k.constraint_name, \
+                decode(k.constraint_type, 'P', 'Primary key', 'U', 'Unique', 'R', 'Foreign key', \
+                       'C', 'Check', k.constraint_type) as type, \
+                (select listagg(c.column_name, ', ') within group (order by c.position) \
+                   from all_cons_columns c \
+                  where c.owner = k.owner and c.constraint_name = k.constraint_name) as columns, \
+                (select r.table_name from all_constraints r \
+                  where r.owner = k.r_owner and r.constraint_name = k.r_constraint_name) as references, \
+                {condition} as condition, k.status, k.delete_rule \
+           from all_constraints k \
+          where k.owner = :1 and k.table_name = :2 \
+          order by decode(k.constraint_type, 'P', 1, 'U', 2, 'R', 3, 4), k.constraint_name"
+    );
+    let MetaResult::Table { columns, mut rows } =
+        table_result(conn.query(&sql, &[&owner, &name])?, &[])?
+    else {
+        unreachable!("table_result returns a table")
+    };
+    rows.retain(|r| {
+        !(r[1].as_deref() == Some("Check")
+            && r[4].as_deref().is_some_and(|c| c.ends_with(" IS NOT NULL")))
+    });
+    Ok(MetaResult::Table { columns, rows })
 }
 
 /// A database link as property/value rows. `ALL_DB_LINKS` has the user's

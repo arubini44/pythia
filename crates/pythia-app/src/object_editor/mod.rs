@@ -922,12 +922,21 @@ mod tests {
         let mut edited = loaded.clone();
         edited.increment = "5".into();
         edited.cache = 0;
-        edited.start = "500".into();
+        // Restarting needs 18c; before, the sequence just goes on.
+        if loaded.can_restart {
+            edited.start = "500".into();
+        }
         run(sequence::statements(&owner, Some(&loaded), &edited).unwrap());
         let next: i64 = conn
             .query_row_as("select pythia_oe_seq.nextval from dual", &[])
             .unwrap();
-        assert_eq!(next, 500);
+        // Without a restart it goes on; a new increment before the first
+        // NEXTVAL shifts the first value, so only the restart is exact.
+        if loaded.can_restart {
+            assert_eq!(next, 500);
+        } else {
+            assert!(next >= 100, "{next}");
+        }
         assert_eq!(
             sequence::load(&conn, &owner, "PYTHIA_OE_SEQ")
                 .unwrap()

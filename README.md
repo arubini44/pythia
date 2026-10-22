@@ -171,6 +171,14 @@ license doesn't allow us to bundle. Install it once:
    Client directory or point `TNS_ADMIN` at it; Pythia then offers the aliases
    when connecting.
 
+**Database versions:** Pythia is developed against Oracle 23ai and also
+tested against 11.2 XE, 18c XE and 21c XE. A few features need a newer
+release: the profiler, *Cancel current SQL* in the monitor and restarting a
+sequence need 18c; reading trace files through the database needs 12.2.
+Instant Client 23 connected to all of these in our tests, but Oracle
+supports it only for Database 19c and later. For older databases use
+Instant Client 19 (11.2 and later) or 21 (12.1 and later).
+
 Proxy authentication works with the usual `proxy_user[target_user]` user
 name; an empty user name with a wallet or OS authentication connects as
 `/@alias`.

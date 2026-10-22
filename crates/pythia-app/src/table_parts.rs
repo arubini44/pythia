@@ -56,32 +56,49 @@ select i.index_name, i.uniqueness, i.status,
             enabled: status != "UNUSABLE",
         });
     }
-    // Leave out the NOT NULL checks Oracle generates for columns.
-    let sql = "
-select c.constraint_name, c.constraint_type, c.status,
+    // The condition is a LONG before 12.1, which SQL can't filter or cut.
+    let condition = if pythia_db::compat::at_least(conn, 12, 1)? {
+        "c.search_condition_vc"
+    } else {
+        "c.search_condition"
+    };
+    let sql = format!(
+        "
+select c.constraint_name, c.constraint_type, c.status, c.generated,
        (select listagg(cc.column_name, ', ') within group (order by cc.position)
           from all_cons_columns cc
          where cc.owner = c.owner and cc.constraint_name = c.constraint_name),
-       r.table_name,
-       case when c.constraint_type = 'C' then substr(c.search_condition_vc, 1, 200) end
+       r.table_name, {condition}
   from all_constraints c
   left join all_constraints r on r.owner = c.r_owner and r.constraint_name = c.r_constraint_name
  where c.owner = :1 and c.table_name = :2
    and c.constraint_type in ('P', 'U', 'R', 'C')
-   and not (c.constraint_type = 'C' and c.generated = 'GENERATED NAME'
-            and c.search_condition_vc like '%IS NOT NULL')
- order by decode(c.constraint_type, 'P', 1, 'U', 2, 'R', 3, 4), c.constraint_name";
+ order by decode(c.constraint_type, 'P', 1, 'U', 2, 'R', 3, 4), c.constraint_name"
+    );
     for row in conn.query_as::<(
         String,
         String,
         String,
+        String,
         Option<String>,
         Option<String>,
         Option<String>,
-    )>(sql, &[&owner, &table])?
+    )>(&sql, &[&owner, &table])?
     {
-        let (name, kind, status, columns, references, condition) = row?;
+        let (name, kind, status, generated, columns, references, condition) = row?;
         let kind = kind.chars().next().unwrap_or('C');
+        // Leave out the NOT NULL checks Oracle generates for columns.
+        if kind == 'C'
+            && generated == "GENERATED NAME"
+            && condition
+                .as_deref()
+                .is_some_and(|c| c.ends_with("IS NOT NULL"))
+        {
+            continue;
+        }
+        let condition = condition
+            .filter(|_| kind == 'C')
+            .map(|c| c.chars().take(200).collect());
         let columns = columns.unwrap_or_default().to_lowercase();
         if kind == 'R' {
             parts

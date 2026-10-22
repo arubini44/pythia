@@ -197,21 +197,25 @@ pub fn check(conn: &Connection) -> Result<Vec<MissingPrivilege>, DbError> {
     if !privs.iter().any(|p| p == "DEBUG ANY PROCEDURE") {
         missing.push(MissingPrivilege::DebugAnyProcedure);
     }
-    let aces: i64 = conn
-        .query_row_as(
-            "select count(*) from user_host_aces where privilege = 'JDWP' and grant_type = 'GRANT'",
-            &[],
-        )
-        .unwrap_or(0);
-    if aces == 0 {
-        missing.push(MissingPrivilege::JdwpAcl);
+    // JDWP connections need a host ACE from 12.1 on; 11g has no such check.
+    if pythia_db::compat::at_least(conn, 12, 1)? {
+        let aces: i64 = conn
+            .query_row_as(
+                "select count(*) from user_host_aces where privilege = 'JDWP' and grant_type = 'GRANT'",
+                &[],
+            )
+            .unwrap_or(0);
+        if aces == 0 {
+            missing.push(MissingPrivilege::JdwpAcl);
+        }
     }
     Ok(missing)
 }
 
 /// The SQL an administrator runs once so `user` can debug, with the
 /// database connecting back to `host` (the machine running Pythia, as seen
-/// from the database server). Each statement is executable as is.
+/// from the database server). Each statement is executable as is. The host
+/// ACE needs 12.1+ (and isn't needed before).
 pub fn setup_statements(user: &str, host: &str) -> Vec<String> {
     let user = user.to_uppercase();
     let host = host.replace('\'', "''");

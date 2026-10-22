@@ -144,6 +144,8 @@ pub enum DbEvent {
 #[derive(Debug, Clone)]
 pub struct ServerInfo {
     pub version: String,
+    /// Major and minor release, for features newer versions have.
+    pub release: crate::compat::Release,
     pub banner: String,
     pub current_schema: String,
 }

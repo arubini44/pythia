@@ -6,6 +6,25 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Oracle 11.2 to 21c (#16, tested against 11.2 XE, 18c XE, 21c XE and
+  23ai Free). Queries no longer use `FETCH FIRST` or dictionary columns
+  that came with 12.1, so find object, completion and go to definition,
+  find in source, the reports, the Scheduler jobs and invalid objects
+  windows, the Constraints tab, table parts in the browser, schema and
+  data compare, the AI's table lookups and the monitor (instance,
+  sessions, top SQL, AWR) work on 11.2. What needs 18c says so before:
+  *Cancel current SQL* in the monitor, the profiler, restarting a
+  sequence. The monitor shows the full release from 18c on.
+- Parameter types: `%ROWTYPE` parameters name their table (18c and later
+  showed `ROWTYPE`), package record and collection types keep the type
+  name, and on 11g a package with a parameterless procedure no longer
+  breaks member completion.
+- Killing a session that is busy in a call no longer drops the monitor's
+  own connection (ORA-00031).
+- Import: new column names are cut at 128 bytes, not characters.
+- README: which Instant Client supports which database version.
+
 ## [0.2.0] - 2026-10-22
 
 ### Changed
