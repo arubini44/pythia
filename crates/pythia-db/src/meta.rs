@@ -3,7 +3,7 @@
 //! Everything here reads `ALL_*` views so it works for any user, and only
 //! returns what the user is allowed to see.
 
-use oracle::Connection;
+use crate::oracle::Connection;
 
 use crate::types::{Cell, Column, DbError};
 
@@ -376,7 +376,9 @@ pub(crate) fn run(conn: &Connection, query: &MetaQuery) -> Result<MetaResult, Db
 const OBJECT_COLUMNS: &str =
     "owner, object_name, object_type, status, to_char(last_ddl_time, 'YYYY-MM-DD HH24:MI:SS')";
 
-fn object_rows(rows: oracle::ResultSet<'static, oracle::Row>) -> Result<Vec<DbObject>, DbError> {
+fn object_rows(
+    rows: crate::oracle::ResultSet<'static, crate::oracle::Row>,
+) -> Result<Vec<DbObject>, DbError> {
     let mut out = Vec::new();
     for row in rows {
         let row = row?;
@@ -656,7 +658,7 @@ fn link_details(conn: &Connection, owner: &str, name: &str) -> Result<MetaResult
         Option<String>,
         Option<String>,
     );
-    let read = |view: &str| -> Result<Option<Link>, oracle::Error> {
+    let read = |view: &str| -> Result<Option<Link>, crate::oracle::Error> {
         let sql = format!(
             "select owner, db_link, username, host, to_char(created, 'YYYY-MM-DD HH24:MI:SS') \
                from {view} where owner = :1 and db_link = :2"
@@ -748,7 +750,7 @@ fn explain_plan(conn: &Connection, sql: &str) -> Result<MetaResult, DbError> {
 
 /// Collects a result set into a generic table; `numeric` names right-aligned columns.
 fn table_result(
-    rows: oracle::ResultSet<'static, oracle::Row>,
+    rows: crate::oracle::ResultSet<'static, crate::oracle::Row>,
     numeric: &[&str],
 ) -> Result<MetaResult, DbError> {
     let columns = rows

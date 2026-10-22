@@ -23,4 +23,11 @@ pub use types::{
 };
 
 /// Re-exported so tools running [`DbRequest::Task`] can use the driver.
-pub use oracle;
+/// The database driver: the `oracle` crate (ODPI-C, needs the Instant
+/// Client), or with the `thin` feature a stand-in with the same API on the
+/// pure-Rust `oracledb` driver (#13).
+#[cfg(not(feature = "thin"))]
+pub use ::oracle;
+#[cfg(feature = "thin")]
+#[path = "thin.rs"]
+pub mod oracle;

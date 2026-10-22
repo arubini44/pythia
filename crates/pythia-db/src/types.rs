@@ -27,7 +27,7 @@ impl fmt::Debug for ConnectParams {
 }
 
 /// A closure run on the session's worker thread with its connection.
-pub type TaskFn = Box<dyn FnOnce(&oracle::Connection) -> TaskResult + Send>;
+pub type TaskFn = Box<dyn FnOnce(&crate::oracle::Connection) -> TaskResult + Send>;
 pub type TaskResult = Result<Box<dyn std::any::Any + Send>, DbError>;
 
 pub enum DbRequest {
@@ -243,8 +243,8 @@ impl DbError {
     }
 }
 
-impl From<oracle::Error> for DbError {
-    fn from(e: oracle::Error) -> Self {
+impl From<crate::oracle::Error> for DbError {
+    fn from(e: crate::oracle::Error) -> Self {
         match e.db_error() {
             Some(db) => {
                 let mut message = db.message().trim_end().to_owned();

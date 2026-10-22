@@ -2,20 +2,20 @@
 //! SQL that every version understands, and checks for features that only
 //! newer releases have.
 
-use oracle::Connection;
+use crate::oracle::Connection;
 
 /// Major and minor release of a server, e.g. `(19, 0)` or `(11, 2)`.
 pub type Release = (i32, i32);
 
 /// The server's release. The driver caches it, so this costs no round trip
 /// after the first call on a connection.
-pub fn release(conn: &Connection) -> Result<Release, oracle::Error> {
+pub fn release(conn: &Connection) -> Result<Release, crate::oracle::Error> {
     let (version, _) = conn.server_version()?;
     Ok((version.major(), version.minor()))
 }
 
 /// Whether the server is at least `major.minor`, e.g. `at_least(conn, 12, 1)`.
-pub fn at_least(conn: &Connection, major: i32, minor: i32) -> Result<bool, oracle::Error> {
+pub fn at_least(conn: &Connection, major: i32, minor: i32) -> Result<bool, crate::oracle::Error> {
     Ok(release(conn)? >= (major, minor))
 }
 

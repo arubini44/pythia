@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use oracle::sql_type::OracleType;
-use oracle::{Connection, Connector, ResultSet, Row, StatementType};
+use crate::oracle::sql_type::OracleType;
+use crate::oracle::{Connection, Connector, ResultSet, Row, StatementType};
 use pythia_config::Privilege;
 use tracing::{debug, info, warn};
 
@@ -226,9 +226,9 @@ impl Worker {
         binds: &[(String, Option<String>)],
         started: Instant,
     ) -> Result<(), DbError> {
-        let named: Vec<(&str, &dyn oracle::sql_type::ToSql)> = binds
+        let named: Vec<(&str, &dyn crate::oracle::sql_type::ToSql)> = binds
             .iter()
-            .map(|(name, value)| (name.as_str(), value as &dyn oracle::sql_type::ToSql))
+            .map(|(name, value)| (name.as_str(), value as &dyn crate::oracle::sql_type::ToSql))
             .collect();
         let mut stmt = self.conn.statement(sql).build()?;
         if stmt.is_query() {
@@ -397,13 +397,13 @@ pub fn open_connection(params: &ConnectParams) -> Result<Connection, DbError> {
     Ok(conn)
 }
 
-fn connect(params: &ConnectParams) -> oracle::Result<Connection> {
+fn connect(params: &ConnectParams) -> crate::oracle::Result<Connection> {
     let mut connector = Connector::new(&params.username, &params.password, &params.connect_string);
     let privilege = match params.privilege {
         Privilege::Normal => None,
-        Privilege::Sysdba => Some(oracle::Privilege::Sysdba),
-        Privilege::Sysoper => Some(oracle::Privilege::Sysoper),
-        Privilege::Sysbackup => Some(oracle::Privilege::Sysbackup),
+        Privilege::Sysdba => Some(crate::oracle::Privilege::Sysdba),
+        Privilege::Sysoper => Some(crate::oracle::Privilege::Sysoper),
+        Privilege::Sysbackup => Some(crate::oracle::Privilege::Sysbackup),
     };
     if let Some(privilege) = privilege {
         connector.privilege(privilege);
@@ -468,7 +468,7 @@ fn column(name: &str, ty: &OracleType) -> Column {
     }
 }
 
-fn cell(value: &oracle::SqlValue) -> Cell {
+fn cell(value: &crate::oracle::SqlValue) -> Cell {
     match value.is_null() {
         Ok(true) => None,
         Ok(false) => Some(value.get::<String>().unwrap_or_else(|_| value.to_string())),
@@ -490,7 +490,7 @@ fn statement_kind_label(kind: &StatementType, sql: &str) -> String {
 
 /// The session's current schema. `Connection::current_schema` only reports a
 /// value after it was set explicitly, so ask the database.
-fn current_schema(conn: &Connection) -> oracle::Result<String> {
+fn current_schema(conn: &Connection) -> crate::oracle::Result<String> {
     conn.query_row_as(
         "select sys_context('USERENV', 'CURRENT_SCHEMA') from dual",
         &[],

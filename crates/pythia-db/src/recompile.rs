@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use oracle::Connection;
+use crate::oracle::Connection;
 
 use crate::{ConnectParams, DbError};
 
@@ -94,9 +94,9 @@ pub fn invalid_counts(
         "select o.owner, count(*) from all_objects o where o.status = 'INVALID' and {filter} \
          group by o.owner order by o.owner"
     );
-    let binds: Vec<&dyn oracle::sql_type::ToSql> = binds
+    let binds: Vec<&dyn crate::oracle::sql_type::ToSql> = binds
         .iter()
-        .map(|b| b as &dyn oracle::sql_type::ToSql)
+        .map(|b| b as &dyn crate::oracle::sql_type::ToSql)
         .collect();
     let rows = conn.query_as::<(String, u32)>(&sql, &binds)?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -120,9 +120,9 @@ pub fn invalid_objects(
          from all_objects o where o.status = 'INVALID' and {filter} \
          order by o.owner, o.object_type, o.object_name"
     );
-    let binds: Vec<&dyn oracle::sql_type::ToSql> = binds
+    let binds: Vec<&dyn crate::oracle::sql_type::ToSql> = binds
         .iter()
-        .map(|b| b as &dyn oracle::sql_type::ToSql)
+        .map(|b| b as &dyn crate::oracle::sql_type::ToSql)
         .collect();
     let user: String = conn.query_row_as(
         "select sys_context('USERENV', 'CURRENT_USER') from dual",
