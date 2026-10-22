@@ -256,6 +256,10 @@ fn screenshots() {
             run: true,
         });
         wait_until(&mut h, "query", |app| !app.test_focused_busy());
+        h.state_mut()
+            .test_expand_browser(&[pythia_db::ObjectType::Table, pythia_db::ObjectType::Package]);
+        wait_until(&mut h, "browser", |app| !app.test_browser_loading());
+        save(&mut h, &format!("02-sql-window-{suffix}"));
         if dark {
             h.state_mut()
                 .test_command(crate::commands::Command::ExplainPlan);
@@ -269,10 +273,6 @@ fn screenshots() {
             wait_until(&mut h, "statistics", |app| !app.test_focused_busy());
             save(&mut h, "14-statistics-dark");
         }
-        h.state_mut()
-            .test_expand_browser(&[pythia_db::ObjectType::Table, pythia_db::ObjectType::Package]);
-        wait_until(&mut h, "browser", |app| !app.test_browser_loading());
-        save(&mut h, &format!("02-sql-window-{suffix}"));
 
         let object = |name: &str, t| ObjectRef {
             owner: "PYTHIA".into(),
@@ -1802,6 +1802,13 @@ create or replace view pythia_ov_b as select 2 z from dual;"
     let d = loaded.expect("the view form");
     assert!(d.read_only && !d.check_option, "{d:?}");
     assert_eq!(d.query, "select 1 x, 'a' y from dual");
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "drop view pythia_ov_a;\ndrop view pythia_ov_b;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }
 
 /// The object editors: a new sequence applied through the form, then each
