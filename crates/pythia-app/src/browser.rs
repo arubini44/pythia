@@ -1733,10 +1733,12 @@ fn account_names(
 }
 
 /// `DROP` for an object. Public synonyms and links have their own syntax,
-/// and a link's name can't be qualified: its dots belong to the name.
+/// a link's name can't be qualified (its dots belong to the name), and a
+/// scheduler job is dropped through DBMS_SCHEDULER.
 fn drop_sql(o: &ObjectRef) -> String {
     let kind = o.object_type.dictionary_name().to_lowercase();
     match (o.owner.as_str(), o.object_type) {
+        (_, ObjectType::Job) => crate::jobs_window::action_sql("drop", &o.owner, &o.name),
         ("PUBLIC", _) => format!("drop public {kind} {}", quote_ident(&o.name)),
         (_, ObjectType::DatabaseLink) => format!("drop {kind} {}", quote_ident(&o.name)),
         // Users with the profile get DEFAULT.
@@ -2006,6 +2008,11 @@ mod tests {
         assert_eq!(
             drop_sql(&o("HR", "EMP", ObjectType::Table)),
             "drop table HR.EMP"
+        );
+        // There's no DROP JOB (#46).
+        assert_eq!(
+            drop_sql(&o("HR", "NIGHTLY", ObjectType::Job)),
+            "begin dbms_scheduler.drop_job('HR.NIGHTLY', force => true); end;"
         );
         assert_eq!(folders("PUBLIC"), ObjectType::PUBLIC);
     }

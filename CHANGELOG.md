@@ -83,6 +83,8 @@ All notable changes to Pythia are documented here. The format follows
   Query. A window without an open connection can still pick one.
 
 ### Fixed
+- Drop… on a scheduler job in the object browser failed with ORA-00950
+  (there is no DROP JOB); it drops the job through DBMS_SCHEDULER (#46).
 - A window learned whether a transaction is open, and got the statement's
   DBMS_OUTPUT, only after the statement's result. For a moment after an
   INSERT it showed no transaction (#44).
