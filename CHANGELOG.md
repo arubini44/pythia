@@ -6,60 +6,6 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
-### Changed
-- orui is now called Pythia: the program is `pythia`, the crates are
-  `pythia-*` and test variables start with `PYTHIA_`. Settings, saved
-  connections, passwords and the workspace move over on first start.
-
-### Added
-
-**Editor**
-- Code folding, numbered bookmarks and snippets with placeholders; folds
-  and bookmarks are saved with the workspace.
-- Rename a local symbol in place (Shift+F6).
-- SQL\*Plus commands get their own highlighting.
-- Files keep their encoding (UTF-8, UTF-8 BOM, Windows-1252) and line
-  endings.
-- Configurable keyboard shortcuts (Settings → Keyboard) and a code font
-  from a font file.
-
-**Results**
-- Bar and line charts for any result.
-- Foreign key navigation: open a row's parent or child rows.
-- Hide columns; paste Excel ranges into editable results; edit long text
-  and dates (with a calendar) in a dialog.
-- Execute a query straight into a file (CSV, TSV, JSON, INSERT, Markdown)
-  with progress and cancel.
-
-**Tools**
-- Project panel: folders under git with status, diff with the last commit
-  or with the database, schema export to one file per object, deployment
-  of changed files.
-- Profiler (DBMS_HPROF) for blocks and calls.
-- Scheduler jobs window: run, stop, enable, disable, drop, run history.
-- Form editors for sequences, views, synonyms, indexes and grants.
-- Export tables tool with a WHERE per table, DDL, delimiter and NULL text.
-- Import: per-column trim, date format and SQL expressions; skip and log
-  bad rows.
-- Saved user reports with parameters.
-- Find in source searches views and job actions and filters by kind and
-  name; data search finds columns by name.
-- Object browser: favorites, recently opened objects, filters for invalid
-  or recently changed objects, indexes/constraints/triggers/referencing
-  tables under tables, drag names into editors.
-- Debugger: watches, values on hover, conditional and hit-count
-  breakpoints, enabling/disabling breakpoints, break on exceptions.
-- Program windows: Update spec copies changed signatures from the body.
-
-### Fixed
-- DBMS_OUTPUT of a debugged block reaches the Output tab.
-- Light theme: text fields in dialogs were white on white.
-- ORA-01805 (time zone regions with Instant Client Basic Light) is
-  explained.
-- Toolbar and other frameless buttons no longer grow when hovered.
-- Menu bar: moving to another menu while one is open opens it, as in
-  native menu bars.
-
 ## [0.1.0] - 2026-10-22
 
 First release.
@@ -86,6 +32,14 @@ First release.
   dictionary objects; signature help, hover, go to definition, references,
   live syntax diagnostics and an outline.
 - Code formatter (Ctrl+Shift+F) with configurable rules and a live preview.
+- Code folding, numbered bookmarks and snippets with placeholders; folds
+  and bookmarks are saved with the workspace.
+- Rename a local symbol in place (Shift+F6).
+- SQL\*Plus commands get their own highlighting.
+- Files keep their encoding (UTF-8, UTF-8 BOM, Windows-1252) and line
+  endings.
+- Configurable keyboard shortcuts (Settings → Keyboard) and a code font
+  from a font file.
 
 **SQL windows**
 - Execute the statement under the cursor, the selection or a script;
@@ -96,14 +50,30 @@ First release.
 - In-place editing of results with optimistic concurrency checks.
 - Explain plan as a tree and "Run with statistics" with the actual plan and
   session statistics.
+- Bar and line charts for any result.
+- Foreign key navigation: open a row's parent or child rows.
+- Hide columns; paste Excel ranges into editable results; edit long text
+  and dates (with a calendar) in a dialog.
+- Execute a query straight into a file (CSV, TSV, JSON, INSERT, Markdown)
+  with progress and cancel.
 
 **PL/SQL development**
 - Object browser, object views (columns, constraints, indexes, grants,
   dependencies, DDL), program windows with spec/body and compile errors,
   generated statements, test scripts, recompile invalid objects.
+- Object browser: favorites, recently opened objects, filters for invalid
+  or recently changed objects, indexes/constraints/triggers/referencing
+  tables under tables, drag names into editors.
+- Program windows: Update spec copies changed signatures from the body.
+- Form editors for sequences, views, synonyms, indexes and grants.
 - PL/SQL debugger over DBMS_DEBUG_JDWP: breakpoints, stepping, call stack and
   variables including records and collections.
+- Debugger: watches, values on hover, conditional and hit-count
+  breakpoints, enabling/disabling breakpoints, break on exceptions.
+- Profiler (DBMS_HPROF) for blocks and calls.
 - Find in database source with regular expressions.
+- Find in source searches views and job actions and filters by kind and
+  name; data search finds columns by name.
 
 **Tools**
 - Monitoring: dashboard with findings and live charts, sessions with a
@@ -112,6 +82,14 @@ First release.
 - Schema compare with structural table diffs and ordered sync scripts; data
   compare by key.
 - Import from CSV and Excel with type inference into new or existing tables.
+- Import: per-column trim, date format and SQL expressions; skip and log
+  bad rows.
+- Export tables tool with a WHERE per table, DDL, delimiter and NULL text.
+- Project panel: folders under git with status, diff with the last commit
+  or with the database, schema export to one file per object, deployment
+  of changed files.
+- Scheduler jobs window: run, stop, enable, disable, drop, run history.
+- Saved user reports with parameters.
 
 [Unreleased]: https://github.com/ortic/pythia/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/ortic/pythia/releases/tag/v0.1.0
