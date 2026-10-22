@@ -29,6 +29,10 @@ pub struct Settings {
     /// SQL windows commit after each statement. Never on production
     /// connections, where Commit asks first.
     pub autocommit: bool,
+    /// SQL windows can be moved to another open connection. Off by default:
+    /// a click shouldn't move a window to another database by accident.
+    /// Windows without an open connection can pick one either way.
+    pub switch_window_connection: bool,
     pub editor: EditorSettings,
     /// Host name or address the database uses to reach Pythia's debugger
     /// (empty: this machine's host name).
@@ -108,6 +112,7 @@ impl Default for Settings {
             ui_scale: 1.0,
             fetch_size: 500,
             autocommit: false,
+            switch_window_connection: false,
             editor: EditorSettings::default(),
             debug_host: String::new(),
             compile_debug_info: false,

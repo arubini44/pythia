@@ -18,6 +18,16 @@ All notable changes to Pythia are documented here. The format follows
   already open, but never to production connections, where Commit asks
   first. Session → Toggle Auto-Commit switches the setting and shows its
   state; the status bar still says when it's on.
+- SQL windows stay on the connection they were opened on. Moving one to
+  another open connection (the picker above the editor and the toolbar's
+  connection menu) is off by default and can be turned on in Settings →
+  Query. A window without an open connection can still pick one.
+
+### Fixed
+- The connection picker above a SQL window switched connections with a
+  pending transaction, dropping the window's session without asking. Like
+  the toolbar's menu, it now offers other connections only after a commit
+  or rollback.
 
 ### Fixed
 - Oracle 11.2 to 21c (#16, tested against 11.2 XE, 18c XE, 21c XE and

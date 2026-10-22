@@ -2634,6 +2634,71 @@ fn autocommit_setting() {
     });
 }
 
+/// SQL windows stay on their connection unless the settings allow
+/// switching, and never switch with a pending transaction.
+#[test]
+fn window_connection_switching() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let other = ConnectionProfile {
+        name: "other".into(),
+        color: None,
+        ..profile.clone()
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password.clone());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_connect(other, password);
+    wait_until(&mut h, "second connection", |app| {
+        app.test_connected_to("other")
+    });
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "begin\n  execute immediate 'drop table pythia_switch_t';\nexception\n  when others then null;\nend;\n/\n\
+               create table pythia_switch_t (n number);\n\
+               insert into pythia_switch_t values (1);\n"
+            .into(),
+        run: false,
+    });
+    h.run_steps(2);
+    let on = |h: &Ui| h.state().test_focused_connection().unwrap();
+
+    // Off by default: no picker, and the window stays.
+    assert!(h.query_by_label("Connection").is_none());
+    h.state_mut().test_rebind_focused("other");
+    assert_eq!(on(&h), "pythia@FREEPDB1");
+
+    h.state_mut().test_settings_mut().switch_window_connection = true;
+    h.run_steps(2);
+    assert!(h.query_by_label("Connection").is_some());
+    h.state_mut().test_execute_focused();
+    wait_until(&mut h, "pending transaction", |app| {
+        app.test_transaction_state().is_ok()
+    });
+    h.state_mut().test_rebind_focused("other");
+    assert_eq!(on(&h), "pythia@FREEPDB1", "not with a pending transaction");
+    h.state_mut()
+        .test_command(crate::commands::Command::Rollback);
+    wait_until(&mut h, "rolled back", |app| {
+        app.test_transaction_state() == Err("No transaction")
+    });
+    h.state_mut().test_rebind_focused("other");
+    assert_eq!(on(&h), "other");
+
+    // Switching off again: a window whose connection was closed can still
+    // pick one.
+    h.state_mut().test_settings_mut().switch_window_connection = false;
+    h.state_mut()
+        .test_command(crate::commands::Command::Disconnect);
+    h.run_steps(2);
+    assert!(h.query_by_label("Connection").is_some());
+    h.state_mut().test_rebind_focused("pythia@FREEPDB1");
+    assert_eq!(on(&h), "pythia@FREEPDB1");
+    h.run_steps(2);
+    assert!(h.query_by_label("Connection").is_none());
+}
+
 /// The toolbar's Debug button is enabled only with the cursor in an
 /// anonymous block of a connected SQL window.
 #[test]

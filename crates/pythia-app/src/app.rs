@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use egui::{Color32, RichText, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle, TabViewer};
@@ -2201,6 +2201,13 @@ impl PythiaApp {
         }
     }
 
+    fn has_pending_tx(&self, id: DocId) -> bool {
+        self.conns
+            .open
+            .values()
+            .any(|c| c.docs.get(&id).is_some_and(|s| s.pending_tx))
+    }
+
     /// Whether a window's session commits after each statement: SQL windows
     /// with auto-commit on in the settings, except on production connections.
     fn autocommit_for(&self, id: DocId, conn: &Connection) -> bool {
@@ -2279,8 +2286,25 @@ impl PythiaApp {
         }
     }
 
-    /// Moves a window to another connection (closing its old session).
+    /// Moves a window to another connection (closing its old session). A
+    /// window on an open connection moves only if the settings allow it,
+    /// and never with a pending transaction.
     fn rebind(&mut self, id: DocId, connection: String) {
+        let on_open = self
+            .docs
+            .get(&id)
+            .and_then(|d| d.connection.as_deref())
+            .is_some_and(|c| self.conns.get(c).is_some());
+        if on_open && !self.settings.switch_window_connection {
+            self.log("Switching a window's connection is off (Settings → Query)");
+            return;
+        }
+        if self.has_pending_tx(id) {
+            self.log(
+                "Commit or roll back this window's transaction before switching its connection",
+            );
+            return;
+        }
         self.conns.close_doc(id);
         if let Some(doc) = self.docs.get_mut(&id) {
             doc.connection = Some(connection);
@@ -2815,7 +2839,10 @@ impl PythiaApp {
                     );
                     let response = egui::containers::menu::MenuButton::new(title)
                         .ui(ui, |ui| {
-                            if is_sql && let Some(id) = focused_id {
+                            if is_sql
+                                && self.settings.switch_window_connection
+                                && let Some(id) = focused_id
+                            {
                                 ui.weak("Connection of this window");
                                 for other in self.conns.open.keys() {
                                     let item = ui.add_enabled(
@@ -3461,6 +3488,17 @@ impl eframe::App for PythiaApp {
             .iter()
             .map(|(n, c)| (n.clone(), c.is_connected()))
             .collect();
+        let pending_tx: HashSet<DocId> = self
+            .conns
+            .open
+            .values()
+            .flat_map(|c| {
+                c.docs
+                    .iter()
+                    .filter(|(_, s)| s.pending_tx)
+                    .map(|(id, _)| *id)
+            })
+            .collect();
         let privileges: HashMap<String, pythia_config::Privilege> = self
             .conns
             .open
@@ -3495,6 +3533,7 @@ impl eframe::App for PythiaApp {
             browser_effects: Effects::default(),
             closed: Vec::new(),
             rebind: Vec::new(),
+            pending_tx: &pending_tx,
         };
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -3567,6 +3606,22 @@ impl PythiaApp {
 
     pub fn test_connected(&self) -> bool {
         self.connecting.is_none() && self.conns.open.values().any(|c| c.is_connected())
+    }
+
+    pub fn test_connected_to(&self, name: &str) -> bool {
+        self.connecting.is_none() && self.conns.get(name).is_some_and(|c| c.is_connected())
+    }
+
+    pub fn test_rebind_focused(&mut self, connection: &str) {
+        if let Some(id) = self.focused {
+            self.rebind(id, connection.to_owned());
+        }
+    }
+
+    pub fn test_focused_connection(&self) -> Option<String> {
+        self.focused
+            .and_then(|id| self.docs.get(&id))
+            .and_then(|d| d.connection.clone())
     }
 
     pub fn test_open(&mut self, request: OpenRequest) {
@@ -3978,6 +4033,8 @@ struct Viewer<'a> {
     closed: Vec<DocId>,
     /// Documents moved to another connection.
     rebind: Vec<(DocId, String)>,
+    /// Documents whose session has a pending transaction.
+    pending_tx: &'a HashSet<DocId>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -4049,18 +4106,34 @@ impl TabViewer for Viewer<'_> {
                 let Some(doc) = self.docs.get_mut(id) else {
                     return;
                 };
-                // Connection picker for windows that can switch connections.
-                if matches!(doc.kind, DocKind::Sql(_)) && !self.connections.is_empty() {
+                // Connection picker for SQL windows: to switch connections
+                // if the settings allow it, else only for a window without
+                // an open connection.
+                let on_open = doc
+                    .connection
+                    .as_ref()
+                    .is_some_and(|c| self.connections.contains(c));
+                if matches!(doc.kind, DocKind::Sql(_))
+                    && !self.connections.is_empty()
+                    && (self.settings.switch_window_connection || !on_open)
+                {
                     let current = doc.connection.clone().unwrap_or_else(|| "(none)".into());
+                    let pending = self.pending_tx.contains(id);
                     ui.horizontal(|ui| {
                         ui.weak("Connection");
                         egui::ComboBox::from_id_salt(("doc-conn", *id))
                             .selected_text(&current)
                             .show_ui(ui, |ui| {
                                 for c in self.connections {
-                                    if ui.selectable_label(*c == current, c).clicked()
-                                        && *c != current
-                                    {
+                                    let item = ui
+                                        .add_enabled(
+                                            !pending || *c == current,
+                                            egui::Button::selectable(*c == current, c),
+                                        )
+                                        .on_disabled_hover_text(
+                                            "Commit or roll back this window's transaction first",
+                                        );
+                                    if item.clicked() && *c != current {
                                         self.rebind.push((*id, c.clone()));
                                     }
                                 }

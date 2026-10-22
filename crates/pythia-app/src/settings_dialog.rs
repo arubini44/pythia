@@ -426,6 +426,16 @@ fn query(ui: &mut Ui, s: &mut Settings) {
             ui.checkbox(&mut s.autocommit, "");
         },
     );
+    row(
+        ui,
+        "Switch connection per window",
+        "A connection picker above each SQL window and in the toolbar's connection menu. Off: \
+         windows stay on the connection they were opened on; one without an open connection \
+         can still pick one.",
+        |ui| {
+            ui.checkbox(&mut s.switch_window_connection, "");
+        },
+    );
 }
 
 fn invalid_objects(ui: &mut Ui, s: &mut Settings) {
