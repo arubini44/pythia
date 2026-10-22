@@ -38,7 +38,7 @@ jobs:
             target: aarch64-apple-darwin
             formats: app,dmg
           - name: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             target: x86_64-apple-darwin
             formats: app,dmg
     runs-on: ${{ matrix.os }}
@@ -69,7 +69,7 @@ jobs:
           cargo packager --release -p pythia-app \
             --target ${{ matrix.target }} \
             --formats ${{ matrix.formats }} \
-            --out-dir dist
+            --out-dir "${{ github.workspace }}/dist"
         env:
           # Optional signing material; see docs/RELEASING.md.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -85,7 +85,8 @@ jobs:
           bin=pythia
           [ "${{ runner.os }}" = "Windows" ] && bin=pythia.exe
           mkdir -p dist/archive
-          cp "target/${{ matrix.target }}/release/$bin" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE dist/archive/
+          # beforePackagingCommand builds for the runner's own target.
+          cp "target/release/$bin" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE dist/archive/
           cd dist/archive
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "../pythia-${{ github.ref_name }}-${{ matrix.name }}.zip" .
