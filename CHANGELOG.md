@@ -6,6 +6,25 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Debugger: step through the debugged block itself (it now has debug
+  information), and stepping out of the outermost unit continues there; the
+  SQL window marks the block's line.
+- Debugger: the call stack names the subprogram (`orders_api.load_order:31`)
+  and the package initialization section.
+
+### Fixed
+- Debugger: a step no longer stops again on the line it started from.
+- Debugger: a step that ended at a breakpoint no longer stops later, after
+  continuing, where the step would have ended.
+- Debugger: breakpoints reached while stepping count their hits; stepping
+  from a breakpoint doesn't count it twice.
+- Debugger: records in index-by tables show their fields, elements are named
+  by their key (`('L1')`), and watches accept text keys.
+- Debugger: SQL collection types show as not readable instead of NULL.
+- Debugger: after pausing in code without debug information (e.g.
+  `DBMS_SESSION.SLEEP`), the editor shows the nearest frame with source.
+
 ## [0.1.0] - 2026-10-22
 
 First release.

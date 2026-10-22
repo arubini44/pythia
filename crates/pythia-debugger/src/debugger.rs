@@ -152,9 +152,31 @@ struct Session {
     watches: Vec<String>,
     /// The JDWP request for exception events, when breaking on exceptions.
     exception_request: Option<i32>,
+    /// The step in progress, if any.
+    step: Option<Step>,
     /// The innermost frame while suspended, for evaluating watches.
     top: Option<TopFrame>,
 }
+
+/// A step request and where it started. Oracle reports every code index
+/// as a step, often several on one line; the step goes on until the line
+/// or the frame changes.
+struct Step {
+    request: i32,
+    thread: u64,
+    /// `jdwp::step::INTO`, `OVER` or `OUT`.
+    depth: i32,
+    /// Stack depth, method and line where the step started.
+    frames: usize,
+    class: u64,
+    method: u64,
+    line: Option<u32>,
+    /// Steps taken without leaving the line.
+    repeats: u32,
+}
+
+/// Steps on one line before stopping anyway (a one-line loop).
+const MAX_SAME_LINE_STEPS: u32 = 1000;
 
 /// The stopped thread's innermost frame and its variables.
 struct TopFrame {
@@ -185,6 +207,7 @@ impl Session {
             hits: HashMap::new(),
             watches: Vec::new(),
             exception_request: None,
+            step: None,
             top: None,
         };
         for (_, id, signature) in session.jdwp.all_classes()? {
@@ -262,17 +285,13 @@ impl Session {
                         DebugCommand::StepInto => jdwp::step::INTO,
                         _ => jdwp::step::OUT,
                     };
-                    let step = self.jdwp.modifier_step(thread, depth);
-                    self.jdwp.set_event(
-                        jdwp::kind::SINGLE_STEP,
-                        jdwp::suspend::ALL,
-                        vec![step, Jdwp::modifier_count(1)],
-                    )?;
+                    self.start_step(thread, depth, 0)?;
                     true
                 }
                 DebugCommand::Pause => {
                     if self.stopped.is_none() {
                         self.jdwp.suspend_vm()?;
+                        self.cancel_step();
                         if let Some(thread) = self.jdwp.all_threads()?.first().copied() {
                             self.suspended(thread, StopReason::Pause, None, events)?;
                         }
@@ -333,10 +352,12 @@ impl Session {
                 continue;
             };
             let mut flow = Flow::Continue;
-            // A breakpoint and a step can report the same stop; handle it
-            // once. A step always stops; breakpoints only when their
-            // condition and hit count say so.
-            let mut stop: Option<(u64, StopReason, Option<String>)> = None;
+            // A breakpoint, an exception and a step can report the same
+            // stop; handle it once. Every breakpoint counts its hit; it stops
+            // when its condition and hit count say so.
+            let mut breakpoint: Option<u64> = None;
+            let mut exception: Option<(u64, String)> = None;
+            let mut stepped: Option<u64> = None;
             for event in batch {
                 debug!(?event, "debug event");
                 match event {
@@ -357,26 +378,43 @@ impl Session {
                             }
                         }
                     }
-                    Event::SingleStep { thread, .. } => {
-                        stop = Some((thread, StopReason::Step, None));
-                    }
+                    Event::SingleStep { thread, .. } => stepped = Some(thread),
                     Event::Breakpoint {
-                        request, thread, ..
-                    } if stop.is_none() => {
-                        if self.breakpoint_stops(request, thread, events)? {
-                            stop = Some((thread, StopReason::Breakpoint, None));
+                        request,
+                        thread,
+                        location,
+                    } => {
+                        // Stepping from a breakpoint reports it again where
+                        // the step starts; that isn't another hit.
+                        if !self.at_step_origin(thread, &location)?
+                            && self.breakpoint_stops(request, thread, events)?
+                        {
+                            breakpoint = Some(thread);
                         }
                     }
                     Event::Exception {
-                        thread, exception, ..
-                    } if stop.is_none() => {
-                        let text = self.exception_text(exception);
-                        stop = Some((thread, StopReason::Exception, Some(text)));
+                        thread,
+                        exception: e,
+                        ..
+                    } if exception.is_none() => {
+                        exception = Some((thread, self.exception_text(e)));
                     }
                     _ => {}
                 }
             }
+            let stop = if let Some(thread) = breakpoint {
+                Some((thread, StopReason::Breakpoint, None))
+            } else if let Some((thread, text)) = exception {
+                Some((thread, StopReason::Exception, Some(text)))
+            } else if let Some(thread) = stepped {
+                (!self.step_again(thread)?).then_some((thread, StopReason::Step, None))
+            } else {
+                None
+            };
             if let Some((thread, reason, exception)) = stop {
+                // A step that ended elsewhere (at a breakpoint) must not fire
+                // later, after the user continues.
+                self.cancel_step();
                 self.suspended(thread, reason, exception, events)?;
                 flow = Flow::Stop;
             }
@@ -384,6 +422,93 @@ impl Session {
                 self.jdwp.resume_vm()?;
             }
         }
+    }
+
+    /// Requests a step of `depth` from the thread's current location.
+    fn start_step(&mut self, thread: u64, depth: i32, repeats: u32) -> Result<(), JdwpError> {
+        self.cancel_step();
+        let frames = self.jdwp.frames(thread)?;
+        let (class, method, line) = match frames.first() {
+            Some((_, loc)) => (loc.class, loc.method, self.line_of(loc)?),
+            None => (0, 0, None),
+        };
+        let modifier = self.jdwp.modifier_step(thread, depth);
+        let request = self.jdwp.set_event(
+            jdwp::kind::SINGLE_STEP,
+            jdwp::suspend::ALL,
+            vec![modifier, Jdwp::modifier_count(1)],
+        )?;
+        self.step = Some(Step {
+            request,
+            thread,
+            depth,
+            frames: frames.len(),
+            class,
+            method,
+            line,
+            repeats,
+        });
+        Ok(())
+    }
+
+    /// Clears the pending step request, if any.
+    fn cancel_step(&mut self) {
+        if let Some(step) = self.step.take() {
+            // Fired steps are already gone; that error doesn't matter.
+            let _ = self.jdwp.clear_event(jdwp::kind::SINGLE_STEP, step.request);
+        }
+    }
+
+    /// Whether `location` is where the pending step started, in the same
+    /// frame.
+    fn at_step_origin(
+        &mut self,
+        thread: u64,
+        location: &jdwp::Location,
+    ) -> Result<bool, JdwpError> {
+        let Some(step) = self.step.as_ref() else {
+            return Ok(false);
+        };
+        if step.thread != thread || step.class != location.class || step.method != location.method {
+            return Ok(false);
+        }
+        let (frames, line) = (step.frames, step.line);
+        Ok(self.line_of(location)? == line && self.jdwp.frames(thread)?.len() == frames)
+    }
+
+    /// After a step event: whether it landed on the line it started from
+    /// in the same frame, in which case the step goes on.
+    fn step_again(&mut self, thread: u64) -> Result<bool, JdwpError> {
+        let Some(step) = self.step.as_ref() else {
+            return Ok(false);
+        };
+        if step.depth == jdwp::step::OUT
+            || step.thread != thread
+            || step.line.is_none()
+            || step.repeats >= MAX_SAME_LINE_STEPS
+        {
+            return Ok(false);
+        }
+        let (depth, frames, class, method, line, repeats) = (
+            step.depth,
+            step.frames,
+            step.class,
+            step.method,
+            step.line,
+            step.repeats,
+        );
+        let stack = self.jdwp.frames(thread)?;
+        let Some((_, loc)) = stack.first() else {
+            return Ok(false);
+        };
+        let same = stack.len() == frames
+            && loc.class == class
+            && loc.method == method
+            && self.line_of(loc)? == line;
+        if same {
+            self.start_step(thread, depth, repeats + 1)?;
+        }
+        Ok(same)
     }
 
     /// Sets a JDWP breakpoint for `bp` in a loaded class.
@@ -789,14 +914,8 @@ impl Session {
                 let len = self.jdwp.array_length(*id)?;
                 let values = self.jdwp.array_values(*id, 0, len.min(MAX_ELEMENTS))?;
                 for (i, v) in values.iter().enumerate() {
-                    let mut element = self.variable(format!("({})", i + 1), "", v, depth + 1)?;
-                    // Elements are wrappers; show their value directly.
-                    if element.children.len() == 1 && element.value.is_none() {
-                        let inner = element.children.remove(0);
-                        element.value = inner.value;
-                        element.type_name = inner.type_name;
-                        element.children = inner.children;
-                    }
+                    // Named by position unless the element has a key.
+                    let element = self.variable(format!("({})", i + 1), "", v, depth + 1)?;
                     var.children.push(element);
                 }
                 var.value = Some(if len > MAX_ELEMENTS {
@@ -811,6 +930,12 @@ impl Session {
                     var.type_name = type_name(&self.jdwp.signature(class)?);
                 }
                 let fields = self.jdwp.fields(class)?;
+                if fields.is_empty() && var.type_name == "OPAQUE" {
+                    // SQL collection types (and the like): the agent shows
+                    // no contents, but the value isn't NULL.
+                    var.value = Some(OPAQUE_VALUE.into());
+                    return Ok(var);
+                }
                 let ids: Vec<u64> = fields.iter().map(|f| f.id).collect();
                 let values: Vec<Option<Value>> = match self.jdwp.object_values(*id, &ids) {
                     _ if ids.is_empty() => Vec::new(),
@@ -837,14 +962,31 @@ impl Session {
                         var.children = collection.children;
                         var.value = collection.value;
                     } else if field.name == "_value" {
-                        var.value = match v {
-                            Value::String(0) | Value::Object { id: 0, .. } => None,
-                            Value::String(sid) => Some(self.jdwp.string_value(sid)?),
+                        match v {
+                            Value::String(0) | Value::Object { id: 0, .. } => {}
+                            Value::String(sid) => var.value = Some(self.jdwp.string_value(sid)?),
                             other => {
-                                self.variable(String::new(), &field.signature, &other, depth + 1)?
-                                    .value
+                                // A collection element wraps its value, which
+                                // may be a record or object with fields.
+                                let inner = self.variable(
+                                    String::new(),
+                                    &field.signature,
+                                    &other,
+                                    depth + 1,
+                                )?;
+                                if var.type_name.ends_with("$element") {
+                                    var.type_name = inner.type_name;
+                                }
+                                var.value = inner.value;
+                                var.children = inner.children;
                             }
-                        };
+                        }
+                    } else if field.name == "_key" {
+                        // Index-by tables: elements are named by their key.
+                        let key = self.variable(String::new(), &field.signature, &v, depth + 1)?;
+                        if let Some(key) = key.value {
+                            var.name = element_name(&key, key_is_text(&field.signature));
+                        }
                     } else if !field.name.starts_with('_') {
                         var.children.push(self.variable(
                             field.name.clone(),
@@ -922,6 +1064,26 @@ fn predefined_exception(code: u32) -> Option<&'static str> {
         30625 => "self_is_null",
         _ => return None,
     })
+}
+
+/// Shown for values the agent doesn't expose (SQL collection types).
+const OPAQUE_VALUE: &str = "(contents not available)";
+
+/// Display name of a collection element by its key: `(3)` or `('L1')`.
+fn element_name(key: &str, text: bool) -> String {
+    if text {
+        format!("('{}')", key.replace('\'', "''"))
+    } else {
+        format!("({key})")
+    }
+}
+
+/// Whether an index-by table key of this type is text (`INDEX BY VARCHAR2`).
+fn key_is_text(signature: &str) -> bool {
+    matches!(
+        type_name(signature).as_str(),
+        "VARCHAR2" | "VARCHAR" | "STRING" | "CHAR" | "NVARCHAR2" | "NCHAR" | "LONG"
+    )
 }
 
 /// Nesting limit for records/collections (each PL/SQL level is ~2 objects).

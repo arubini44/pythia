@@ -82,6 +82,9 @@ pub struct RunState {
     pub prompt: Option<VariablePrompt>,
     /// The open variable prompt is for a debug run.
     pub prompt_for_debug: bool,
+    /// Editor line where the debugged block starts, while this window's
+    /// block is the one being debugged.
+    pub debug_start: Option<usize>,
     /// Result of a running export (file dialog + write on a helper thread).
     pub export: Option<std::sync::mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>>,
     pub selection_summary: Option<String>,
@@ -305,6 +308,12 @@ impl SqlWindow {
         self.run_next(cx)
     }
 
+    /// 1-based editor line of a byte offset.
+    fn line_of(&self, offset: usize) -> usize {
+        let text = self.editor.text();
+        text[..offset.min(text.len())].matches('\n').count() + 1
+    }
+
     /// Debugs the PL/SQL block under the cursor (asks for variables first).
     pub fn debug_current(&mut self) -> Effects {
         let mut effects = Effects::default();
@@ -338,6 +347,7 @@ impl SqlWindow {
             } else {
                 stmt.sql
             };
+            self.state.debug_start = Some(self.line_of(stmt.start));
             effects.debug = Some(sql);
             return effects;
         }
@@ -1281,6 +1291,10 @@ impl SqlWindow {
                     out.hover_request = None;
                 }
             }
+            if let (Some(start), Some(debug)) = (self.state.debug_start, cx.debug) {
+                let line = block_line(debug).map(|l| (start + l as usize - 1) as u32);
+                self.editor.set_debug_lines(&[], line);
+            }
             effects.extend(self.assist.handle(&mut self.editor, &out, cx));
             self.assist.background(&mut self.editor, ui);
             self.state.line_col = self.editor.line_col();
@@ -1741,6 +1755,7 @@ impl SqlWindow {
                     })
                     .collect();
                 if std::mem::take(&mut self.state.prompt_for_debug) {
+                    self.state.debug_start = Some(self.line_of(prompt.statement.start));
                     effects.debug = Some(inline_binds(&sql, &binds));
                 } else {
                     self.send(prompt.statement.start, sql, binds, cx, &mut effects);
@@ -1917,6 +1932,16 @@ pub fn substitute(sql: &str, values: &BTreeMap<String, String>) -> String {
     }
     out.push_str(&sql[pos..]);
     out
+}
+
+/// The line (1-based, within the block) where the debugged block itself is
+/// stopped: the block is the outermost frame.
+fn block_line(debug: &pythia_debugger::ui::DebugSession) -> Option<u32> {
+    let frame = debug.current_frame()?;
+    let block = &debug.stack.last()?.location.unit;
+    (frame.location.unit.unit_type == pythia_debugger::UnitType::Block
+        && &frame.location.unit == block)
+        .then_some(frame.location.line)?
 }
 
 /// Replaces `:bind` references with literals (for debug runs, which execute

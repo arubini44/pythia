@@ -58,8 +58,11 @@ for Linux, Windows and macOS.
 - **Test…** generates a ready-to-run block for any procedure or function
   (IN parameters as binds, OUT parameters printed).
 - **Debugger** (DBMS_DEBUG_JDWP): breakpoints with conditions and hit
-  counts, break on exception, step over/into/out, call stack, variables
-  including records and collections, watches, values on hover.
+  counts, break on exception, step over/into/out (also through the debugged
+  block itself), call stack with subprograms, variables including records,
+  `%ROWTYPE` and collections, watches, values on hover. Units with
+  breakpoints are compiled with debug information; Step into enters only
+  units that have it.
 - **Profiler** (DBMS_HPROF): profile a block or call and see self and
   total time per subprogram and SQL statement; double-click jumps to the
   code. Needs `EXECUTE` on `DBMS_HPROF`; profiling commits.
@@ -189,12 +192,18 @@ PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 |---|---|
 | `PYTHIA_TEST_DB` | integration tests (app user) |
 | `PYTHIA_TEST_DB_DBA` | monitor, compare and debugger tests (`system/oracle@…`) |
-| `PYTHIA_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local container) |
+| `PYTHIA_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local Podman container; with Docker on Linux, the compose network's gateway from `docker network inspect pythia_default`) |
 | `PYTHIA_SCREENSHOT_DIR` | renders the real UI offscreen into PNGs (`cargo test -p pythia-app screenshots`) |
 
 The debugger needs `DEBUG CONNECT SESSION`, `DEBUG ANY PROCEDURE` and a JDWP
 network ACL; `pythia_debugger::target::setup_script` prints what a DBA has to
-run.
+run. `crates/pythia-debugger/tests/scenario.rs` steps through a larger
+scenario (packages, records, collections, an object type, a trigger).
+
+Several app tests use the demo schema that the screenshot test creates, so
+on a fresh database run `cargo test -p pythia-app screenshots::screenshots`
+once with `PYTHIA_SCREENSHOT_DIR` set. The reports test needs
+`SELECT_CATALOG_ROLE` for the test user.
 
 ### Workspace
 

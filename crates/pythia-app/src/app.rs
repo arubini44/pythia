@@ -741,6 +741,14 @@ impl PythiaApp {
             .unwrap_or_else(pythia_debugger::target::default_host);
         let actions = self.debug.start(block, host, self.notify.callback());
         self.debug_run = Some((doc, 0));
+        // Only this window shows where its block is stopped.
+        for (id, d) in &mut self.docs {
+            if let DocKind::Sql(w) = &mut d.kind
+                && *id != doc
+            {
+                w.state.debug_start = None;
+            }
+        }
         self.open_tab(Tab::Debugger);
         self.open_tab(Tab::Doc(doc));
         self.debug_actions(actions);
@@ -798,7 +806,13 @@ impl PythiaApp {
                         UnitType::Trigger => Some(pythia_db::ObjectType::Trigger),
                         UnitType::Type => Some(pythia_db::ObjectType::Type),
                         UnitType::TypeBody => Some(pythia_db::ObjectType::TypeBody),
-                        UnitType::Block => None,
+                        UnitType::Block => {
+                            // The SQL window marks the line itself.
+                            if let Some((doc, _)) = self.debug_run {
+                                self.open_tab(Tab::Doc(doc));
+                            }
+                            None
+                        }
                     };
                     let connection = self
                         .debug_run
@@ -2477,6 +2491,27 @@ impl PythiaApp {
 
     pub fn test_debug_running(&self) -> bool {
         self.debug_run.is_some()
+    }
+
+    /// The focused editor's execution marker: the document's title and the
+    /// marked line (1-based, with its text), and the cursor line.
+    pub fn test_execution_marker(&self) -> (String, Option<(usize, String)>, usize) {
+        let Some(doc) = self.focused.and_then(|id| self.docs.get(&id)) else {
+            return (String::new(), None, 0);
+        };
+        let editor = match &doc.kind {
+            DocKind::Program(w) => w.parts.get(w.active).map(|p| &p.editor),
+            DocKind::Sql(w) => Some(&w.editor),
+            _ => None,
+        };
+        let Some(editor) = editor else {
+            return (doc.title(), None, 0);
+        };
+        let marker = editor.execution_line().map(|line| {
+            let text = editor.text().lines().nth(line - 1).unwrap_or_default();
+            (line, text.trim().to_owned())
+        });
+        (doc.title(), marker, editor.line_col().0)
     }
 
     pub fn test_settings(&mut self, section_formatter: bool) {

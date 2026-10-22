@@ -164,6 +164,15 @@ impl Editor {
         self.inner.set_markers(all);
     }
 
+    /// The execution line marker (1-based), if shown.
+    #[cfg(test)]
+    pub fn execution_line(&self) -> Option<usize> {
+        self.debug_markers
+            .iter()
+            .find(|m| m.kind == MarkerKind::ExecutionPoint)
+            .map(|m| m.line)
+    }
+
     /// Breakpoint lines and the execution line (1-based) from the debugger.
     pub fn set_debug_lines(&mut self, breakpoints: &[u32], current: Option<u32>) {
         let mut markers: Vec<Marker> = breakpoints

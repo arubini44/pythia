@@ -9,7 +9,8 @@
 use crate::types::Variable;
 
 /// Splits `l_rec.items(2).name` into `["L_REC", "ITEMS", "(2)", "NAME"]`.
-/// Unquoted names are upper-cased; `"Quoted"` names keep their case.
+/// Unquoted names are upper-cased; `"Quoted"` names keep their case. Text
+/// keys of index-by tables stay quoted: `g_rates('L1')` → `["G_RATES", "('L1')"]`.
 pub fn parse_path(expr: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut chars = expr.trim().chars().peekable();
@@ -22,18 +23,35 @@ pub fn parse_path(expr: &str) -> Option<Vec<String>> {
             }
             '(' if !expect_name => {
                 chars.next();
-                let mut index = String::new();
-                for c in chars.by_ref() {
-                    if c == ')' {
-                        break;
+                while chars.next_if(|c| c.is_whitespace()).is_some() {}
+                if chars.next_if_eq(&'\'').is_some() {
+                    // A text key: `('L1')`, quotes doubled inside.
+                    let mut key = String::new();
+                    loop {
+                        match chars.next()? {
+                            '\'' if chars.next_if_eq(&'\'').is_some() => key.push('\''),
+                            '\'' => break,
+                            c => key.push(c),
+                        }
                     }
-                    index.push(c);
+                    while chars.next_if(|c| c.is_whitespace()).is_some() {}
+                    chars.next_if_eq(&')')?;
+                    out.push(format!("('{}')", key.replace('\'', "''")));
+                } else {
+                    let mut index = String::new();
+                    for c in chars.by_ref() {
+                        if c == ')' {
+                            break;
+                        }
+                        index.push(c);
+                    }
+                    let index = index.trim();
+                    let digits = index.strip_prefix('-').unwrap_or(index);
+                    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+                        return None;
+                    }
+                    out.push(format!("({index})"));
                 }
-                let index = index.trim();
-                if index.is_empty() || !index.chars().all(|c| c.is_ascii_digit()) {
-                    return None;
-                }
-                out.push(format!("({index})"));
             }
             '"' if expect_name => {
                 chars.next();
@@ -84,6 +102,16 @@ pub fn lookup<'a>(vars: &'a [Variable], path: &[String]) -> Option<&'a Variable>
     descend(var, rest).ok()
 }
 
+/// Whether a field or element name matches a path segment: names ignore
+/// case, text keys don't.
+fn matches(name: &str, segment: &str) -> bool {
+    if segment.starts_with("('") {
+        name == segment
+    } else {
+        name.eq_ignore_ascii_case(segment)
+    }
+}
+
 /// Follows `rest` into a variable's fields/elements.
 pub fn descend<'a>(var: &'a Variable, rest: &[String]) -> Result<&'a Variable, String> {
     let mut var = var;
@@ -91,7 +119,7 @@ pub fn descend<'a>(var: &'a Variable, rest: &[String]) -> Result<&'a Variable, S
         var = var
             .children
             .iter()
-            .find(|c| c.name.eq_ignore_ascii_case(seg))
+            .find(|c| matches(&c.name, seg))
             .ok_or_else(|| format!("{} has no {seg}", var.name.to_lowercase()))?;
     }
     Ok(var)
@@ -386,9 +414,20 @@ mod tests {
                 "Name".into()
             ])
         );
+        assert_eq!(
+            parse_path("g_rates( 'L1' )"),
+            Some(vec!["G_RATES".into(), "('L1')".into()])
+        );
+        assert_eq!(
+            parse_path("names('O''Brien').x"),
+            Some(vec!["NAMES".into(), "('O''Brien')".into(), "X".into()])
+        );
+        assert_eq!(parse_path("t(-1)"), Some(vec!["T".into(), "(-1)".into()]));
         assert_eq!(parse_path("a."), None);
         assert_eq!(parse_path("a + b"), None);
         assert_eq!(parse_path("a(x)"), None);
+        assert_eq!(parse_path("a('open"), None);
+        assert_eq!(parse_path("a('x' y)"), None);
     }
 
     #[test]
@@ -405,12 +444,27 @@ mod tests {
                 Some("2 element(s)"),
                 vec![var("(1)", Some("10"), vec![])],
             ),
+            var(
+                "G_RATES",
+                Some("2 element(s)"),
+                vec![
+                    var("('L1')", Some("0.05"), vec![]),
+                    var("('l1')", Some("0.5"), vec![]),
+                ],
+            ),
         ];
         let get = |p: &str| lookup(&vars, &parse_path(p).unwrap()).and_then(|v| v.value.clone());
         assert_eq!(get("l_total").as_deref(), Some("6"));
         assert_eq!(get("L_Rec.b").as_deref(), Some("bee"));
         assert_eq!(get("l_arr(1)").as_deref(), Some("10"));
         assert_eq!(get("l_rec.c"), None);
+        assert_eq!(get("g_rates('L1')").as_deref(), Some("0.05"));
+        assert_eq!(
+            get("g_rates('l1')").as_deref(),
+            Some("0.5"),
+            "text keys keep case"
+        );
+        assert_eq!(get("g_rates('L2')"), None);
     }
 
     #[test]

@@ -251,6 +251,19 @@ impl DebugSession {
         self.command(DebugCommand::BreakOnException(on));
     }
 
+    /// The frame execution is shown at while suspended: the innermost one
+    /// with source lines (code without debug information, such as SYS
+    /// packages, has none).
+    pub fn current_frame(&self) -> Option<&Frame> {
+        if !self.is_suspended() {
+            return None;
+        }
+        self.stack
+            .iter()
+            .find(|f| f.location.line.is_some())
+            .or(self.stack.first())
+    }
+
     /// Enabled breakpoint lines and the current execution line for a unit,
     /// for editor gutter markers.
     pub fn markers(&self, unit: &Unit) -> (Vec<u32>, Option<u32>) {
@@ -260,10 +273,10 @@ impl DebugSession {
             .filter(|b| &b.unit == unit && !self.disabled.contains(b))
             .map(|b| b.line)
             .collect();
-        let current = match (&self.state, self.stack.first()) {
-            (State::Suspended { .. }, Some(f)) if &f.location.unit == unit => f.location.line,
-            _ => None,
-        };
+        let current = self
+            .current_frame()
+            .filter(|f| &f.location.unit == unit)
+            .and_then(|f| f.location.line);
         (lines, current)
     }
 
@@ -345,7 +358,8 @@ impl DebugSession {
                         self.log.push(format!("Exception: {e}"));
                     }
                     self.exception = exception;
-                    actions.push(DebugAction::ShowLocation(location));
+                    let shown = self.current_frame().map(|f| f.location.clone());
+                    actions.push(DebugAction::ShowLocation(shown.unwrap_or(location)));
                 }
                 DebugEvent::Watches(values) => self.watch_values = values,
                 DebugEvent::Resumed => {
@@ -489,7 +503,7 @@ impl DebugSession {
                 ),
                 State::Running => ("Running".to_owned(), Color32::from_rgb(0x3f, 0xb9, 0x50)),
                 State::Suspended { reason } => {
-                    let at = self.stack.first().map(frame_label).unwrap_or_default();
+                    let at = self.current_frame().map(frame_label).unwrap_or_default();
                     let text = match reason {
                         StopReason::Breakpoint => format!("Stopped at breakpoint, {at}"),
                         StopReason::Step => format!("Stopped after step, {at}"),
@@ -734,13 +748,29 @@ fn unit_label(unit: &Unit) -> String {
     }
 }
 
+/// `unit:line`, with the subprogram for packages and types, e.g.
+/// `orders_api.load_order:31`.
 fn frame_label(frame: &Frame) -> String {
+    let unit = &frame.location.unit;
     let line = frame
         .location
         .line
         .map(|l| format!(":{l}"))
         .unwrap_or_default();
-    format!("{}{line}", unit_label(&frame.location.unit))
+    let subprogram = match frame.method.as_str() {
+        // The package's initialization section (its BEGIN … END).
+        "<clinit>" => Some("(initialization)".to_owned()),
+        // Generated names, e.g. in code without debug information.
+        m if m.starts_with('<') || m.is_empty() => None,
+        m => Some(m.to_lowercase()),
+    };
+    match (unit.unit_type, subprogram) {
+        (
+            UnitType::Package | UnitType::PackageBody | UnitType::Type | UnitType::TypeBody,
+            Some(subprogram),
+        ) => format!("{}.{subprogram}{line}", unit_label(unit)),
+        _ => format!("{}{line}", unit_label(unit)),
+    }
 }
 
 fn value_text(ui: &Ui, var: &Variable, stale: bool) -> RichText {
@@ -869,6 +899,67 @@ mod tests {
             method: "P".into(),
         }];
         assert_eq!(s.markers(&unit).1, Some(9));
+    }
+
+    fn frame(unit: &Unit, method: &str, line: Option<u32>) -> Frame {
+        Frame {
+            location: Location {
+                unit: unit.clone(),
+                line,
+            },
+            method: method.into(),
+        }
+    }
+
+    #[test]
+    fn execution_shown_in_the_nearest_frame_with_source() {
+        // Paused inside code without debug information.
+        let sys = Unit::new("SYS", "DBMS_SESSION", UnitType::PackageBody);
+        let api = Unit::new("PYTHIA", "API", UnitType::PackageBody);
+        let mut s = DebugSession {
+            state: State::Suspended {
+                reason: StopReason::Pause,
+            },
+            stack: vec![
+                frame(&sys, "<procedure$29>", None),
+                frame(&api, "SPIN", Some(69)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(s.current_frame().map(|f| f.method.as_str()), Some("SPIN"));
+        assert_eq!(s.markers(&api).1, Some(69));
+        assert_eq!(s.markers(&sys).1, None);
+        s.state = State::Running;
+        assert!(s.current_frame().is_none());
+        assert_eq!(s.markers(&api).1, None);
+    }
+
+    #[test]
+    fn frame_labels_name_the_subprogram() {
+        let body = Unit::new("PYTHIA", "ORDERS_API", UnitType::PackageBody);
+        let proc = Unit::new("PYTHIA", "DBG_DEMO", UnitType::Procedure);
+        let block = Unit::new("PYTHIA", "B1", UnitType::Block);
+        let sys = Unit::new("SYS", "DBMS_SESSION", UnitType::PackageBody);
+        assert_eq!(
+            frame_label(&frame(&body, "LOAD_ORDER", Some(31))),
+            "orders_api.load_order:31"
+        );
+        assert_eq!(
+            frame_label(&frame(&body, "<clinit>", Some(40))),
+            "orders_api.(initialization):40"
+        );
+        assert_eq!(
+            frame_label(&frame(&proc, "DBG_DEMO", Some(3))),
+            "dbg_demo:3"
+        );
+        assert_eq!(
+            frame_label(&frame(&block, "BLOCK", Some(4))),
+            "anonymous block:4"
+        );
+        assert_eq!(
+            frame_label(&frame(&sys, "<procedure$29>", None)),
+            "dbms_session"
+        );
     }
 
     #[test]

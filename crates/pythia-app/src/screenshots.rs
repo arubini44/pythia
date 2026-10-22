@@ -708,6 +708,169 @@ fn debugger_session() {
     wait_until(&mut h, "finish", |app| !app.test_debug_running());
 }
 
+/// The debugger scenario from pythia-debugger's tests: the editors follow
+/// every stop, from a package body to a trigger and back, and into the SQL
+/// window's block. Needs PYTHIA_TEST_DB, PYTHIA_TEST_DB_DBA and
+/// PYTHIA_DEBUG_HOST.
+#[test]
+fn debugger_follows_execution() {
+    use pythia_debugger::{DebugCommand, Unit, UnitType};
+    const SCRIPT: &str = include_str!("../../pythia-debugger/tests/scenario/orders.sql");
+    let (Some((profile, password)), Ok(host), Some(dba)) = (
+        profile(),
+        std::env::var("PYTHIA_DEBUG_HOST"),
+        std::env::var("PYTHIA_TEST_DB_DBA").ok(),
+    ) else {
+        eprintln!("PYTHIA_TEST_DB / PYTHIA_TEST_DB_DBA / PYTHIA_DEBUG_HOST not set, skipping");
+        return;
+    };
+    // Install the scenario, with debug information everywhere.
+    let connect = |spec: &str| {
+        let (cred, db) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        pythia_db::oracle::Connection::connect(user, pw, db).unwrap()
+    };
+    let dba = connect(&dba);
+    for stmt in pythia_debugger::target::setup_statements("pythia", &host) {
+        dba.execute(&stmt, &[]).unwrap();
+    }
+    let conn = connect(&std::env::var("PYTHIA_TEST_DB").unwrap());
+    for drop in [
+        "drop trigger dbgx_orders_bu",
+        "drop package dbgx_orders_api",
+        "drop package dbgx_pricing",
+        "drop package dbgx_types",
+        "drop type dbgx_money force",
+        "drop type dbgx_codes force",
+        "drop table dbgx_audit purge",
+        "drop table dbgx_order_lines purge",
+        "drop table dbgx_orders purge",
+        "drop table dbgx_customers purge",
+    ] {
+        let _ = conn.execute(drop, &[]);
+    }
+    let mut sources = Vec::new();
+    for stmt in pythia_plsql::split_statements(SCRIPT) {
+        let sql = stmt.text(SCRIPT);
+        conn.execute(sql, &[])
+            .unwrap_or_else(|e| panic!("{e}\n{sql}"));
+        sources.push(sql);
+    }
+    let unit = |name: &str, t| Unit::new("PYTHIA", name, t);
+    let api = unit("DBGX_ORDERS_API", UnitType::PackageBody);
+    let trigger = unit("DBGX_ORDERS_BU", UnitType::Trigger);
+    for u in [
+        &api,
+        &trigger,
+        &unit("DBGX_PRICING", UnitType::PackageBody),
+        &unit("DBGX_MONEY", UnitType::TypeBody),
+    ] {
+        pythia_debugger::target::compile_debug(&conn, u).unwrap();
+    }
+    let marker = |head: &str, name: &str| -> u32 {
+        let source = sources
+            .iter()
+            .find(|s| s.to_lowercase().starts_with(head))
+            .unwrap();
+        source
+            .lines()
+            .position(|l| l.contains(&format!("-- @{name}")))
+            .unwrap() as u32
+            + 1
+    };
+    let load_done = marker(
+        "create or replace package body dbgx_orders_api",
+        "load_done",
+    );
+    let on_update = marker("create or replace trigger dbgx_orders_bu", "trigger");
+
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut()
+        .test_debug_setup(&host, api.clone(), load_done);
+    h.state_mut()
+        .test_debug_setup(&host, trigger.clone(), on_update);
+    // The block isn't the first statement: its lines start further down.
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "select count(*) from dbgx_orders;\n\n\
+               declare\n  l_count pls_integer;\nbegin\n  dbgx_orders_api.process_all(l_count);\n  \
+               dbms_output.put_line('processed ' || l_count);\n  rollback;\nend;"
+            .into(),
+        run: false,
+    });
+    let sql_doc = h.state().test_focused();
+    h.state_mut().test_sql_window().editor.goto(4, 3);
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::DebugStart);
+
+    // Waits until the focused editor marks a line containing `needle`.
+    let follow = |h: &mut Ui, needle: &str| -> (String, usize) {
+        let start = Instant::now();
+        loop {
+            let (title, marker, cursor) = h.state().test_execution_marker();
+            if let Some((line, text)) = &marker
+                && text.contains(needle)
+                && h.state().test_debug().is_suspended()
+            {
+                assert_eq!(cursor, *line, "the cursor is on the marked line in {title}");
+                return (title, *line);
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "no marker at {needle}: {title} {marker:?}, log {:?}",
+                h.state().test_debug().log
+            );
+            h.step();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    };
+    // Steps and waits for the next stop (commands while running are
+    // ignored, as the toolbar's are disabled then).
+    let step = |h: &mut Ui, command: DebugCommand| {
+        let resume = command == DebugCommand::Resume;
+        h.state_mut().test_debug_mut().command(command);
+        if !resume {
+            wait_until(h, "stop", |app| app.test_debug().is_suspended());
+        }
+    };
+
+    let (title, line) = follow(&mut h, "-- @load_done");
+    assert_eq!(
+        (title.as_str(), line),
+        ("dbgx_orders_api", load_done as usize)
+    );
+    step(&mut h, DebugCommand::StepOver);
+    step(&mut h, DebugCommand::StepOver);
+    // The marker moved within the window (the same breakpoint isn't left).
+    follow(&mut h, "-- @process_loaded");
+    step(&mut h, DebugCommand::Resume);
+    let (title, line) = follow(&mut h, "-- @trigger");
+    assert_eq!(title, "dbgx_orders_bu");
+    assert_eq!(line, on_update as usize, "trigger lines match the editor");
+    step(&mut h, DebugCommand::Resume);
+    // Back to the package for the next order, then out to the block.
+    let (title, _) = follow(&mut h, "-- @load_done");
+    assert_eq!(title, "dbgx_orders_api");
+    for bp in [(api.clone(), load_done), (trigger.clone(), on_update)] {
+        h.state_mut().test_debug_mut().toggle_breakpoint(bp.0, bp.1);
+    }
+    assert!(h.state().test_debug().breakpoints.is_empty());
+    for _ in 0..3 {
+        step(&mut h, DebugCommand::StepOut);
+    }
+    let (title, line) = follow(&mut h, "dbms_output.put_line");
+    assert_eq!(h.state().test_focused(), sql_doc, "{title}");
+    assert_eq!(line, 7, "the block's line 5 in the SQL window");
+    step(&mut h, DebugCommand::Resume);
+    wait_until(&mut h, "finish", |app| !app.test_debug_running());
+    h.run_steps(3);
+    let (_, marker, _) = h.state().test_execution_marker();
+    assert_eq!(marker, None, "no marker once finished");
+}
+
 /// Runs a deployment script that includes another (`@@`), continues after
 /// an error (`WHENEVER SQLERROR CONTINUE`) and creates and fills a table.
 #[test]

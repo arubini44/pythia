@@ -17,14 +17,40 @@ pub fn run_under_debugger(
     port: u16,
     block: &str,
 ) -> Result<(), DbError> {
-    conn.execute(
-        "begin dbms_debug_jdwp.connect_tcp(:1, :2); end;",
-        &[&host, &i32::from(port)],
-    )?;
-    let result = conn.execute(block, &[]).map(drop).map_err(DbError::from);
-    // The session may be gone if the debugger terminated it.
-    let _ = conn.execute("begin dbms_debug_jdwp.disconnect; end;", &[]);
+    // Compiled at level 1 the block itself has debug information, so it
+    // can be stepped through (and stepping out of a unit lands in it).
+    let level = optimize_level(conn);
+    conn.execute("alter session set plsql_optimize_level = 1", &[])?;
+    let result = conn
+        .execute(
+            "begin dbms_debug_jdwp.connect_tcp(:1, :2); end;",
+            &[&host, &i32::from(port)],
+        )
+        .map_err(DbError::from)
+        .and_then(|_| {
+            let result = conn.execute(block, &[]).map(drop).map_err(DbError::from);
+            // The session may be gone if the debugger terminated it.
+            let _ = conn.execute("begin dbms_debug_jdwp.disconnect; end;", &[]);
+            result
+        });
+    let _ = conn.execute(
+        &format!("alter session set plsql_optimize_level = {level}"),
+        &[],
+    );
     result
+}
+
+/// The session's `PLSQL_OPTIMIZE_LEVEL`, or Oracle's default (2) when
+/// `V$PARAMETER` isn't readable.
+fn optimize_level(conn: &Connection) -> u8 {
+    conn.query_row_as::<String>(
+        "select value from v$parameter where name = 'plsql_optimize_level'",
+        &[],
+    )
+    .ok()
+    .and_then(|v| v.trim().parse().ok())
+    .filter(|l| *l <= 3)
+    .unwrap_or(2)
 }
 
 /// How a debugged block ended: what it printed with DBMS_OUTPUT and its own

@@ -11,5 +11,6 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+pythia-plsql.workspace = true
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
 tracing-subscriber.workspace = true

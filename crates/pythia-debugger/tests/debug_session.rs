@@ -6,27 +6,13 @@
 //! The database must reach this machine as `PYTHIA_DEBUG_HOST`
 //! (default `host.containers.internal`, right for a local container).
 
-use std::sync::mpsc;
+mod common;
+
 use std::thread;
-use std::time::{Duration, Instant};
 
-use pythia_db::oracle::Connection;
+use common::{Harness, connect, host, run_target, value, watch};
 use pythia_debugger::target::{self, MissingPrivilege};
-use pythia_debugger::{
-    Breakpoint, BreakpointOptions, DebugCommand, DebugEvent, Debugger, StopReason, Unit, UnitType,
-    Variable, Watch,
-};
-
-fn connect(var: &str) -> Option<Connection> {
-    let spec = std::env::var(var).ok()?;
-    let (cred, db) = spec.rsplit_once('@')?;
-    let (user, pw) = cred.split_once('/')?;
-    Some(Connection::connect(user, pw, db).expect("connect"))
-}
-
-fn host() -> String {
-    std::env::var("PYTHIA_DEBUG_HOST").unwrap_or_else(|_| "host.containers.internal".into())
-}
+use pythia_debugger::{Breakpoint, BreakpointOptions, DebugCommand, StopReason, Unit, UnitType};
 
 const DEMO: &str = "create or replace procedure dbg_demo(p_n in number) is
   type t_arr is table of number; type t_rec is record (a number := 7, b varchar2(10) := 'bee');
@@ -73,143 +59,6 @@ begin
   end;
   dbms_output.put_line('handled ' || l_x);
 end;";
-
-/// A stop with everything the debugger reports.
-struct Stop {
-    reason: StopReason,
-    unit: Unit,
-    line: Option<u32>,
-    variables: Vec<Variable>,
-    watches: Vec<Watch>,
-    exception: Option<String>,
-}
-
-struct Harness {
-    debugger: Debugger,
-    wake: mpsc::Receiver<()>,
-}
-
-impl Harness {
-    fn new() -> Self {
-        let (tx, wake) = mpsc::channel();
-        let debugger = Debugger::listen("0.0.0.0:0", move || {
-            let _ = tx.send(());
-        })
-        .expect("listen");
-        Self { debugger, wake }
-    }
-
-    fn next(&self) -> DebugEvent {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            if let Some(e) = self.debugger.try_recv() {
-                eprintln!("event: {}", short(&e));
-                return e;
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            assert!(!left.is_zero(), "timed out waiting for a debug event");
-            let _ = self.wake.recv_timeout(left.min(Duration::from_millis(200)));
-        }
-    }
-
-    /// Next suspension: (reason, unit, line, variables, stack depth).
-    fn stop(&self) -> (StopReason, Unit, Option<u32>, Vec<Variable>, usize) {
-        let (stop, depth) = self.stop_full();
-        (stop.reason, stop.unit, stop.line, stop.variables, depth)
-    }
-
-    fn stop_full(&self) -> (Stop, usize) {
-        loop {
-            match self.next() {
-                DebugEvent::Suspended {
-                    reason,
-                    location,
-                    variables,
-                    stack,
-                    watches,
-                    exception,
-                } => {
-                    let stop = Stop {
-                        reason,
-                        unit: location.unit,
-                        line: location.line,
-                        variables,
-                        watches,
-                        exception,
-                    };
-                    return (stop, stack.len());
-                }
-                DebugEvent::Terminated => panic!("terminated while waiting for a stop"),
-                DebugEvent::Error(e) => panic!("debugger error: {e}"),
-                _ => {}
-            }
-        }
-    }
-
-    /// The next watch values sent without a stop (after `SetWatches`).
-    fn watches(&self) -> Vec<Watch> {
-        loop {
-            match self.next() {
-                DebugEvent::Watches(w) => return w,
-                DebugEvent::Terminated => panic!("terminated while waiting for watches"),
-                _ => {}
-            }
-        }
-    }
-
-    fn until_terminated(&self) {
-        loop {
-            match self.next() {
-                DebugEvent::Terminated => return,
-                DebugEvent::Suspended { .. } => self.debugger.send(DebugCommand::Resume),
-                _ => {}
-            }
-        }
-    }
-}
-
-fn short(e: &DebugEvent) -> String {
-    match e {
-        DebugEvent::Suspended {
-            reason,
-            location,
-            stack,
-            ..
-        } => {
-            format!(
-                "suspended {reason:?} at {} line {:?} (depth {})",
-                location.unit,
-                location.line,
-                stack.len()
-            )
-        }
-        other => format!("{other:?}"),
-    }
-}
-
-fn value<'a>(vars: &'a [Variable], name: &str) -> Option<&'a str> {
-    vars.iter().find(|v| v.name == name)?.value.as_deref()
-}
-
-/// A watch's value: `Ok(value)` (None = NULL) or the error text.
-fn watch(watches: &[Watch], expression: &str) -> Result<Option<String>, String> {
-    let w = watches
-        .iter()
-        .find(|w| w.expression == expression)
-        .unwrap_or_else(|| panic!("no watch {expression}: {watches:?}"));
-    w.value.clone().map(|v| v.value)
-}
-
-fn run_target(
-    port: u16,
-    block: &'static str,
-) -> thread::JoinHandle<Result<(), pythia_db::DbError>> {
-    let host = host();
-    thread::spawn(move || {
-        let conn = connect("PYTHIA_TEST_DB").unwrap();
-        target::run_under_debugger(&conn, &host, port, block)
-    })
-}
 
 #[test]
 fn debug_procedures_and_packages() {
