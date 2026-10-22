@@ -1,5 +1,6 @@
 //! Scheduler jobs: DBMS_SCHEDULER jobs with their state, schedule and run
-//! history; run, stop, enable, disable and drop them.
+//! history; run, stop, enable, disable and drop them, and open the job form
+//! for a new job or a job's settings.
 
 use std::collections::BTreeMap;
 
@@ -324,6 +325,13 @@ impl JobsWindow {
             {
                 refresh = true;
             }
+            if ui
+                .button("New job…")
+                .on_hover_text("Opens the job form, in the schema the object browser shows")
+                .clicked()
+            {
+                effects.commands.push(crate::commands::Command::NewJob);
+            }
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
                     .hint_text("Filter jobs…")
@@ -542,6 +550,23 @@ impl JobsWindow {
                         }
                     } else if ui.button("Enable").clicked() {
                         action = Some("enable");
+                    }
+                    if let Some(connection) = cx.connection.clone()
+                        && ui
+                            .button("Edit…")
+                            .on_hover_text("What it runs, when, and its options")
+                            .clicked()
+                    {
+                        effects.open.push(OpenRequest::EditObject {
+                            connection,
+                            target: crate::object_editor::EditTarget::Edit(
+                                crate::documents::ObjectRef {
+                                    owner: job.owner.clone(),
+                                    name: job.name.clone(),
+                                    object_type: pythia_db::ObjectType::Job,
+                                },
+                            ),
+                        });
                     }
                     if ui.button("Drop…").clicked() {
                         self.state.confirm_drop = true;

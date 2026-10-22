@@ -58,11 +58,12 @@ for Linux, Windows and macOS.
   foreign keys, checks, indexes, identity columns, range, interval, list
   or hash partitioning, temporary tables, a copy of another table), and
   forms for views, materialized views, sequences, synonyms, indexes,
-  database links, users, roles and profiles, with a preview of the
-  generated DDL. Triggers, procedures, functions, packages and types start
+  database links, scheduler jobs, users, roles and profiles, with a
+  preview of the generated DDL. Triggers, procedures, functions, packages and types start
   from a form that writes their first source for a program window.
 - Form editors for existing sequences, views, materialized views, synonyms,
-  indexes, database links, users, roles, profiles and grants.
+  indexes, database links, scheduler jobs, users, roles, profiles and
+  grants.
 - Program windows with spec and body, compile with clickable errors
   (gutter markers and squiggles), unsaved-change tracking, save to file.
 - **Test…** generates a ready-to-run block for any procedure or function
@@ -132,6 +133,9 @@ for Linux, Windows and macOS.
 **Scheduler jobs**
 - All DBMS_SCHEDULER jobs with state, schedule, last and next run; run now,
   stop, enable, disable, drop; recent runs with errors.
+- A form for new jobs and a job's settings: a PL/SQL block or a stored
+  procedure, start and end, the repeat interval from presets or as a
+  calendar expression, with the next runs it gives.
 
 ![Scheduler jobs](docs/screenshots/scheduler-jobs.png)
 

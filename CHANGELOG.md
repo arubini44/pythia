@@ -7,6 +7,15 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Scheduler job form (#42), from New job… on the object browser's
+  Scheduler jobs folder, File → New Object, or New job… and Edit… in the
+  Scheduler Jobs window. It sets what the job runs (a PL/SQL block or a
+  stored procedure, picked from the schema), its start, a repeat interval
+  from presets (every few minutes or hours, daily, weekly on some days,
+  monthly) or typed as a calendar expression, its end, enabled, drop after
+  its last run and comments, and shows the next five runs as the database
+  computes them. A new job is DBMS_SCHEDULER.CREATE_JOB, a change sets the
+  changed attributes; Open in SQL window ends such blocks with `/`.
 - Profiles (#41), listed in the object browser below users and roles,
   with New profile…, Edit profile… and Drop…. The form sets each password
   and resource limit to default, unlimited or a value, says what default

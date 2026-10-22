@@ -10,6 +10,7 @@ mod account;
 mod db_link;
 mod grants;
 mod index;
+mod job;
 mod mview;
 mod profile;
 mod program;
@@ -23,6 +24,8 @@ mod view;
 pub use account::AccountDef;
 #[cfg(test)]
 pub use db_link::LinkDef;
+#[cfg(test)]
+pub use job::JobDef;
 #[cfg(test)]
 pub use profile::ProfileDef;
 #[cfg(test)]
@@ -97,6 +100,7 @@ pub fn has_editor(t: ObjectType) -> bool {
             | ObjectType::Synonym
             | ObjectType::Index
             | ObjectType::DatabaseLink
+            | ObjectType::Job
             | ObjectType::User
             | ObjectType::Role
             | ObjectType::Profile
@@ -141,6 +145,7 @@ enum Form {
     Synonym(synonym::SynonymDef),
     Index(index::IndexDef),
     DatabaseLink(db_link::LinkDef),
+    Job(job::JobDef),
     Account(account::AccountDef),
     Profile(profile::ProfileDef),
     Grants(grants::GrantsDef),
@@ -159,6 +164,7 @@ impl Form {
             Form::Synonym(d) => ident(&d.name),
             Form::Index(d) => ident(&d.name),
             Form::DatabaseLink(d) => ident(&d.name),
+            Form::Job(d) => ident(&d.name),
             Form::Account(d) => ident(&d.name),
             Form::Profile(d) => ident(&d.name),
             Form::Program(d) => ident(&d.name),
@@ -219,6 +225,8 @@ pub struct Lists {
     pub tablespaces: Vec<String>,
     pub temp_tablespaces: Vec<String>,
     pub db_links: Vec<String>,
+    /// Procedures of `schema`, packaged ones as `pkg.proc`.
+    pub procedures: Vec<String>,
     pub grantees: Vec<String>,
     pub profiles: Vec<String>,
     pub roles: Vec<String>,
@@ -228,12 +236,17 @@ pub struct Lists {
     pub session_privileges: Vec<String>,
     /// Password verify functions (owned by SYS).
     pub verify_functions: Vec<String>,
+    /// Who the session is logged in as.
+    pub session_user: String,
     /// Objects of the edited type in the schema, to warn before a new
     /// PL/SQL unit replaces one (`CREATE OR REPLACE`).
     pub existing: Vec<String>,
     /// Lists a form asked for this frame.
     pub want_objects: Option<String>,
     pub want_columns: Option<String>,
+    /// A job's next runs for a start date and repeat interval.
+    pub want_next_runs: Option<(String, String)>,
+    pub next_runs: HashMap<(String, String), Result<Vec<String>, String>>,
 }
 
 /// The lists loaded with the form.
@@ -246,12 +259,14 @@ struct BaseLists {
     tablespaces: Vec<String>,
     temp_tablespaces: Vec<String>,
     db_links: Vec<String>,
+    procedures: Vec<String>,
     grantees: Vec<String>,
     profiles: Vec<String>,
     roles: Vec<String>,
     privileges: Vec<String>,
     session_privileges: Vec<String>,
     verify_functions: Vec<String>,
+    session_user: String,
     existing: Vec<String>,
 }
 
@@ -262,6 +277,7 @@ type Loaded = (Option<Form>, Form, BaseLists);
 enum ListRequest {
     Objects(String),
     Columns(String),
+    NextRuns(String, String),
 }
 
 /// A statement that failed while applying.
@@ -354,6 +370,7 @@ impl ObjectEditor {
             Form::Synonym(d) => f(d),
             Form::Index(d) => f(d),
             Form::DatabaseLink(d) => f(d),
+            Form::Job(d) => f(d),
             Form::Account(d) => f(d),
             Form::Profile(d) => f(d),
             Form::Grants(d) => f(d),
@@ -414,18 +431,32 @@ impl ObjectEditor {
                     lists.tablespaces = base.tablespaces;
                     lists.temp_tablespaces = base.temp_tablespaces;
                     lists.db_links = base.db_links;
+                    lists.procedures = base.procedures;
                     lists.grantees = base.grantees;
                     lists.profiles = base.profiles;
                     lists.roles = base.roles;
                     lists.privileges = base.privileges;
                     lists.session_privileges = base.session_privileges;
                     lists.verify_functions = base.verify_functions;
+                    lists.session_user = base.session_user;
                     lists.existing = base.existing;
                 }
                 Ok(Err(_)) => self.state.load_error = Some("unexpected result".into()),
                 Err(e) => self.state.load_error = Some(e.to_string()),
             }
         } else if let Some(request) = self.state.lists_loading.remove(&id) {
+            if let ListRequest::NextRuns(start, repeat) = request {
+                let runs = match result.map(|any| any.downcast::<Vec<String>>()) {
+                    Ok(Ok(runs)) => Ok(*runs),
+                    Ok(Err(_)) => Err("unexpected result".to_owned()),
+                    Err(e) => Err(format!(
+                        "The repeat interval doesn't work: {}",
+                        error_text(&e)
+                    )),
+                };
+                self.state.lists.next_runs.insert((start, repeat), runs);
+                return Effects::default();
+            }
             let names = result
                 .ok()
                 .and_then(|any| any.downcast::<Vec<String>>().ok())
@@ -438,6 +469,7 @@ impl ObjectEditor {
                 ListRequest::Columns(table) => {
                     self.state.lists.columns.insert(table, names);
                 }
+                ListRequest::NextRuns(..) => {}
             }
         } else if self.state.applying == Some(id) {
             self.state.applying = None;
@@ -558,6 +590,13 @@ impl ObjectEditor {
                 });
                 db_link::statements(o, d)
             }
+            (o, Form::Job(d)) => {
+                let o = o.and_then(|f| match f {
+                    Form::Job(j) => Some(j),
+                    _ => None,
+                });
+                job::statements(owner, o, d)
+            }
             (o, Form::Account(d)) => {
                 let o = o.and_then(|f| match f {
                     Form::Account(a) => Some(a),
@@ -661,16 +700,32 @@ impl ObjectEditor {
                 .want_columns
                 .take()
                 .map(ListRequest::Columns),
+            self.state
+                .lists
+                .want_next_runs
+                .take()
+                .map(|(start, repeat)| ListRequest::NextRuns(start, repeat)),
         ];
         for want in wants.into_iter().flatten() {
             let key = match &want {
                 ListRequest::Objects(o) => format!("objects:{o}"),
                 ListRequest::Columns(t) => format!("columns:{t}"),
+                ListRequest::NextRuns(start, repeat) => format!("next:{start}\u{1}{repeat}"),
             };
             if !self.state.requested.insert(key) {
                 continue;
             }
             let id = request_id();
+            if let ListRequest::NextRuns(start, repeat) = &want {
+                let (start, repeat) = (start.clone(), repeat.clone());
+                self.state.lists_loading.insert(id, want);
+                let task: pythia_db::TaskFn = Box::new(move |conn: &Connection| {
+                    let runs = job::next_runs(conn, &start, &repeat)?;
+                    Ok(Box::new(runs) as Box<dyn std::any::Any + Send>)
+                });
+                effects.request(Target::Meta, DbRequest::Task { id, task });
+                continue;
+            }
             let (sql, binds): (&str, Vec<String>) = match &want {
                 ListRequest::Objects(owner) => (
                     "select object_name from all_objects
@@ -684,6 +739,7 @@ impl ObjectEditor {
                       where owner = :1 and table_name = :2 order by column_id",
                     vec![schema.clone(), table.clone()],
                 ),
+                ListRequest::NextRuns(..) => unreachable!("sent above"),
             };
             self.state.lists_loading.insert(id, want);
             let task: pythia_db::TaskFn = Box::new(move |conn: &Connection| {
@@ -849,6 +905,7 @@ impl ObjectEditor {
                             Form::Synonym(def) => synonym::ui(ui, def, existing, lists),
                             Form::Index(def) => index::ui(ui, def, existing, lists),
                             Form::DatabaseLink(def) => db_link::ui(ui, def, existing, &owner),
+                            Form::Job(def) => job::ui(ui, def, existing, &owner, lists),
                             Form::Account(def) => {
                                 let original = original.and_then(|f| match f {
                                     Form::Account(a) => Some(a),
@@ -962,6 +1019,7 @@ fn new_form(conn: &Connection, target: &EditTarget) -> Result<Form, DbError> {
             public: owner == "PUBLIC",
             ..Default::default()
         }),
+        ObjectType::Job => Form::Job(job::JobDef::default()),
         ObjectType::User => Form::Account(account::AccountDef::new_user()),
         ObjectType::Role => Form::Account(account::AccountDef::new_role()),
         ObjectType::Profile => Form::Profile(profile::new_def(conn)),
@@ -1038,6 +1096,7 @@ fn load(conn: &Connection, target: &EditTarget) -> Result<Loaded, DbError> {
         }
         ObjectType::User | ObjectType::Role => account::lists(conn, &mut base)?,
         ObjectType::Profile => profile::lists(conn, &mut base)?,
+        ObjectType::Job => job::lists(conn, owner, &mut base)?,
         _ => {}
     }
     if let EditTarget::New { object_type, .. } = target
@@ -1067,6 +1126,7 @@ fn load(conn: &Connection, target: &EditTarget) -> Result<Loaded, DbError> {
             ObjectType::Synonym => Form::Synonym(synonym::load(conn, owner, &o.name)?),
             ObjectType::Index => Form::Index(index::load(conn, owner, &o.name)?),
             ObjectType::DatabaseLink => Form::DatabaseLink(db_link::load(conn, owner, &o.name)?),
+            ObjectType::Job => Form::Job(job::load(conn, owner, &o.name)?),
             ObjectType::User => Form::Account(account::load_user(conn, &o.name)?),
             ObjectType::Role => Form::Account(account::load_role(conn, &o.name)?),
             ObjectType::Profile => Form::Profile(profile::load(conn, &o.name)?),
@@ -1154,10 +1214,18 @@ pub fn first_line(s: &str) -> &str {
 }
 
 /// The statements as a runnable script.
+/// The statements as a script: PL/SQL blocks end with `/`.
 fn script(statements: &[String]) -> String {
     statements
         .iter()
-        .map(|s| format!("{s};"))
+        .map(|s| {
+            let lower = s.trim_start().to_lowercase();
+            if lower.starts_with("begin") || lower.starts_with("declare") {
+                format!("{s}\n/")
+            } else {
+                format!("{s};")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -1261,6 +1329,113 @@ mod tests {
         assert_eq!(qualified("HR", "emp"), "HR.EMP");
         assert_eq!(qualified("HR", "\"my emp\""), "HR.\"my emp\"");
         assert!(is_integer("-12") && !is_integer("1.5") && !is_integer("-"));
+    }
+
+    #[test]
+    fn scripts_end_blocks_with_a_slash() {
+        let statements = [
+            "create sequence s".to_owned(),
+            "begin\n  dbms_scheduler.enable('J');\nend;".to_owned(),
+        ];
+        assert_eq!(
+            script(&statements),
+            "create sequence s;\n\nbegin\n  dbms_scheduler.enable('J');\nend;\n/"
+        );
+    }
+
+    /// A scheduler job through the job form's SQL: created, read back,
+    /// its next runs, changed and dropped.
+    #[test]
+    fn builds_live_jobs() {
+        let Some((conn, _)) = connect("PYTHIA_TEST_DB") else {
+            return;
+        };
+        let owner = conn
+            .query_row_as::<String>("select user from dual", &[])
+            .unwrap();
+        let drop = crate::jobs_window::action_sql("drop", &owner, "PYOB_JOB");
+        let _ = conn.execute(&drop, &[]);
+        conn.execute(
+            "create or replace procedure pyob_job_p is begin null; end;",
+            &[],
+        )
+        .unwrap();
+        let run = |statements: Vec<String>| {
+            apply(&conn, &statements, None).unwrap_or_else(|e| {
+                panic!("{}: {}", e.statement, e.error);
+            })
+        };
+        let mut base = BaseLists::default();
+        job::lists(&conn, &owner, &mut base).unwrap();
+        assert!(base.procedures.iter().any(|p| p == "pyob_job_p"));
+        assert_eq!(base.session_user, owner);
+        // 2030-01-01 is a Tuesday.
+        let start = "2030-01-01 02:00";
+        let repeat = "FREQ=WEEKLY;BYDAY=MON,FRI;BYHOUR=7;BYMINUTE=30;BYSECOND=0";
+        let runs = job::next_runs(&conn, start, repeat).unwrap();
+        assert_eq!(
+            runs,
+            [
+                "Fri 2030-01-04 07:30",
+                "Mon 2030-01-07 07:30",
+                "Fri 2030-01-11 07:30",
+                "Mon 2030-01-14 07:30",
+                "Fri 2030-01-18 07:30",
+            ]
+        );
+        assert!(job::next_runs(&conn, "", "FREQ=SOMETIMES").is_err());
+        if !base.session_privileges.iter().any(|p| p == "CREATE JOB") {
+            eprintln!("{owner} can't create jobs, skipping");
+            conn.execute("drop procedure pyob_job_p", &[]).unwrap();
+            return;
+        }
+
+        let def = job::JobDef {
+            name: "pyob_job".into(),
+            kind: job::JobKind::Procedure,
+            action: "pyob_job_p".into(),
+            start: start.into(),
+            repeat: repeat.into(),
+            enabled: false,
+            comments: "Pythia's test job".into(),
+            ..Default::default()
+        };
+        run(job::statements(&owner, None, &def).unwrap());
+        let loaded = job::load(&conn, &owner, "PYOB_JOB").unwrap();
+        assert_eq!(loaded.kind, job::JobKind::Procedure);
+        assert_eq!(loaded.action, "PYOB_JOB_P");
+        assert_eq!(loaded.start, def.start);
+        assert_eq!(loaded.repeat, def.repeat);
+        assert!(!loaded.enabled && !loaded.auto_drop);
+        assert_eq!(loaded.comments, def.comments);
+        assert_eq!(loaded.fixed_action, None);
+        assert_eq!(loaded.fixed_schedule, None);
+        assert_eq!(
+            job::statements(&owner, Some(&loaded), &loaded),
+            Ok(Vec::new())
+        );
+
+        let mut edited = loaded.clone();
+        edited.kind = job::JobKind::Block;
+        edited.action = "begin pyob_job_p; end;".into();
+        edited.repeat = "FREQ=HOURLY;INTERVAL=4".into();
+        edited.end = "2031-01-01 00:00".into();
+        edited.comments = String::new();
+        edited.enabled = true;
+        run(job::statements(&owner, Some(&loaded), &edited).unwrap());
+        let reloaded = job::load(&conn, &owner, "PYOB_JOB").unwrap();
+        assert_eq!(reloaded.kind, job::JobKind::Block);
+        assert_eq!(reloaded.action, edited.action);
+        assert_eq!(reloaded.repeat, edited.repeat);
+        assert_eq!(reloaded.end, edited.end);
+        assert!(reloaded.enabled);
+        assert_eq!(reloaded.comments, "");
+        assert_eq!(
+            job::statements(&owner, Some(&reloaded), &reloaded),
+            Ok(Vec::new())
+        );
+        conn.execute(&drop, &[]).unwrap();
+        conn.execute("drop procedure pyob_job_p", &[]).unwrap();
     }
 
     /// Creates, alters and drops real objects through the editors' SQL.

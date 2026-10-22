@@ -50,6 +50,7 @@ commands! {
     NewFunction => "New: Function…",
     NewPackage => "New: Package…",
     NewType => "New: Type…",
+    NewJob => "New: Scheduler Job…",
     NewDatabaseLink => "New: Database Link…",
     NewUser => "New: User…",
     NewRole => "New: Role…",
@@ -148,6 +149,7 @@ impl Command {
         (Command::NewFunction, pythia_db::ObjectType::Function),
         (Command::NewPackage, pythia_db::ObjectType::Package),
         (Command::NewType, pythia_db::ObjectType::Type),
+        (Command::NewJob, pythia_db::ObjectType::Job),
         (
             Command::NewDatabaseLink,
             pythia_db::ObjectType::DatabaseLink,

@@ -1326,6 +1326,65 @@ end;
         "SUCCEEDED"
     );
     save(&mut h, "scheduler-jobs");
+
+    // Edit… opens the job form; applying it refreshes the window.
+    let jobs_window = h.state().test_focused();
+    h.get_by_label("Edit…").click();
+    h.run_steps(2);
+    wait_until(&mut h, "job form", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    wait_until(&mut h, "next runs", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    assert_eq!(
+        h.state().test_focused_title().as_deref(),
+        Some("pythia_nightly_stats (job)")
+    );
+    assert!(h.query_by_label_contains("Next runs:").is_some());
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d.downcast_mut::<crate::object_editor::JobDef>().unwrap();
+        d.repeat = "FREQ=DAILY;BYHOUR=3;BYMINUTE=15;BYSECOND=0".into();
+    });
+    h.run_steps(2);
+    wait_until(&mut h, "next runs", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    save(&mut h, "edit-job");
+    assert_eq!(
+        h.state_mut()
+            .test_object_editor()
+            .statements_for_test()
+            .unwrap(),
+        [
+            "begin\n  dbms_scheduler.set_attribute('PYTHIA.PYTHIA_NIGHTLY_STATS', \
+          'repeat_interval', 'FREQ=DAILY;BYHOUR=3;BYMINUTE=15;BYSECOND=0');\nend;"
+        ]
+    );
+    let effects = h.state_mut().test_object_editor().apply_for_test();
+    h.state_mut().test_apply(effects);
+    wait_until(&mut h, "applied", |app| !app.test_focused_busy());
+    h.state_mut().test_focus(jobs_window);
+    h.run_steps(2);
+    wait_until(&mut h, "jobs refreshed", |app| !app.test_focused_busy());
+    let schedule = h
+        .state_mut()
+        .test_jobs_window()
+        .jobs()
+        .iter()
+        .find(|j| j.name == "PYTHIA_NIGHTLY_STATS")
+        .map(|j| j.schedule.clone());
+    assert_eq!(
+        schedule.as_deref(),
+        Some("FREQ=DAILY;BYHOUR=3;BYMINUTE=15;BYSECOND=0")
+    );
+    // New job… opens an empty form for the browser's schema.
+    h.get_by_label("New job…").click();
+    h.run_steps(2);
+    wait_until(&mut h, "new job form", |app| !app.test_focused_busy());
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("New job"));
+    assert_eq!(
+        h.state_mut().test_object_editor().statements_for_test(),
+        Err("Enter a name".into())
+    );
+
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
         text: "begin

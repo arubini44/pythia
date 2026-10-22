@@ -353,7 +353,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Lock tree / blocking sessions
 - [x] Long operations (`V$SESSION_LONGOPS`)
 - [x] Tablespace usage overview
-- [x] DBMS_SCHEDULER jobs: list, run, enable/disable, history
+- [x] DBMS_SCHEDULER jobs: list, run, enable/disable, history, create and edit (form with repeat interval presets and the next runs)
 
 ### 5.21 Refactoring & Productivity (M8)
 

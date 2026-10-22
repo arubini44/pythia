@@ -935,6 +935,27 @@ impl PythiaApp {
                 .unwrap_or_default();
             self.ai_start(request, None, source, connection.clone());
         }
+        // A job form applied: the connection's Scheduler Jobs windows list
+        // the job as it is now.
+        if let (Some(object), Some(name)) = (&effects.changed, &connection)
+            && object.object_type == pythia_db::ObjectType::Job
+        {
+            let windows: Vec<DocId> = self
+                .docs
+                .iter()
+                .filter(|(_, d)| {
+                    d.connection.as_deref() == Some(name.as_str())
+                        && matches!(d.kind, DocKind::Jobs(_))
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in windows {
+                if let Some(DocKind::Jobs(j)) = self.docs.get_mut(&id).map(|d| &mut d.kind) {
+                    let effects = j.refresh();
+                    self.apply(Some(id), effects);
+                }
+            }
+        }
         if let (Some(object), Some(name)) = (effects.changed, &connection)
             && self.browser.connection.as_deref() == Some(name.as_str())
         {
@@ -1817,6 +1838,7 @@ impl PythiaApp {
             | Command::NewFunction
             | Command::NewPackage
             | Command::NewType
+            | Command::NewJob
             | Command::NewDatabaseLink
             | Command::NewUser
             | Command::NewRole
@@ -2769,9 +2791,13 @@ impl PythiaApp {
             bar_menu(ui, "File", |ui| {
                 item(ui, Command::NewSqlWindow);
                 ui.menu_button("New Object", |ui| {
-                    for (i, (command, _)) in Command::NEW_OBJECTS.iter().enumerate() {
-                        // Tables and views, code, then links and accounts.
-                        if matches!(i, 6 | 11) {
+                    for (command, t) in Command::NEW_OBJECTS {
+                        // Tables and views, code and jobs, then links and
+                        // accounts.
+                        if matches!(
+                            t,
+                            pythia_db::ObjectType::Trigger | pythia_db::ObjectType::DatabaseLink
+                        ) {
                             ui.separator();
                         }
                         item(ui, *command);
