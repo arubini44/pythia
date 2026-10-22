@@ -1593,6 +1593,15 @@ mod tests {
         run(grants::statements(&object, &loaded, &before));
         let loaded = grants::load(&conn, &owner, "PYTHIA_OE_T", ObjectType::Table).unwrap();
         assert!(!loaded.rows.iter().any(|r| r.grantee == "PUBLIC"));
+        // A DBA sees grants it takes no part in (#47).
+        if let Some((dba, _)) = connect("PYTHIA_TEST_DB_DBA") {
+            conn.execute("grant select on pythia_oe_t to resource", &[])
+                .unwrap();
+            let seen = grants::load(&dba, &owner, "PYTHIA_OE_T", ObjectType::Table).unwrap();
+            conn.execute("revoke select on pythia_oe_t from resource", &[])
+                .unwrap();
+            assert!(seen.rows.iter().any(|r| r.grantee == "RESOURCE"));
+        }
 
         for s in [
             "drop synonym pythia_oe_syn",

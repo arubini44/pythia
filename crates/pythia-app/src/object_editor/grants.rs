@@ -73,13 +73,28 @@ pub fn load(
             .collect(),
         ..GrantsDef::default()
     };
-    for row in conn.query_as::<(String, String, String)>(
-        "select grantee, privilege, grantable from all_tab_privs
-          where table_schema = :1 and table_name = :2
+    // ALL_TAB_PRIVS leaves out grants the session takes no part in, which
+    // a DBA looking at another schema's object wants to see.
+    let read = |sql: &str| -> Result<Vec<(String, String, String)>, DbError> {
+        let mut out = Vec::new();
+        for row in conn.query_as::<(String, String, String)>(sql, &[&owner, &name])? {
+            out.push(row?);
+        }
+        Ok(out)
+    };
+    let rows = read(
+        "select grantee, privilege, grantable from dba_tab_privs
+          where owner = :1 and table_name = :2
           order by grantee, privilege",
-        &[&owner, &name],
-    )? {
-        let (grantee, privilege, grantable) = row?;
+    )
+    .or_else(|_| {
+        read(
+            "select grantee, privilege, grantable from all_tab_privs
+              where table_schema = :1 and table_name = :2
+              order by grantee, privilege",
+        )
+    })?;
+    for (grantee, privilege, grantable) in rows {
         if !def.privileges.contains(&privilege) {
             def.privileges.push(privilege.clone());
         }

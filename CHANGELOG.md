@@ -92,6 +92,9 @@ All notable changes to Pythia are documented here. The format follows
   Query. A window without an open connection can still pick one.
 
 ### Fixed
+- The grants editor read ALL_TAB_PRIVS only, so a DBA saw none or some
+  of the grants on another schema's object. It reads DBA_TAB_PRIVS when
+  it can (#47).
 - Drop… on a scheduler job in the object browser failed with ORA-00950
   (there is no DROP JOB); it drops the job through DBMS_SCHEDULER (#46).
 - A window learned whether a transaction is open, and got the statement's
