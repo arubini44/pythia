@@ -110,6 +110,9 @@ All notable changes to Pythia are documented here. The format follows
   Query. A window without an open connection can still pick one.
 
 ### Fixed
+- Object browser: another schema's private database links were missing
+  on 18c and 21c although their details showed; they're read from
+  DBA_DB_LINKS where the user may (#51).
 - The grants editor read ALL_TAB_PRIVS only, so a DBA saw none or some
   of the grants on another schema's object. It reads DBA_TAB_PRIVS when
   it can (#47).
