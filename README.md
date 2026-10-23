@@ -243,10 +243,11 @@ network ACL; `pythia_debugger::target::setup_script` prints what a DBA has to
 run. `crates/pythia-debugger/tests/scenario.rs` steps through a larger
 scenario (packages, records, collections, an object type, a trigger).
 
-Several app tests use the demo schema that the screenshot test creates, so
-on a fresh database run `cargo test -p pythia-app screenshots::screenshots`
-once with `PYTHIA_SCREENSHOT_DIR` set. The reports test needs
-`SELECT_CATALOG_ROLE` for the test user.
+The tests set up what they need on a new database: the demo schema
+several app tests use, and, with `PYTHIA_TEST_DB_DBA` set,
+`SELECT_CATALOG_ROLE` and the debugger privileges for the test user
+(without a DBA, grant those yourself). CI runs the whole suite against a
+fresh Oracle Free container.
 
 ### Workspace
 
