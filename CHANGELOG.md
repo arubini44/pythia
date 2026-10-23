@@ -82,8 +82,10 @@ All notable changes to Pythia are documented here. The format follows
 ### Changed
 - **No Oracle Instant Client needed any more.** Pythia connects with a
   pure-Rust driver (our fork of rust-oracledb, pinned: upstream fixes not
-  released yet, proxy logins, statements starting with a `--` comment, and
-  cancelling a running statement). Packages no longer depend on libaio.
+  released yet, proxy logins, statements starting with a `--` comment,
+  cancelling a running statement, and LOB queries that failed once no longer
+  failing with ORA-01008 afterwards, #48). Packages no longer depend on
+  libaio.
   JSON and VECTOR columns are shown (the Instant Client driver couldn't
   fetch them). Not covered (#13): 11.2 databases, servers that require
   Native Network Encryption, OS and wallet logins, cancelling over TLS, and
