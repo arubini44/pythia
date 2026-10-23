@@ -4,8 +4,8 @@
 //! `--features pythia-db/thick` that is the `oracle` crate (ODPI-C) instead.
 //!
 //! Known gaps: no external authentication (OS or wallet), no Native Network
-//! Encryption, no 11.2, cancel isn't possible on TLS connections, LOB
-//! columns are typed LONG, and batch errors are found row by row.
+//! Encryption, no 11.2, cancel isn't possible on TLS connections, and LOB
+//! columns are typed LONG.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -754,39 +754,40 @@ impl Batch<'_> {
         Ok(())
     }
 
-    /// Runs the rows appended so far. With batch errors, rows run one by one
-    /// (the driver doesn't report batch errors yet, oracle/rust-oracledb#41)
-    /// and the failed ones are returned as [`Error::batch_errors`].
+    /// Runs the rows appended so far, in one round trip. With batch errors,
+    /// the failed rows are returned as [`Error::batch_errors`].
     pub fn execute(&mut self) -> Result<()> {
         let rows = std::mem::take(&mut self.rows);
         if rows.is_empty() {
             return Ok(());
         }
+        let values: Vec<Vec<&dyn ToDbValue>> = rows
+            .iter()
+            .map(|r| r.iter().map(Bind::as_db).collect())
+            .collect();
+        let slices: Vec<&[&dyn ToDbValue]> = values.iter().map(Vec::as_slice).collect();
         if !self.batch_errors {
-            let values: Vec<Vec<&dyn ToDbValue>> = rows
-                .iter()
-                .map(|r| r.iter().map(Bind::as_db).collect())
-                .collect();
-            let slices: Vec<&[&dyn ToDbValue]> = values.iter().map(Vec::as_slice).collect();
             self.conn
                 .inner
                 .execute_batch(&self.sql, slices.as_slice())?;
             return Ok(());
         }
-        let mut errors = Vec::new();
-        for (i, row) in rows.iter().enumerate() {
-            let values: Vec<&dyn ToDbValue> = row.iter().map(Bind::as_db).collect();
-            if let Err(e) = self.conn.inner.execute(&self.sql, &values) {
-                let e = Error::from(e);
-                match e.db {
-                    Some(mut db) => {
-                        db.offset = i as u32;
-                        errors.push(db);
-                    }
-                    None => return Err(e),
-                }
-            }
-        }
+        let mut statement = self
+            .conn
+            .inner
+            .statement(&self.sql)?
+            .batch_errors()
+            .build()?;
+        let result = statement.execute_batch(slices.as_slice().into())?;
+        let errors: Vec<DbError> = result
+            .batch_errors()
+            .iter()
+            .map(|e| DbError {
+                code: e.code() as i32,
+                offset: e.offset() as u32,
+                message: e.message().to_owned(),
+            })
+            .collect();
         if errors.is_empty() {
             Ok(())
         } else {
