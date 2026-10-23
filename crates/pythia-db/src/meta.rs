@@ -444,25 +444,39 @@ fn objects(
 }
 
 /// Database links from `ALL_OBJECTS`, which has other schemas' private
-/// links the user may see, plus `ALL_DB_LINKS` for versions whose
-/// `ALL_OBJECTS` leaves links out. Links have no `LAST_DDL_TIME`: the
-/// creation time stands in.
+/// links the user may see on 23ai, plus the links it leaves out from
+/// `DBA_DB_LINKS` where the user may read it (other schemas' private links
+/// before 23ai, #51), else from `ALL_DB_LINKS`. Links have no
+/// `LAST_DDL_TIME`: the creation time stands in.
 fn links(conn: &Connection, owner: &str, pattern: &str) -> Result<Vec<DbObject>, DbError> {
-    let sql = "select owner, object_name, object_type, status, \
-                      to_char(nvl(last_ddl_time, created), 'YYYY-MM-DD HH24:MI:SS') \
-                 from all_objects \
-                where owner = :owner and object_type = 'DATABASE LINK' \
-                  and object_name like :pattern escape '\\' \
-               union all \
-               select l.owner, l.db_link, 'DATABASE LINK', 'VALID', \
-                      to_char(l.created, 'YYYY-MM-DD HH24:MI:SS') \
-                 from all_db_links l \
-                where l.owner = :owner and l.db_link like :pattern escape '\\' \
-                  and not exists (select 1 from all_objects o \
-                                   where o.owner = l.owner and o.object_name = l.db_link \
-                                     and o.object_type = 'DATABASE LINK') \
-                order by 2";
-    object_rows(conn.query_named(sql, &[("owner", &owner), ("pattern", &pattern)])?)
+    let sql = |view: &str| {
+        format!(
+            "select owner, object_name, object_type, status, \
+                    to_char(nvl(last_ddl_time, created), 'YYYY-MM-DD HH24:MI:SS') \
+               from all_objects \
+              where owner = :owner and object_type = 'DATABASE LINK' \
+                and object_name like :pattern escape '\\' \
+             union all \
+             select l.owner, l.db_link, 'DATABASE LINK', 'VALID', \
+                    to_char(l.created, 'YYYY-MM-DD HH24:MI:SS') \
+               from {view} l \
+              where l.owner = :owner and l.db_link like :pattern escape '\\' \
+                and not exists (select 1 from all_objects o \
+                                 where o.owner = l.owner and o.object_name = l.db_link \
+                                   and o.object_type = 'DATABASE LINK') \
+              order by 2"
+        )
+    };
+    let params: [(&str, &dyn crate::oracle::sql_type::ToSql); 2] =
+        [("owner", &owner), ("pattern", &pattern)];
+    let rows = match conn.query_named(&sql("dba_db_links"), &params) {
+        // ORA-00942: no access to DBA_DB_LINKS.
+        Err(e) if e.db_error().is_some_and(|d| d.code() == 942) => {
+            conn.query_named(&sql("all_db_links"), &params)?
+        }
+        rows => rows?,
+    };
+    object_rows(rows)
 }
 
 fn find(conn: &Connection, pattern: &str, limit: usize) -> Result<Vec<DbObject>, DbError> {
