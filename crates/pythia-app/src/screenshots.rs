@@ -1207,13 +1207,16 @@ fn scheduler_jobs() {
     let Some((profile, password)) = profile() else {
         return;
     };
+    // Before 23ai, a new user can't create jobs.
+    crate::test_db::as_dba(&["grant create job to {user}"]);
     let mut h = harness(false);
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
         text: "begin
-  for j in (select job_name from user_scheduler_jobs where job_name like 'PYTHIA\\_%' escape '\\') loop
+  for j in (select job_name from user_scheduler_jobs
+             where job_name in ('PYTHIA_NIGHTLY_STATS', 'PYTHIA_PURGE_LOGS')) loop
     dbms_scheduler.drop_job(j.job_name, force => true);
   end loop;
   dbms_scheduler.create_job('PYTHIA_NIGHTLY_STATS', 'PLSQL_BLOCK',
