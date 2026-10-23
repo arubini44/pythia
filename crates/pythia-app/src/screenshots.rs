@@ -113,8 +113,11 @@ fn wait_until(harness: &mut Harness<'_, PythiaApp>, what: &str, done: impl Fn(&P
     harness.run_steps(3);
 }
 
+/// The test database's profile (`PYTHIA_TEST_DB`), with the demo schema in
+/// place.
 fn profile() -> Option<(ConnectionProfile, String)> {
     let spec = std::env::var("PYTHIA_TEST_DB").ok()?;
+    crate::test_db::demo_schema();
     let (credentials, connect_string) = spec.rsplit_once('@')?;
     let (username, password) = credentials.split_once('/')?;
     Some((
@@ -129,66 +132,6 @@ fn profile() -> Option<(ConnectionProfile, String)> {
         password.into(),
     ))
 }
-
-const DEMO_SCHEMA: &str = "
-begin
-  for t in (select table_name from user_tables where table_name in ('DEMO_EMPLOYEES', 'DEMO_DEPARTMENTS')) loop
-    execute immediate 'drop table ' || t.table_name || ' cascade constraints purge';
-  end loop;
-end;
-/
-create table demo_departments (
-  department_id   number(4) primary key,
-  department_name varchar2(30 char) not null,
-  location        varchar2(40 char)
-);
-create table demo_employees (
-  employee_id   number(6) primary key,
-  first_name    varchar2(20 char),
-  last_name     varchar2(25 char) not null,
-  email         varchar2(40 char) not null unique,
-  hire_date     date default sysdate not null,
-  salary        number(8,2),
-  department_id number(4) references demo_departments
-);
-comment on column demo_employees.salary is 'Monthly salary in CHF';
-insert into demo_departments values (10, 'Administration', 'Zurich');
-insert into demo_departments values (20, 'Engineering', 'Basel');
-insert into demo_departments values (30, 'Sales', 'Geneva');
-insert into demo_employees
-  select level, initcap(dbms_random.string('l', 6)), initcap(dbms_random.string('l', 8)),
-         'user' || level || '@example.com', date '2015-01-01' + level * 3,
-         round(4000 + dbms_random.value * 9000, 2), 10 * (mod(level, 3) + 1)
-    from dual connect by level <= 1200;
-commit;
-create or replace package demo_pkg as
-  -- Raises the salary of an employee by a percentage.
-  procedure raise_salary(p_employee_id in number, p_percent in number default 5);
-  function department_total(p_department_id in number) return number;
-end demo_pkg;
-/
-create or replace package body demo_pkg as
-  procedure raise_salary(p_employee_id in number, p_percent in number default 5) is
-  begin
-    update demo_employees
-       set salary = salary * (1 + p_percent / 100)
-     where employee_id = p_employee_id;
-  end raise_salary;
-
-  function department_total(p_department_id in number) return number is
-    l_total number;
-  begin
-    select sum(salary) into l_total from demo_employees where department_id = p_department_id;
-    return l_total;
-  end department_total;
-end demo_pkg;
-/
-create or replace procedure demo_broken is
-begin
-  missing_procedure(42);
-end;
-/
-";
 
 const QUERY: &str = "-- Salary overview per department
 select d.department_name,
@@ -247,17 +190,6 @@ fn screenshots() {
         };
         h.state_mut().test_connect(profile, password);
         wait_until(&mut h, "connection", |app| app.test_connected());
-
-        if dark {
-            // Create the demo schema once, through a SQL window.
-            h.state_mut().test_open(OpenRequest::Sql {
-                connection: "pythia@FREEPDB1".into(),
-                text: DEMO_SCHEMA.into(),
-                run: true,
-            });
-            wait_until(&mut h, "demo schema", |app| !app.test_focused_busy());
-            h.state_mut().test_close_focused();
-        }
 
         h.state_mut().test_open(OpenRequest::Sql {
             connection: "pythia@FREEPDB1".into(),
@@ -617,6 +549,8 @@ fn debugger_session() {
         eprintln!("PYTHIA_TEST_DB / PYTHIA_DEBUG_HOST not set, skipping");
         return;
     };
+    let setup = pythia_debugger::target::setup_statements(&profile.username, &host);
+    crate::test_db::as_dba(&setup.iter().map(String::as_str).collect::<Vec<_>>());
     use pythia_debugger::{Unit, UnitType};
     let mut h = harness(true);
     h.state_mut().test_connect(profile, password);
@@ -1273,13 +1207,16 @@ fn scheduler_jobs() {
     let Some((profile, password)) = profile() else {
         return;
     };
+    // Before 23ai, a new user can't create jobs.
+    crate::test_db::as_dba(&["grant create job to {user}"]);
     let mut h = harness(false);
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
         text: "begin
-  for j in (select job_name from user_scheduler_jobs where job_name like 'PYTHIA\\_%' escape '\\') loop
+  for j in (select job_name from user_scheduler_jobs
+             where job_name in ('PYTHIA_NIGHTLY_STATS', 'PYTHIA_PURGE_LOGS')) loop
     dbms_scheduler.drop_job(j.job_name, force => true);
   end loop;
   dbms_scheduler.create_job('PYTHIA_NIGHTLY_STATS', 'PLSQL_BLOCK',

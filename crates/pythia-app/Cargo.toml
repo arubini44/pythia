@@ -54,8 +54,8 @@ description = "Fast, native IDE for Oracle SQL and PL/SQL"
 longDescription = """
 Pythia covers the daily work of an Oracle developer: writing and running SQL,
 editing and compiling PL/SQL, debugging, browsing objects, editing data,
-comparing schemas and monitoring sessions. Requires the Oracle Instant Client,
-which is installed separately."""
+comparing schemas and monitoring sessions. Connects to Oracle directly; no
+Oracle client libraries are needed."""
 homepage = "https://github.com/ortic/pythia"
 licenseFile = "../../LICENSE-MIT"
 beforePackagingCommand = "cargo build --release -p pythia-app"
@@ -85,8 +85,6 @@ role = "editor"
 [package.metadata.packager.deb]
 desktopTemplate = "../../assets/linux/com.ortic.pythia.desktop"
 section = "devel"
-# The Oracle Instant Client needs libaio at runtime (not bundled).
-depends = ["libaio1t64 | libaio1"]
 
 [package.metadata.packager.deb.files]
 "../../assets/linux/com.ortic.pythia.metainfo.xml" = "usr/share/metainfo/com.ortic.pythia.metainfo.xml"

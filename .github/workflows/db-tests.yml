@@ -1,0 +1,53 @@
+# The whole test suite against a fresh Oracle database, through the
+# pure-Rust driver. Called by ci.yml (23ai) and db-versions.yml (older
+# releases).
+name: Database tests
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: A gvenzl image, e.g. gvenzl/oracle-free:23-slim
+        required: true
+        type: string
+      service:
+        description: The pluggable database's service name
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  db:
+    runs-on: ubuntu-latest
+    services:
+      oracle:
+        image: ${{ inputs.image }}
+        env:
+          ORACLE_PASSWORD: oracle
+          APP_USER: pythia
+          APP_USER_PASSWORD: pythia
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 60
+    env:
+      PYTHIA_TEST_DB: pythia/pythia@localhost:1521/${{ inputs.service }}
+      PYTHIA_TEST_DB_DBA: system/oracle@localhost:1521/${{ inputs.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+      # The debugger tests make the database connect back to the test
+      # process: from the container, this machine is the network's gateway.
+      - name: Address the database reaches this machine at
+        run: |
+          gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' ${{ job.services.oracle.id }})
+          echo "PYTHIA_DEBUG_HOST=$gateway" >> "$GITHUB_ENV"
+      - run: cargo test --workspace --no-fail-fast

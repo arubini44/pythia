@@ -279,6 +279,8 @@ mod tests {
         let Ok(spec) = std::env::var("PYTHIA_TEST_DB") else {
             return;
         };
+        // The reports read V$ and DBA_ views.
+        crate::test_db::as_dba(&["grant select_catalog_role to {user}"]);
         let (cred, db) = spec.rsplit_once('@').unwrap();
         let (user, pw) = cred.split_once('/').unwrap();
         let conn = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();

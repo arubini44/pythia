@@ -590,6 +590,8 @@ mod tests {
         let Ok(spec) = std::env::var("PYTHIA_TEST_DB") else {
             return;
         };
+        // Before 23ai, a new user can't create jobs.
+        crate::test_db::as_dba(&["grant create job to {user}"]);
         let (cred, db) = spec.rsplit_once('@').unwrap();
         let (user, pw) = cred.split_once('/').unwrap();
         let conn = Connection::connect(user, pw, db).unwrap();

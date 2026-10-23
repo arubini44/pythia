@@ -5,18 +5,21 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# Spike (#13): run on the pure-Rust oracledb driver instead of the Instant
-# Client (`cargo run -p pythia-app --features pythia-db/thin`).
-thin = ["dep:oracledb"]
+# The Oracle Instant Client (ODPI-C) instead of the pure-Rust driver, for
+# setups the thin driver can't handle (Native Network Encryption required by
+# the server, 11.2): `cargo build -p pythia-app --features pythia-db/thick`.
+thick = ["dep:oracle"]
 
 [dependencies]
-oracle.workspace = true
-oracledb = { workspace = true, optional = true }
+oracle = { workspace = true, optional = true }
+oracledb.workspace = true
 pythia-config.workspace = true
 pythia-plsql.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-[dev-dependencies]
-oracledb.workspace = true
+[[example]]
+name = "thin_probe"
+# Compares the thin driver with the Instant Client.
+required-features = ["thick"]

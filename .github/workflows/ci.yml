@@ -20,6 +20,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The opt-in build against the Instant Client (ODPI-C) must keep
+      # compiling; it needs no client libraries to build.
+      - run: cargo clippy --workspace --all-targets --features pythia-db/thick -- -D warnings
 
   test:
     strategy:
@@ -33,7 +36,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       # Database, debugger and screenshot tests skip themselves unless
-      # PYTHIA_TEST_DB / PYTHIA_TEST_DB_DBA / PYTHIA_SCREENSHOT_DIR are set.
-      # No GPU is needed without PYTHIA_SCREENSHOT_DIR. --no-fail-fast: a
-      # failing crate doesn't hide the other crates' results.
+      # PYTHIA_TEST_DB / PYTHIA_TEST_DB_DBA / PYTHIA_SCREENSHOT_DIR are set
+      # (the db job sets the first two). No GPU is needed without
+      # PYTHIA_SCREENSHOT_DIR. --no-fail-fast: a failing crate doesn't hide
+      # the other crates' results.
       - run: cargo test --workspace --no-fail-fast
+
+  # The whole suite against a fresh Oracle Free, through the pure-Rust driver
+  # (db-versions.yml runs it against older releases weekly).
+  db:
+    uses: ./.github/workflows/db-tests.yml
+    with:
+      image: gvenzl/oracle-free:23-slim
+      service: FREEPDB1
