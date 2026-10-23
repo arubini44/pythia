@@ -5,9 +5,7 @@
 //!
 //! Known gaps: no external authentication (OS or wallet), no Native Network
 //! Encryption, no 11.2, cancel isn't possible on TLS connections, LOB
-//! columns are typed LONG, a time zone region in a value makes the driver
-//! panic (caught here and shown as text), and batch errors are found row by
-//! row.
+//! columns are typed LONG, and batch errors are found row by row.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -1206,14 +1204,8 @@ fn decode(row: &oracledb::Row, i: usize, m: &Metadata, ltz: i32) -> Result<Value
         } else {
             TsKind::Plain
         };
-        // A time zone region makes the driver panic (oracle/rust-oracledb#42).
-        let read = catch_unwind(AssertUnwindSafe(|| row.get::<Option<OracleTimestamp>>(i)));
-        match read {
-            Ok(v) => v?.map(|ts| Value::Timestamp(ts, kind, scale)),
-            Err(_) => Some(Value::Text(
-                "<time zone region: needs the Instant Client>".into(),
-            )),
-        }
+        row.get::<Option<OracleTimestamp>>(i)?
+            .map(|ts| Value::Timestamp(ts, kind, scale))
     } else if t == DB_TYPE_INTERVAL_DS {
         row.get::<Option<OracleIntervalDS>>(i)?
             .map(|v| Value::IntervalDS(v, i32::from(m.precision()), i32::from(m.scale())))
@@ -1474,12 +1466,18 @@ impl<T: RowValue> Iterator for ResultSet<'_, T> {
 
 // ----- formats -----------------------------------------------------------
 
-/// `YYYY-MM-DD HH24:MI:SS[.FF][ +TZH:TZM]`, local time. The driver hands over
-/// TIMESTAMP WITH TIME ZONE values as UTC fields with the value's offset
-/// (oracle/rust-oracledb, see #25), so the offset is added here.
+/// `YYYY-MM-DD HH24:MI:SS[.FF][ +TZH:TZM| TZR]`, local time: a TIMESTAMP
+/// WITH TIME ZONE value in its own time zone (its region's name if it has
+/// one), a TIMESTAMP WITH LOCAL TIME ZONE value, which the driver hands over
+/// in UTC, in the session's.
 fn timestamp(ts: &OracleTimestamp, kind: TsKind, scale: u8) -> String {
     let offset = match kind {
         TsKind::Tz => i32::from(ts.tz_hour_offset()) * 60 + i32::from(ts.tz_minute_offset()),
+        TsKind::Ltz(minutes) => minutes,
+        _ => 0,
+    };
+    // Only LTZ values are moved; TZ values arrive in their own time zone.
+    let shift = match kind {
         TsKind::Ltz(minutes) => minutes,
         _ => 0,
     };
@@ -1489,7 +1487,7 @@ fn timestamp(ts: &OracleTimestamp, kind: TsKind, scale: u8) -> String {
         u32::from(ts.day()),
     );
     let minutes =
-        (days * 24 + i64::from(ts.hour())) * 60 + i64::from(ts.minute()) + i64::from(offset);
+        (days * 24 + i64::from(ts.hour())) * 60 + i64::from(ts.minute()) + i64::from(shift);
     let (days, minute_of_day) = (minutes.div_euclid(1440), minutes.rem_euclid(1440));
     let (y, m, d) = civil_from_days(days);
     let mut out = format!(
@@ -1503,7 +1501,10 @@ fn timestamp(ts: &OracleTimestamp, kind: TsKind, scale: u8) -> String {
         out.push('.');
         out.push_str(&fraction[..usize::from(scale.min(9))]);
     }
-    if matches!(kind, TsKind::Tz | TsKind::Ltz(_)) {
+    if let (TsKind::Tz, Some(region)) = (kind, ts.tz_region()) {
+        out.push(' ');
+        out.push_str(region);
+    } else if matches!(kind, TsKind::Tz | TsKind::Ltz(_)) {
         let sign = if offset < 0 { '-' } else { '+' };
         out.push_str(&format!(
             " {sign}{:02}:{:02}",
@@ -1680,19 +1681,25 @@ mod tests {
         );
     }
 
-    /// A break while a query's rows are read between fetches stops it at
-    /// the next row; a break while idle doesn't stop the next query.
-    #[test]
-    fn break_stops_reading_rows() {
+    fn connect() -> Option<Connection> {
         let Some((cred, db)) = std::env::var("PYTHIA_TEST_DB").ok().and_then(|s| {
             s.rsplit_once('@')
                 .map(|(c, d)| (c.to_owned(), d.to_owned()))
         }) else {
             eprintln!("PYTHIA_TEST_DB not set, skipping");
-            return;
+            return None;
         };
         let (user, pw) = cred.split_once('/').unwrap();
-        let conn = Connection::connect(user, pw, db).unwrap();
+        Some(Connection::connect(user, pw, db).unwrap())
+    }
+
+    /// A break while a query's rows are read between fetches stops it at
+    /// the next row; a break while idle doesn't stop the next query.
+    #[test]
+    fn break_stops_reading_rows() {
+        let Some(conn) = connect() else {
+            return;
+        };
         let sql = "select level from dual connect by level <= 100000";
         let mut rows = conn.query_as::<i64>(sql, &[]).unwrap();
         assert_eq!(rows.next().unwrap().unwrap(), 1);
@@ -1708,5 +1715,42 @@ mod tests {
             conn.query_row_as::<i64>("select 1 from dual", &[]).unwrap(),
             1
         );
+    }
+
+    /// TIMESTAMP WITH TIME ZONE values show in their own time zone, a
+    /// region's name or the offset, and that text reads back as the value.
+    #[test]
+    fn time_zones() {
+        let Some(conn) = connect() else {
+            return;
+        };
+        let row = conn
+            .query_row(
+                "select from_tz(timestamp '2026-07-01 12:00:00', 'Europe/Zurich'), \
+                        timestamp '2026-01-01 01:30:00 +05:30', \
+                        timestamp '2025-12-31 22:00:00 -03:30' \
+                   from dual",
+                &[],
+            )
+            .unwrap();
+        for (i, (start, end)) in [
+            ("2026-07-01 12:00:00", " Europe/Zurich"),
+            ("2026-01-01 01:30:00", " +05:30"),
+            ("2025-12-31 22:00:00", " -03:30"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let text: String = row.get(i).unwrap();
+            assert!(text.starts_with(start) && text.ends_with(end), "{text}");
+            let back = conn
+                .query_row_as::<String>(
+                    "select to_char(to_timestamp_tz(:1, 'YYYY-MM-DD HH24:MI:SS.FF TZR'), \
+                            'YYYY-MM-DD HH24:MI:SS TZR') from dual",
+                    &[&text],
+                )
+                .unwrap();
+            assert_eq!(back.to_lowercase(), format!("{start}{end}").to_lowercase());
+        }
     }
 }

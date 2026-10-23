@@ -363,7 +363,7 @@ fn sheet_name(name: &str) -> String {
 }
 
 fn excel_datetime(text: &str) -> Option<rust_xlsxwriter::ExcelDateTime> {
-    // `YYYY-MM-DD HH24:MI:SS[.ff…][ ±TZH:TZM]`; time zones are dropped.
+    // `YYYY-MM-DD HH24:MI:SS[.ff…][ ±TZH:TZM| region]`; time zones are dropped.
     let text = text.split(' ').take(2).collect::<Vec<_>>().join("T");
     let text = text.split('.').next()?;
     rust_xlsxwriter::ExcelDateTime::parse_from_str(text).ok()
@@ -408,10 +408,11 @@ pub fn sql_literal(col: &Column, value: Option<&str>) -> String {
             format!("to_timestamp({quoted}, 'YYYY-MM-DD HH24:MI:SS.FF')")
         }
         Kind::Timestamp => format!("to_timestamp({quoted}, 'YYYY-MM-DD HH24:MI:SS')"),
+        // TZR takes an offset (`+02:00`) or a region (`Europe/Zurich`).
         Kind::TimestampTz if v.contains('.') => {
-            format!("to_timestamp_tz({quoted}, 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')")
+            format!("to_timestamp_tz({quoted}, 'YYYY-MM-DD HH24:MI:SS.FF TZR')")
         }
-        Kind::TimestampTz => format!("to_timestamp_tz({quoted}, 'YYYY-MM-DD HH24:MI:SS TZH:TZM')"),
+        Kind::TimestampTz => format!("to_timestamp_tz({quoted}, 'YYYY-MM-DD HH24:MI:SS TZR')"),
         Kind::Binary => format!("hextoraw({quoted})"),
         Kind::Text => quoted,
     }
@@ -582,6 +583,24 @@ mod tests {
             "insert into emp (id, name, hired, \"Mixed Case\") values (1, 'O''Brien, \"Pat\"', \
              to_date('2020-01-02 03:04:05', 'YYYY-MM-DD HH24:MI:SS'), NULL);\n\
              insert into emp (id, name, hired, \"Mixed Case\") values (2.5, NULL, NULL, 'a|b');\n"
+        );
+    }
+
+    #[test]
+    fn time_zone_literals() {
+        let tz = Column {
+            name: "AT".into(),
+            type_name: "TIMESTAMP(6) WITH TIME ZONE".into(),
+            numeric: false,
+        };
+        assert_eq!(
+            sql_literal(&tz, Some("2026-07-01 12:00:00.000000 Europe/Zurich")),
+            "to_timestamp_tz('2026-07-01 12:00:00.000000 Europe/Zurich', \
+             'YYYY-MM-DD HH24:MI:SS.FF TZR')"
+        );
+        assert_eq!(
+            sql_literal(&tz, Some("2026-07-01 12:00:00 +02:00")),
+            "to_timestamp_tz('2026-07-01 12:00:00 +02:00', 'YYYY-MM-DD HH24:MI:SS TZR')"
         );
     }
 

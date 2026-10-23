@@ -87,10 +87,12 @@ All notable changes to Pythia are documented here. The format follows
   failing with ORA-01008 afterwards, #48). Packages no longer depend on
   libaio.
   JSON and VECTOR columns are shown (the Instant Client driver couldn't
-  fetch them). Not covered (#13): 11.2 databases, servers that require
-  Native Network Encryption, OS and wallet logins, cancelling over TLS, and
-  time zone region names in values; for those, build with
-  `--features pythia-db/thick` against the Instant Client.
+  fetch them). `TIMESTAMP WITH TIME ZONE` values with a region show the
+  region's name (`… Europe/Zurich`, #50), and SQL literals of such values
+  keep it. Not covered (#13): 11.2 databases, servers that require Native
+  Network Encryption, OS and wallet logins, and cancelling over TLS; for
+  those, build with `--features pythia-db/thick` against the Instant
+  Client.
 - Table editor: renaming a column of an existing table renames it
   (`ALTER TABLE … RENAME COLUMN`), so it keeps its data, keys and indexes,
   instead of adding a new column next to the old one (#38).

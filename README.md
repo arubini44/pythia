@@ -176,8 +176,10 @@ profiler, *Cancel current SQL* in the monitor and restarting a sequence need
 Proxy authentication works with the usual `proxy_user[target_user]` user
 name. The driver supports TLS (TCPS); we haven't tested it yet, and
 cancelling a running statement doesn't work on TLS connections.
-`TIMESTAMP WITH TIME ZONE` values with a region name (e.g. some scheduler job
-times) are shown as a note instead of the time.
+`TIMESTAMP WITH TIME ZONE` values with a region show the region's name
+(`2026-07-01 12:00:00 Europe/Zurich`); its offset comes from the IANA time
+zone rules built into Pythia, which can differ from the server's time zone
+file for very old dates and for rule changes newer than that file.
 
 **When you need the Oracle Instant Client:** Oracle 11.2 databases (12.1 is
 untested), servers that *require* Native Network Encryption
