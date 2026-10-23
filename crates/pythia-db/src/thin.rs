@@ -4,8 +4,7 @@
 //! `--features pythia-db/thick` that is the `oracle` crate (ODPI-C) instead.
 //!
 //! Known gaps: no external authentication (OS or wallet), no Native Network
-//! Encryption, no 11.2, cancel isn't possible on TLS connections, and LOB
-//! columns are typed LONG.
+//! Encryption, no 11.2, and LOB columns are typed LONG.
 
 use std::fmt;
 use std::marker::PhantomData;

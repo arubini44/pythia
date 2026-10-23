@@ -83,16 +83,15 @@ All notable changes to Pythia are documented here. The format follows
 - **No Oracle Instant Client needed any more.** Pythia connects with a
   pure-Rust driver (our fork of rust-oracledb, pinned: upstream fixes not
   released yet, proxy logins, statements starting with a `--` comment,
-  cancelling a running statement, and LOB queries that failed once no longer
-  failing with ORA-01008 afterwards, #48). Packages no longer depend on
-  libaio.
+  cancelling a running statement, also on TLS connections (#53), and LOB
+  queries that failed once no longer failing with ORA-01008 afterwards,
+  #48). Packages no longer depend on libaio.
   JSON and VECTOR columns are shown (the Instant Client driver couldn't
   fetch them). `TIMESTAMP WITH TIME ZONE` values with a region show the
   region's name (`… Europe/Zurich`, #50), and SQL literals of such values
   keep it. Not covered (#13): 11.2 databases, servers that require Native
-  Network Encryption, OS and wallet logins, and cancelling over TLS; for
-  those, build with `--features pythia-db/thick` against the Instant
-  Client.
+  Network Encryption, and OS and wallet logins; for those, build with
+  `--features pythia-db/thick` against the Instant Client.
 - Table editor: renaming a column of an existing table renames it
   (`ALTER TABLE … RENAME COLUMN`), so it keeps its data, keys and indexes,
   instead of adding a new column next to the old one (#38).

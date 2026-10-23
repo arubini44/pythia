@@ -29,7 +29,7 @@ oracle = "0.6"
 # The pure-Rust driver: our fork of oracle/rust-oracledb (branch `pythia`),
 # upstream main plus fixes that aren't released yet and Connection::cancel()
 # (#13). Pinned to a commit.
-oracledb = { git = "https://github.com/ortic/rust-oracledb", rev = "fb95c762bd44065dc1ac3139135c503e085ce405" }
+oracledb = { git = "https://github.com/ortic/rust-oracledb", rev = "3698e76d3c01d5d0afce5b3e3496d0ef13d2d3a3" }
 logos = "0.16"
 regex = "1"
 ropey = "1.6"

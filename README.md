@@ -174,8 +174,10 @@ profiler, *Cancel current SQL* in the monitor and restarting a sequence need
 18c; reading trace files through the database needs 12.2.
 
 Proxy authentication works with the usual `proxy_user[target_user]` user
-name. The driver supports TLS (TCPS); we haven't tested it yet, and
-cancelling a running statement doesn't work on TLS connections.
+name. TLS (TCPS) works, cancelling a running statement included; the
+driver's tests run over TLS too, while Pythia itself hasn't been tried on a
+TLS server yet. A `wallet_location` in the connect string isn't used yet
+(#54), so the server's certificate has to be publicly trusted.
 `TIMESTAMP WITH TIME ZONE` values with a region show the region's name
 (`2026-07-01 12:00:00 Europe/Zurich`); its offset comes from the IANA time
 zone rules built into Pythia, which can differ from the server's time zone
