@@ -36,7 +36,41 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       # Database, debugger and screenshot tests skip themselves unless
-      # PYTHIA_TEST_DB / PYTHIA_TEST_DB_DBA / PYTHIA_SCREENSHOT_DIR are set.
-      # No GPU is needed without PYTHIA_SCREENSHOT_DIR. --no-fail-fast: a
-      # failing crate doesn't hide the other crates' results.
+      # PYTHIA_TEST_DB / PYTHIA_TEST_DB_DBA / PYTHIA_SCREENSHOT_DIR are set
+      # (the db job sets the first two). No GPU is needed without
+      # PYTHIA_SCREENSHOT_DIR. --no-fail-fast: a failing crate doesn't hide
+      # the other crates' results.
+      - run: cargo test --workspace --no-fail-fast
+
+  # The whole suite against a fresh Oracle Free, through the pure-Rust driver.
+  db:
+    runs-on: ubuntu-latest
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim
+        env:
+          ORACLE_PASSWORD: oracle
+          APP_USER: pythia
+          APP_USER_PASSWORD: pythia
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PYTHIA_TEST_DB: pythia/pythia@localhost:1521/FREEPDB1
+      PYTHIA_TEST_DB_DBA: system/oracle@localhost:1521/FREEPDB1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --all-targets
+      # The debugger tests make the database connect back to the test
+      # process: from the container, this machine is the network's gateway.
+      - name: Address the database reaches this machine at
+        run: |
+          gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' ${{ job.services.oracle.id }})
+          echo "PYTHIA_DEBUG_HOST=$gateway" >> "$GITHUB_ENV"
       - run: cargo test --workspace --no-fail-fast

@@ -48,6 +48,8 @@ mod stubs;
 mod table_editor;
 mod table_partitions;
 mod table_parts;
+#[cfg(test)]
+mod test_db;
 mod test_script;
 mod text_diff;
 mod text_file;

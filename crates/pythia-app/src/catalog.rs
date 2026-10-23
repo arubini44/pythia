@@ -330,6 +330,7 @@ mod tests {
             eprintln!("PYTHIA_TEST_DB not set, skipping");
             return;
         };
+        crate::test_db::demo_schema();
         let (cred, db) = spec.rsplit_once('@').unwrap();
         let (user, pw) = cred.split_once('/').unwrap();
         let conn = Connection::connect(user, pw, db).unwrap();
@@ -426,6 +427,7 @@ mod test_script_live {
         let Ok(spec) = std::env::var("PYTHIA_TEST_DB") else {
             return;
         };
+        crate::test_db::demo_schema();
         let (cred, db) = spec.rsplit_once('@').unwrap();
         let (user, pw) = cred.split_once('/').unwrap();
         let conn = Connection::connect(user, pw, db).unwrap();

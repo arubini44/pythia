@@ -23,6 +23,20 @@ fn params() -> Option<ConnectParams> {
     })
 }
 
+/// The DBA connection (`PYTHIA_TEST_DB_DBA`), after granting the test user
+/// SELECT_CATALOG_ROLE for V$SESSION and DBA_DB_LINKS. It applies to sessions
+/// that log in afterwards.
+fn dba_with_catalog_role() -> Option<pythia_db::oracle::Connection> {
+    let spec = std::env::var("PYTHIA_TEST_DB_DBA").ok()?;
+    let (credentials, connect_string) = spec.rsplit_once('@')?;
+    let (user, password) = credentials.split_once('/')?;
+    let dba = pythia_db::oracle::Connection::connect(user, password, connect_string).ok()?;
+    let test_user = params()?.username;
+    dba.execute(&format!("grant select_catalog_role to {test_user}"), &[])
+        .unwrap();
+    Some(dba)
+}
+
 struct Harness {
     session: Session,
     wake: mpsc::Receiver<()>,
@@ -422,7 +436,10 @@ fn login_script_runs_on_connect() {
 
 #[test]
 fn killed_session_is_reported_as_lost() {
-    let (Some(mut h), Ok(dba)) = (Harness::connect(), std::env::var("PYTHIA_TEST_DB_DBA")) else {
+    let Some(admin) = dba_with_catalog_role() else {
+        return;
+    };
+    let Some(mut h) = Harness::connect() else {
         return;
     };
     h.session.send(DbRequest::Execute {
@@ -440,9 +457,6 @@ fn killed_session_is_reported_as_lost() {
         panic!("expected Rows")
     };
     let sid_serial = rows[0][0].clone().unwrap();
-    let (cred, db) = dba.rsplit_once('@').unwrap();
-    let (user, pw) = cred.split_once('/').unwrap();
-    let admin = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
     // ORA-00031 (only marked for kill) would make the driver drop `admin`.
     admin
         .execute(
@@ -470,11 +484,7 @@ fn killed_session_is_reported_as_lost() {
 /// tested. Needs `PYTHIA_TEST_DB_DBA` to create them.
 #[test]
 fn database_links() {
-    let Some(dba) = std::env::var("PYTHIA_TEST_DB_DBA").ok().and_then(|spec| {
-        let (credentials, connect_string) = spec.rsplit_once('@')?;
-        let (user, password) = credentials.split_once('/')?;
-        pythia_db::oracle::Connection::connect(user, password, connect_string).ok()
-    }) else {
+    let Some(dba) = dba_with_catalog_role() else {
         return;
     };
     let Some(mut h) = Harness::connect() else {
