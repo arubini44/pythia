@@ -176,8 +176,10 @@ profiler, *Cancel current SQL* in the monitor and restarting a sequence need
 Proxy authentication works with the usual `proxy_user[target_user]` user
 name. TLS (TCPS) works, cancelling a running statement included; the
 driver's tests run over TLS too, while Pythia itself hasn't been tried on a
-TLS server yet. A `wallet_location` in the connect string isn't used yet
-(#54), so the server's certificate has to be publicly trusted.
+TLS server yet. For a server certificate from a private CA, put the CA's
+certificate as `ewallet.pem` in a folder and name it in the connect string:
+`tcps://host:2484/service?wallet_location=/path/to/folder`, or
+`(SECURITY=(MY_WALLET_DIRECTORY=/path/to/folder))` in tnsnames.ora.
 `TIMESTAMP WITH TIME ZONE` values with a region show the region's name
 (`2026-07-01 12:00:00 Europe/Zurich`); its offset comes from the IANA time
 zone rules built into Pythia, which can differ from the server's time zone

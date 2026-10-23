@@ -89,7 +89,8 @@ All notable changes to Pythia are documented here. The format follows
   JSON and VECTOR columns are shown (the Instant Client driver couldn't
   fetch them). `TIMESTAMP WITH TIME ZONE` values with a region show the
   region's name (`… Europe/Zurich`, #50), and SQL literals of such values
-  keep it. Not covered (#13): 11.2 databases, servers that require Native
+  keep it. For TLS, the connect string can name the wallet folder with a
+  private CA's certificate (`?wallet_location=`, #54). Not covered (#13): 11.2 databases, servers that require Native
   Network Encryption, and OS and wallet logins; for those, build with
   `--features pythia-db/thick` against the Instant Client.
 - Table editor: renaming a column of an existing table renames it
