@@ -1,16 +1,18 @@
-//! A stand-in for the `oracle` crate (ODPI-C, which needs the Instant
-//! Client) on top of the pure-Rust `oracledb` driver, for the spike in #13.
-//! It has the part of the `oracle` API Pythia uses, under the same names, so
-//! the workspace builds unchanged with `--features pythia-db/thin`.
+//! The `oracle` crate's API (as far as Pythia uses it) on top of the
+//! pure-Rust `oracledb` driver, so no Oracle client libraries are needed
+//! (#13). The rest of the workspace uses it as `pythia_db::oracle`; with
+//! `--features pythia-db/thick` that is the `oracle` crate (ODPI-C) instead.
 //!
-//! Known gaps (see #13): cancel (`break_execution`) isn't possible, no
-//! external authentication or proxy logins (#23), LOB columns are typed
-//! LONG, values with a time zone region make the driver panic (caught here
-//! and shown as an error), and batch errors are found row by row.
+//! Known gaps: no external authentication (OS or wallet), no Native Network
+//! Encryption, no 11.2, cancel isn't possible on TLS connections, LOB
+//! columns are typed LONG, a time zone region in a value makes the driver
+//! panic (caught here and shown as text), and batch errors are found row by
+//! row.
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use oracledb::{
@@ -134,6 +136,8 @@ impl From<oracledb::Error> for Error {
     }
 }
 
+const CANCELLED: &str = "ORA-01013: user requested cancel of current operation";
+
 fn unsupported(what: &str) -> Error {
     Error::new(
         ErrorKind::NotSupported,
@@ -190,9 +194,16 @@ impl Connector {
                 "External authentication (OS or wallet, `/@alias`)",
             ));
         }
-        let mut config = oracledb::Config::default()
-            .set_credentials(&self.user, &self.password)
-            .set_connect_string(&self.connect_string)?;
+        let mut config = oracledb::Config::default().set_credentials(&self.user, &self.password);
+        // Aliases from the tnsnames.ora the connect dialog offers them from
+        // (the driver itself only looks at TNS_ADMIN and ORACLE_HOME).
+        if let Some(dir) = pythia_config::tns::admin_dirs()
+            .into_iter()
+            .find(|d| d.join("tnsnames.ora").exists())
+        {
+            config = config.set_config_dir(&dir.to_string_lossy());
+        }
+        let mut config = config.set_connect_string(&self.connect_string)?;
         if let Some(privilege) = self.privilege {
             config = config.set_auth_mode(match privilege {
                 Privilege::Sysdba => oracledb::AUTH_MODE_SYSDBA,
@@ -215,6 +226,7 @@ impl Connector {
             inner,
             ltz_offset,
             banner: OnceLock::new(),
+            cancelled: Arc::default(),
         })
     }
 }
@@ -224,6 +236,8 @@ pub struct Connection {
     /// The session time zone's offset in minutes, for TSLTZ values.
     ltz_offset: i32,
     banner: OnceLock<String>,
+    /// Set by break_execution(); the open result set stops at its next row.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Connection {
@@ -320,10 +334,13 @@ impl Connection {
         Ok(self.inner.rollback()?)
     }
 
-    /// Not possible with the thin driver (oracle/rust-oracledb#24): a call
-    /// can't be interrupted from another thread.
+    /// Interrupts the call this connection is making on another thread: it
+    /// fails with ORA-01013 (our oracledb fork's Connection::cancel()). A
+    /// query whose rows are being read between fetches fails at its next
+    /// row, as with the Instant Client, whose break fails the next fetch.
     pub fn break_execution(&self) -> Result<()> {
-        Err(unsupported("Cancelling a running statement"))
+        self.cancelled.store(true, Ordering::Relaxed);
+        Ok(self.inner.cancel()?)
     }
 
     pub fn set_module(&self, module: &str) -> Result<()> {
@@ -360,28 +377,6 @@ impl Connection {
             }
         };
         Ok((version, banner))
-    }
-
-    /// Runs DDL whose text the driver would take for having bind variables
-    /// (`:new` in a trigger, oracle/rust-oracledb#33) as dynamic SQL, where
-    /// the text is a value. Compile errors (ORA-24344) are success, as when
-    /// the statement runs directly.
-    fn execute_ddl_text(&self, sql: &str) -> Result<()> {
-        let text = sql.to_owned();
-        match self
-            .inner
-            .execute("begin execute immediate :1; end;", &[&text])
-        {
-            Err(e) => {
-                let e = Error::from(e);
-                if e.db.as_ref().is_some_and(|d| d.code == 24344) {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            }
-            Ok(_) => Ok(()),
-        }
     }
 }
 
@@ -503,41 +498,12 @@ impl<'conn> StatementBuilder<'conn> {
     }
 }
 
-/// The driver doesn't take a statement that starts with a `--` comment for
-/// what it is (a query isn't one; the server answers ORA-00900). Leading
-/// comments become spaces, byte for byte, so error offsets still match.
-fn blank_leading_comments(sql: &str) -> std::borrow::Cow<'_, str> {
-    let mut end = 0;
-    let mut line_comment = false;
-    for token in pythia_plsql::tokenize(sql) {
-        if !token.kind.is_trivia() {
-            break;
-        }
-        line_comment |= sql[token.span.clone()].starts_with("--");
-        end = token.span.end;
-    }
-    if !line_comment {
-        return std::borrow::Cow::Borrowed(sql);
-    }
-    let mut blanked = String::with_capacity(sql.len());
-    for c in sql[..end].chars() {
-        if c == '\n' || c == '\r' {
-            blanked.push(c);
-        } else {
-            blanked.extend(std::iter::repeat_n(' ', c.len_utf8()));
-        }
-    }
-    blanked.push_str(&sql[end..]);
-    std::borrow::Cow::Owned(blanked)
-}
-
 fn prepare(
     conn: &Connection,
     sql: &str,
     fetch_array_size: Option<u32>,
 ) -> Result<oracledb::Statement> {
-    let sql = blank_leading_comments(sql);
-    let mut builder = conn.inner.statement(&sql)?;
+    let mut builder = conn.inner.statement(sql)?;
     if let Some(size) = fetch_array_size {
         builder = builder.fetch_array_size(size);
     }
@@ -601,11 +567,6 @@ impl Statement<'_> {
         Ok(self.row_count)
     }
 
-    /// DDL the driver thinks has binds while none are given.
-    fn ddl_with_colons(&self, given: usize) -> bool {
-        given == 0 && self.is_ddl && !self.bind_names.is_empty()
-    }
-
     /// Positional values as named ones, if there's one per unique name: the
     /// Instant Client binds positions to unique names, while the thin
     /// driver wants a value for each occurrence of a repeated placeholder in
@@ -627,10 +588,6 @@ impl Statement<'_> {
             // OUT binds keep their positions: the names are in that order.
             return self.execute_named(&named);
         }
-        if self.ddl_with_colons(params.len()) {
-            self.row_count = 0;
-            return self.conn.execute_ddl_text(&self.sql);
-        }
         let binds: Vec<Bind> = params.iter().map(|p| p.to_bind()).collect();
         let values: Vec<&dyn ToDbValue> = binds.iter().map(Bind::as_db).collect();
         let mut result = self.inner()?.execute(&values)?;
@@ -640,10 +597,6 @@ impl Statement<'_> {
     }
 
     pub fn execute_named(&mut self, params: &[(&str, &dyn ToSql)]) -> Result<()> {
-        if self.ddl_with_colons(params.len()) {
-            self.row_count = 0;
-            return self.conn.execute_ddl_text(&self.sql);
-        }
         let binds: Vec<Bind> = params.iter().map(|(_, p)| p.to_bind()).collect();
         let values: Vec<(&str, &dyn ToDbValue)> = params
             .iter()
@@ -706,8 +659,9 @@ impl Statement<'_> {
         }
         let binds: Vec<Bind> = params.iter().map(|p| p.to_bind()).collect();
         let values: Vec<&dyn ToDbValue> = binds.iter().map(Bind::as_db).collect();
+        self.conn.cancelled.store(false, Ordering::Relaxed);
         let cursor = self.take_inner()?.query(&values)?;
-        Ok(ResultSet::new(cursor, self.conn.ltz_offset))
+        Ok(ResultSet::new(cursor, self.conn))
     }
 
     pub fn query_named(
@@ -720,8 +674,9 @@ impl Statement<'_> {
             .zip(&binds)
             .map(|((n, _), b)| (*n, b.as_db()))
             .collect();
+        self.conn.cancelled.store(false, Ordering::Relaxed);
         let cursor = self.take_inner()?.query_named(&values)?;
-        Ok(ResultSet::new(cursor, self.conn.ltz_offset))
+        Ok(ResultSet::new(cursor, self.conn))
     }
 }
 
@@ -776,7 +731,7 @@ impl<'conn> BatchBuilder<'conn> {
     pub fn build(&self) -> Result<Batch<'conn>> {
         Ok(Batch {
             conn: self.conn,
-            sql: blank_leading_comments(&self.sql).into_owned(),
+            sql: self.sql.clone(),
             max_batch_size: self.max_batch_size,
             batch_errors: self.batch_errors,
             rows: Vec::new(),
@@ -903,13 +858,11 @@ impl ToSql for String {
     }
 }
 
-// As text: 26.0.0-beta.4 encodes integers ending in 00 wrongly (ORA-03089,
-// oracle/rust-oracledb#37, fixed after beta.4); the database converts.
 macro_rules! int_to_sql {
     ($($t:ty),*) => {$(
         impl ToSql for $t {
             fn to_bind(&self) -> Bind {
-                Bind::Text(Some(self.to_string()))
+                Bind::Int(Some(*self as i64))
             }
             fn null() -> Bind {
                 Bind::Int(None)
@@ -1435,11 +1388,12 @@ pub struct ResultSet<'a, T> {
     meta: Arc<Vec<Metadata>>,
     columns: Arc<Vec<ColumnInfo>>,
     ltz: i32,
+    cancelled: Arc<AtomicBool>,
     _row: PhantomData<(&'a (), T)>,
 }
 
 impl ResultSet<'static, Row> {
-    fn new(cursor: oracledb::Cursor, ltz: i32) -> Self {
+    fn new(cursor: oracledb::Cursor, conn: &Connection) -> Self {
         let meta: Vec<Metadata> = cursor.columns().to_vec();
         let columns = meta
             .iter()
@@ -1453,7 +1407,8 @@ impl ResultSet<'static, Row> {
             cursor,
             meta: Arc::new(meta),
             columns: Arc::new(columns),
-            ltz,
+            ltz: conn.ltz_offset,
+            cancelled: conn.cancelled.clone(),
             _row: PhantomData,
         }
     }
@@ -1464,6 +1419,7 @@ impl ResultSet<'static, Row> {
             meta: self.meta,
             columns: self.columns,
             ltz: self.ltz,
+            cancelled: self.cancelled,
             _row: PhantomData,
         }
     }
@@ -1479,6 +1435,18 @@ impl<T: RowValue> Iterator for ResultSet<'_, T> {
     type Item = Result<T>;
 
     fn next(&mut self) -> Option<Result<T>> {
+        if self.cancelled.swap(false, Ordering::Relaxed) {
+            return Some(Err(Error {
+                kind: ErrorKind::OciError,
+                message: CANCELLED.to_owned(),
+                db: Some(DbError {
+                    code: 1013,
+                    offset: 0,
+                    message: CANCELLED.to_owned(),
+                }),
+                batch: None,
+            }));
+        }
         let next = catch_unwind(AssertUnwindSafe(|| self.cursor.next()));
         let row = match next {
             Ok(row) => row?,
@@ -1693,25 +1661,6 @@ mod tests {
     }
 
     #[test]
-    fn leading_line_comments_are_blanked() {
-        assert_eq!(
-            blank_leading_comments("select 1 from dual -- c"),
-            "select 1 from dual -- c"
-        );
-        assert_eq!(
-            blank_leading_comments("/* c */ select 1"),
-            "/* c */ select 1"
-        );
-        let sql = "-- Käse\n  select 1 from dual -- x";
-        let blanked = blank_leading_comments(sql);
-        assert_eq!(blanked.len(), sql.len(), "offsets stay");
-        assert_eq!(
-            blanked,
-            format!("{}\n  select 1 from dual -- x", " ".repeat("-- Käse".len()))
-        );
-    }
-
-    #[test]
     fn statement_types() {
         assert_eq!(
             StatementType::of("  -- x\n select 1 from dual"),
@@ -1728,6 +1677,36 @@ mod tests {
         assert_eq!(
             StatementType::of("with a as (select 1 from dual) select * from a"),
             StatementType::Select
+        );
+    }
+
+    /// A break while a query's rows are read between fetches stops it at
+    /// the next row; a break while idle doesn't stop the next query.
+    #[test]
+    fn break_stops_reading_rows() {
+        let Some((cred, db)) = std::env::var("PYTHIA_TEST_DB").ok().and_then(|s| {
+            s.rsplit_once('@')
+                .map(|(c, d)| (c.to_owned(), d.to_owned()))
+        }) else {
+            eprintln!("PYTHIA_TEST_DB not set, skipping");
+            return;
+        };
+        let (user, pw) = cred.split_once('/').unwrap();
+        let conn = Connection::connect(user, pw, db).unwrap();
+        let sql = "select level from dual connect by level <= 100000";
+        let mut rows = conn.query_as::<i64>(sql, &[]).unwrap();
+        assert_eq!(rows.next().unwrap().unwrap(), 1);
+        conn.break_execution().unwrap();
+        let err = rows.next().unwrap().unwrap_err();
+        assert_eq!(err.db_error().map(DbError::code), Some(1013), "{err}");
+        drop(rows);
+
+        conn.break_execution().unwrap();
+        let n = conn.query_as::<i64>(sql, &[]).unwrap().count();
+        assert_eq!(n, 100_000);
+        assert_eq!(
+            conn.query_row_as::<i64>("select 1 from dual", &[]).unwrap(),
+            1
         );
     }
 }

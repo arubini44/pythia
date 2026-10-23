@@ -24,9 +24,12 @@ eframe = { version = "0.36", default-features = false, features = ["wgpu", "glow
 egui = "0.36"
 egui_extras = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
+# Only for `--features pythia-db/thick` (ODPI-C, needs the Instant Client).
 oracle = "0.6"
-# Spike (#13): the pure-Rust driver, pinned while it is in beta.
-oracledb = "=26.0.0-beta.4"
+# The pure-Rust driver: our fork of oracle/rust-oracledb (branch `pythia`),
+# upstream main plus fixes that aren't released yet and Connection::cancel()
+# (#13). Pinned to a commit.
+oracledb = { git = "https://github.com/ortic/rust-oracledb", rev = "978f965798305e8d28aba2b2711179c05c9ae184" }
 logos = "0.16"
 regex = "1"
 ropey = "1.6"

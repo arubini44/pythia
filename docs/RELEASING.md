@@ -26,16 +26,18 @@ workflow*); without a tag it only uploads the packages as workflow artifacts.
 
 | Platform | Formats | Notes |
 |---|---|---|
-| Linux | `.deb`, `.AppImage`, `.tar.gz` | `.deb` depends on `libaio1t64 \| libaio1` for the Instant Client |
+| Linux | `.deb`, `.AppImage`, `.tar.gz` | |
 | Windows | `.msi` (WiX), `-setup.exe` (NSIS), `.zip` | per-machine install |
 | macOS | `.dmg` (containing `Pythia.app`), `.tar.gz` | minimum macOS 11 |
 
 Build locally with `cargo packager --release -p pythia-app [-f deb]`; output
 goes to `target/packages`.
 
-The Oracle Instant Client is **not** bundled: its license doesn't allow
-redistribution in third-party installers. The README explains how to
-install it, and Pythia shows the download link when the client is missing.
+Pythia connects with a pure-Rust driver (our fork of
+[rust-oracledb](https://github.com/ortic/rust-oracledb), pinned in
+`Cargo.toml`), so the packages need no Oracle client libraries. A build
+against the Instant Client (`--features pythia-db/thick`) is possible but not
+released.
 
 ## Signing and notarization
 

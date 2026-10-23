@@ -80,6 +80,15 @@ All notable changes to Pythia are documented here. The format follows
   says which package it is and how to get the contents.
 
 ### Changed
+- **No Oracle Instant Client needed any more.** Pythia connects with a
+  pure-Rust driver (our fork of rust-oracledb, pinned: upstream fixes not
+  released yet, proxy logins, statements starting with a `--` comment, and
+  cancelling a running statement). Packages no longer depend on libaio.
+  JSON and VECTOR columns are shown (the Instant Client driver couldn't
+  fetch them). Not covered (#13): 11.2 databases, servers that require
+  Native Network Encryption, OS and wallet logins, cancelling over TLS, and
+  time zone region names in values; for those, build with
+  `--features pythia-db/thick` against the Instant Client.
 - Table editor: renaming a column of an existing table renames it
   (`ALTER TABLE … RENAME COLUMN`), so it keeps its data, keys and indexes,
   instead of adding a new column next to the old one (#38).

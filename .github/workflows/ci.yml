@@ -20,6 +20,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The opt-in build against the Instant Client (ODPI-C) must keep
+      # compiling; it needs no client libraries to build.
+      - run: cargo clippy --workspace --all-targets --features pythia-db/thick -- -D warnings
 
   test:
     strategy:

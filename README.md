@@ -162,52 +162,45 @@ Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
 macOS (`.dmg`) are attached to each [GitHub
 release](https://github.com/ortic/pythia/releases).
 
-Pythia talks to Oracle through the **Oracle Instant Client**, which Oracle's
-license doesn't allow us to bundle. Install it once:
+Pythia connects to Oracle directly, with a pure-Rust driver: **no Oracle
+client libraries are needed**. Easy Connect strings (`host:port/service`)
+work as they are; for net service names, point `TNS_ADMIN` at the directory
+with your `tnsnames.ora` (or put it into `$ORACLE_HOME/network/admin`), and
+Pythia offers the aliases when connecting.
 
-1. Download *Basic* for your platform from
-   <https://www.oracle.com/database/technologies/instant-client/downloads.html>.
-   *Basic Light* works too, but it only has the small time zone file:
-   `TIMESTAMP WITH TIME ZONE` values with region names (e.g. scheduler job
-   times) then fail with ORA-01805.
-2. Unpack it, e.g. to `/opt/oracle/instantclient_23` or `C:\oracle\instantclient_23`.
-3. Make it findable:
-   - **Linux:** `sudo apt install libaio1t64` (or `libaio1` on older
-     distributions), then either set `LD_LIBRARY_PATH=/opt/oracle/instantclient_23`
-     or register it once with
-     `echo /opt/oracle/instantclient_23 | sudo tee /etc/ld.so.conf.d/oracle.conf && sudo ldconfig`.
-   - **Windows:** add the directory to `PATH` (System Properties → Environment
-     Variables) and install the Visual C++ redistributable it lists.
-   - **macOS:** run `install_ic.sh` from the DMG (it copies the client to
-     `Downloads`), then link the library where Pythia finds it:
-     `mkdir -p ~/lib && ln -s ~/Downloads/instantclient_23_*/libclntsh.dylib ~/lib/`.
-4. Optional: put your `tnsnames.ora` into `network/admin` inside the Instant
-   Client directory or point `TNS_ADMIN` at it; Pythia then offers the aliases
-   when connecting.
-
-**Database versions:** Pythia is developed against Oracle 23ai and also
-tested against 11.2 XE, 18c XE and 21c XE. A few features need a newer
-release: the profiler, *Cancel current SQL* in the monitor and restarting a
-sequence need 18c; reading trace files through the database needs 12.2.
-Instant Client 23 connected to all of these in our tests, but Oracle
-supports it only for Database 19c and later. For older databases use
-Instant Client 19 (11.2 and later) or 21 (12.1 and later).
+**Database versions:** Pythia is developed against Oracle 23ai and tested
+against 18c XE and 21c XE. A few features need a newer release: the
+profiler, *Cancel current SQL* in the monitor and restarting a sequence need
+18c; reading trace files through the database needs 12.2.
 
 Proxy authentication works with the usual `proxy_user[target_user]` user
-name; an empty user name with a wallet or OS authentication connects as
-`/@alias`.
+name. The driver supports TLS (TCPS); we haven't tested it yet, and
+cancelling a running statement doesn't work on TLS connections.
+`TIMESTAMP WITH TIME ZONE` values with a region name (e.g. some scheduler job
+times) are shown as a note instead of the time.
 
-If the client can't be loaded, Pythia says so when you connect and shows these
-steps.
+**When you need the Oracle Instant Client:** Oracle 11.2 databases (12.1 is
+untested), servers that *require* Native Network Encryption
+(`SQLNET.ENCRYPTION_SERVER = REQUIRED`; use TLS instead where you can), and
+OS or wallet logins (`/@alias`). Build Pythia with `cargo build --release --features
+pythia-db/thick` and install the [Instant
+Client](https://www.oracle.com/database/technologies/instant-client/downloads.html)
+(*Basic*; on Linux also `libaio`), on the library path (`LD_LIBRARY_PATH`,
+`PATH` on Windows).
 
 ## Building from source
 
-Requirements: Rust (stable) and the Instant Client as above.
+Requirements: Rust (stable).
 
 ```sh
 cargo build --release
-LD_LIBRARY_PATH=/path/to/instantclient ./target/release/pythia
+./target/release/pythia
 ```
+
+The database driver is our fork of
+[rust-oracledb](https://github.com/ortic/rust-oracledb) (branch `pythia`:
+upstream fixes that aren't released yet, and cancelling a running call),
+pinned to a commit in `Cargo.toml`.
 
 Packages are built with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager)
 (`cargo install cargo-packager --locked`):
@@ -231,9 +224,12 @@ docker compose up -d        # or: podman compose up -d
 Tests that need the database are skipped unless configured:
 
 ```sh
-export LD_LIBRARY_PATH=/path/to/instantclient
 PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 ```
+
+`--features pythia-db/thick` runs them against the Instant Client instead
+(set `LD_LIBRARY_PATH`); `cargo run -p pythia-db --example thin_probe
+--features thick` compares the two drivers.
 
 | Variable | Used by |
 |---|---|
