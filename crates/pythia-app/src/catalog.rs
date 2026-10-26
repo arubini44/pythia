@@ -610,6 +610,7 @@ mod mysql_live {
                 connect_string: connect_string.into(),
                 privilege: Default::default(),
                 init_sql: Vec::new(),
+                ssh: None,
             },
             move || {
                 let _ = tx.send(());

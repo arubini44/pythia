@@ -37,6 +37,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+  # An SSH server for tunnels (user pythia / pythia). From there, MySQL is
+  # mysql:3306:
+  #   podman compose up -d mysql ssh
+  #   PYTHIA_TEST_SSH=pythia:pythia@localhost:2222 \
+  #   PYTHIA_TEST_MYSQL_VIA_SSH=pythia/pythia@mysql:3306/pythia cargo test -p pythia-db
+  ssh:
+    build: docker/ssh
+    ports:
+      - "2222:22"
 volumes:
   oracle-data:
   mysql-data:

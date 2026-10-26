@@ -14,7 +14,7 @@ mod connections;
 mod settings;
 pub mod tns;
 
-pub use connections::{ConnectionProfile, Connections, DbKind, Privilege};
+pub use connections::{ConnectionProfile, Connections, DbKind, Privilege, SshTunnel};
 pub use settings::{
     AiBackend, AiKind, AiSettings, EditorSettings, FormatTriggers, InvalidObjectSettings,
     InvalidScope, KeymapPreset, Settings, ThemeChoice,
@@ -63,6 +63,11 @@ impl Paths {
 
     pub fn connections_file(&self) -> PathBuf {
         self.config_dir.join("connections.toml")
+    }
+
+    /// SSH host keys trusted in Pythia (besides `~/.ssh/known_hosts`).
+    pub fn known_hosts_file(&self) -> PathBuf {
+        self.config_dir.join("known_hosts")
     }
 
     pub fn log_dir(&self) -> PathBuf {

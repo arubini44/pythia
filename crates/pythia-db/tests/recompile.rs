@@ -20,6 +20,7 @@ fn params() -> Option<ConnectParams> {
         connect_string: db.into(),
         privilege: Default::default(),
         init_sql: Vec::new(),
+        ssh: None,
     })
 }
 

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 
 use egui::{Color32, RichText, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle, TabViewer};
@@ -12,7 +13,7 @@ use tracing::{error, info, warn};
 
 use crate::browser::Browser;
 use crate::commands::{Command, Keymap};
-use crate::connections::{Connection, Connections, Notify, SessionKey};
+use crate::connections::{Connection, Connections, Notify, Passwords, SessionKey};
 use crate::dialogs::{
     CommandPalette, Confirm, ConfirmAction, ConnectDialog, FinderAction, HistoryDialog,
     ObjectFinder, confirm_ui, opens_as_program,
@@ -82,6 +83,8 @@ pub struct PythiaApp {
     last_profile: Option<ConnectionProfile>,
     /// Connection the connect dialog is currently opening.
     connecting: Option<String>,
+    /// SSH host keys trusted in Pythia.
+    known_hosts: PathBuf,
 
     history: History,
     user_reports: crate::reports::UserReports,
@@ -155,6 +158,10 @@ impl PythiaApp {
             .unwrap_or_default();
         let workspace: Option<Workspace> =
             cc.storage.and_then(|s| eframe::get_value(s, WORKSPACE_KEY));
+        let known_hosts = paths.as_ref().map_or_else(
+            || std::env::temp_dir().join("pythia-known_hosts"),
+            Paths::known_hosts_file,
+        );
 
         let mut app = Self {
             paths,
@@ -173,6 +180,7 @@ impl PythiaApp {
             routes: HashMap::new(),
             last_profile: None,
             connecting: None,
+            known_hosts,
             history,
             user_reports,
             save_report: None,
@@ -2403,7 +2411,7 @@ impl PythiaApp {
         }
     }
 
-    fn connect(&mut self, profile: ConnectionProfile, password: String, save_profile: bool) {
+    fn connect(&mut self, profile: ConnectionProfile, passwords: Passwords, save_profile: bool) {
         let name = profile.display_name();
         if self.conns.get(&name).is_some() {
             self.disconnect(&name);
@@ -2415,13 +2423,22 @@ impl PythiaApp {
             }
         }
         if profile.save_password {
-            secrets::store(&name, &password);
+            secrets::store(&name, &passwords.database);
+            secrets::store_ssh(&name, &passwords.ssh);
         } else {
             secrets::forget(&name);
+            secrets::forget_ssh(&name);
         }
-        self.log(format!("Connecting to {name}…"));
+        match &profile.ssh {
+            ssh if ssh.enabled => self.log(format!("Connecting to {name} through {}…", ssh.host)),
+            _ => self.log(format!("Connecting to {name}…")),
+        }
         self.last_profile = Some(profile.clone());
-        self.connecting = Some(self.conns.connect(profile, password, &self.notify));
+        self.connecting =
+            Some(
+                self.conns
+                    .connect(profile, passwords, &self.known_hosts, &self.notify),
+            );
     }
 
     fn disconnect(&mut self, name: &str) {
@@ -2570,7 +2587,10 @@ impl PythiaApp {
                 self.conns.close(name);
                 if self.connecting.as_deref() == Some(name) {
                     self.connecting = None;
-                    if e.is_missing_client() {
+                    if let Some(key) = &e.host_key {
+                        self.connect_dialog
+                            .failed_host_key(e.to_string(), (**key).clone());
+                    } else if e.is_missing_client() {
                         self.connect_dialog.failed_missing_client(e.to_string());
                     } else {
                         self.connect_dialog.failed(e.to_string());
@@ -3431,20 +3451,38 @@ impl PythiaApp {
     fn popups(&mut self, ctx: &egui::Context, commands: &mut Vec<Command>) {
         match self.connect_dialog.ui(ctx, &self.saved) {
             Some(crate::dialogs::ConnectAction::Connect(request)) => {
-                self.connect(request.profile, request.password, request.save_profile);
+                self.connect(request.profile, request.passwords, request.save_profile);
             }
+            Some(crate::dialogs::ConnectAction::Trust { key, then }) => match key.trust() {
+                Ok(()) => {
+                    self.log(format!(
+                        "Trusted the SSH host key of {} ({})",
+                        key.host, key.fingerprint
+                    ));
+                    self.connect(then.profile, then.passwords, then.save_profile);
+                }
+                Err(e) => self.connect_dialog.failed(e.to_string()),
+            },
             Some(crate::dialogs::ConnectAction::Save {
                 profile,
                 previous,
-                password,
+                passwords,
             }) => {
-                if let Some(previous) = previous.filter(|p| *p != profile.display_name()) {
+                let name = profile.display_name();
+                if let Some(previous) = previous.filter(|p| *p != name) {
                     self.saved.profiles.retain(|p| p.display_name() != previous);
                     secrets::forget(&previous);
+                    secrets::forget_ssh(&previous);
                 }
-                match &password {
-                    Some(pw) => secrets::store(&profile.display_name(), pw),
-                    None => secrets::forget(&profile.display_name()),
+                match &passwords {
+                    Some(passwords) => {
+                        secrets::store(&name, &passwords.database);
+                        secrets::store_ssh(&name, &passwords.ssh);
+                    }
+                    None => {
+                        secrets::forget(&name);
+                        secrets::forget_ssh(&name);
+                    }
                 }
                 self.saved.upsert(profile);
                 self.save_connections();
@@ -3452,6 +3490,7 @@ impl PythiaApp {
             Some(crate::dialogs::ConnectAction::Delete(name)) => {
                 self.saved.profiles.retain(|p| p.display_name() != name);
                 secrets::forget(&name);
+                secrets::forget_ssh(&name);
                 self.save_connections();
             }
             None => {}
@@ -3780,7 +3819,28 @@ impl eframe::App for PythiaApp {
 #[cfg(test)]
 impl PythiaApp {
     pub fn test_connect(&mut self, profile: ConnectionProfile, password: String) {
-        self.connect(profile, password, false);
+        let passwords = Passwords {
+            database: password,
+            ssh: String::new(),
+        };
+        self.connect(profile, passwords, false);
+    }
+
+    /// Connects as the connect dialog does, which can ask to trust an SSH
+    /// host key first (kept in `known_hosts`).
+    pub fn test_connect_dialog(
+        &mut self,
+        profile: ConnectionProfile,
+        passwords: Passwords,
+        known_hosts: PathBuf,
+    ) {
+        self.known_hosts = known_hosts;
+        self.connect_dialog.show(None);
+        if let Some(crate::dialogs::ConnectAction::Connect(request)) =
+            self.connect_dialog.test_submit(profile, passwords)
+        {
+            self.connect(request.profile, request.passwords, false);
+        }
     }
 
     pub fn test_connected(&self) -> bool {
@@ -4181,6 +4241,10 @@ impl PythiaApp {
 
     pub fn test_connect_dialog_open(&self) -> bool {
         self.connect_dialog.open
+    }
+
+    pub fn test_connect_dialog_error(&self) -> Option<&str> {
+        self.connect_dialog.test_error()
     }
 
     pub fn test_settings_ai(&mut self) {

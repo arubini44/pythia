@@ -3021,6 +3021,89 @@ fn settings_ai() {
     save(&mut h, "settings-ai");
 }
 
+/// A MySQL connection through an SSH server (`PYTHIA_TEST_SSH` and
+/// `PYTHIA_TEST_MYSQL_VIA_SSH`, see pythia-db's MySQL tests): the connect
+/// dialog asks to trust the server's host key, then connects, and SQL
+/// windows get sessions through the same tunnel.
+#[test]
+fn mysql_through_ssh() {
+    use crate::connections::Passwords;
+    let (Ok(ssh), Ok(spec)) = (
+        std::env::var("PYTHIA_TEST_SSH"),
+        std::env::var("PYTHIA_TEST_MYSQL_VIA_SSH"),
+    ) else {
+        return;
+    };
+    let (ssh_credentials, ssh_host) = ssh.rsplit_once('@').unwrap();
+    let (ssh_user, ssh_password) = ssh_credentials.split_once(':').unwrap();
+    let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+    let (username, password) = credentials.split_once('/').unwrap();
+    let profile = ConnectionProfile {
+        name: "shop over ssh".into(),
+        kind: pythia_config::DbKind::MySql,
+        username: username.into(),
+        connect_string: connect_string.into(),
+        ssh: pythia_config::SshTunnel {
+            enabled: true,
+            host: ssh_host.into(),
+            username: ssh_user.into(),
+            key_file: String::new(),
+        },
+        ..Default::default()
+    };
+    let dir = std::env::temp_dir().join(format!("pythia-app-ssh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let known_hosts = dir.join("known_hosts");
+
+    let mut h = harness(true);
+    h.state_mut().test_connect_dialog(
+        profile,
+        Passwords {
+            database: password.into(),
+            ssh: ssh_password.into(),
+        },
+        known_hosts.clone(),
+    );
+    wait_until(&mut h, "the host key question", |app| {
+        app.test_connect_dialog_error()
+            .is_some_and(|e| e.contains("isn't known yet"))
+    });
+    save(&mut h, "mysql-ssh-host-key");
+    h.get_by_label("Trust and connect").click();
+    wait_until(&mut h, "connection", |app| {
+        app.test_connected_to("shop over ssh")
+    });
+    assert!(!h.state().test_connect_dialog_open());
+    let saved = std::fs::read_to_string(&known_hosts).unwrap();
+    assert!(saved.contains(" ssh-"), "{saved}");
+    let log = h.state().test_log();
+    assert!(
+        log.iter()
+            .any(|l| l == &format!("Connecting to shop over ssh through {ssh_host}…")),
+        "{log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|l| l.starts_with("Trusted the SSH host key of ")),
+        "{log:?}"
+    );
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "shop over ssh".into(),
+        text: "select database() as db, 6 * 7 as answer;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "query", |app| !app.test_focused_busy());
+    let w = h.state_mut().test_sql_window();
+    let result = w.state.results.last().expect("a result");
+    assert_eq!(
+        result.rows,
+        [vec![Some("pythia".into()), Some("42".into())]]
+    );
+    save(&mut h, "mysql-ssh-sql-window");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A MySQL connection (`PYTHIA_TEST_MYSQL=user/password@host:port/database`):
 /// queries, transactions, browser and object views work; what MySQL can't
 /// do is left out of the menus, the toolbar and the browser.

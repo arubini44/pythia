@@ -21,6 +21,7 @@ fn params() -> Option<ConnectParams> {
         connect_string: connect_string.into(),
         privilege: Privilege::Normal,
         init_sql: Vec::new(),
+        ssh: None,
     })
 }
 

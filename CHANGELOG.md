@@ -12,6 +12,12 @@ All notable changes to Pythia are documented here. The format follows
   work; tools that rely on Oracle's dictionary or PL/SQL are hidden on
   MySQL connections. `pythia_db::Dialect` says what a connection's database
   supports, and `DbRequest::Run` runs tool code on any database.
+- MySQL connections through SSH, as with HeidiSQL's SSH tunnel: *Connect
+  through SSH* in the connect dialog, with a password, a key file (OpenSSH
+  or PuTTY `.ppk`) or the SSH agent (Pageant on Windows). All sessions of a
+  connection share one SSH connection, which logs in again when it was
+  lost. A server's host key has to be in `~/.ssh/known_hosts` or trusted
+  once in the dialog; a changed key fails.
 - Toolbar: a Debug button next to Execute (Ctrl+F9). It is enabled only
   with the cursor in an anonymous block of a connected SQL window, and when
   disabled says why; in a program window it points to Test… for a block

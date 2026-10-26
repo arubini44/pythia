@@ -48,6 +48,26 @@ impl Privilege {
     }
 }
 
+/// Reaching the database through an SSH server, like `ssh -L`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SshTunnel {
+    pub enabled: bool,
+    /// `host[:port]` of the SSH server.
+    pub host: String,
+    pub username: String,
+    /// A private key (OpenSSH or PuTTY `.ppk`). Without one: the SSH
+    /// password, or the SSH agent's keys when there is none either.
+    pub key_file: String,
+}
+
+impl SshTunnel {
+    /// Never set up: not written to `connections.toml`.
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// A saved connection. Never contains the password.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -73,6 +93,10 @@ pub struct ConnectionProfile {
     pub default_schema: String,
     /// SQL run on every new session, e.g. NLS settings.
     pub login_script: String,
+    /// Kept while switched off, so it can be switched on again. The SSH
+    /// password goes to the keychain too.
+    #[serde(skip_serializing_if = "SshTunnel::is_unset")]
+    pub ssh: SshTunnel,
 }
 
 impl ConnectionProfile {
@@ -124,5 +148,29 @@ mod tests {
         assert!(text.contains("kind = \"mysql\""), "{text}");
         let back: ConnectionProfile = toml::from_str(&text).unwrap();
         assert_eq!(back.kind, DbKind::MySql);
+    }
+
+    #[test]
+    fn ssh_tunnel_is_saved_once_set_up() {
+        let plain = toml::to_string(&ConnectionProfile::default()).unwrap();
+        assert!(!plain.contains("ssh"), "{plain}");
+
+        let mut saved = Connections::default();
+        saved.upsert(ConnectionProfile {
+            kind: DbKind::MySql,
+            username: "app".into(),
+            connect_string: "localhost/shop".into(),
+            ssh: SshTunnel {
+                enabled: true,
+                host: "bastion.example.com:2222".into(),
+                username: "remo".into(),
+                key_file: "~/.ssh/id_ed25519".into(),
+            },
+            ..Default::default()
+        });
+        let text = toml::to_string_pretty(&saved).unwrap();
+        assert!(text.contains("[connection.ssh]"), "{text}");
+        let back: Connections = toml::from_str(&text).unwrap();
+        assert_eq!(back, saved);
     }
 }

@@ -44,6 +44,10 @@ impl Session {
                     notify: Box::new(notify),
                 };
                 match params.kind {
+                    // Rather than connecting around the tunnel.
+                    DbKind::Oracle if params.ssh.is_some() => events.send(DbEvent::ConnectFailed(
+                        DbError::unsupported("Connecting through SSH", Dialect::ORACLE),
+                    )),
                     DbKind::Oracle => Worker::run(params, req_rx, events, shared),
                     DbKind::MySql => crate::mysql_session::run(params, req_rx, events, shared),
                 }
@@ -440,6 +444,12 @@ impl Client for OracleClient<'_> {
 /// task that works in parallel. Runs the login statements; their errors
 /// don't fail it.
 pub fn open_connection(params: &ConnectParams) -> Result<Connection, DbError> {
+    if params.ssh.is_some() {
+        return Err(DbError::unsupported(
+            "Connecting through SSH",
+            Dialect::ORACLE,
+        ));
+    }
     let conn = connect(params)?;
     conn.set_module("pythia")?;
     for sql in &params.init_sql {

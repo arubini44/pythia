@@ -29,6 +29,10 @@ oracle = "0.6"
 oracledb = "=26.0.0-beta.4"
 # Pure Rust, synchronous like the session workers; rustls on ring as ureq uses.
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "buffer-pool", "rustls-tls-ring"] }
+# SSH tunnels: pure Rust on ring too. Its tokio runtime only carries the
+# tunnels; the session workers stay synchronous.
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync"] }
 logos = "0.16"
 regex = "1"
 ropey = "1.6"

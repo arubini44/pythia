@@ -15,8 +15,10 @@ oracle.workspace = true
 oracledb = { workspace = true, optional = true }
 pythia-config.workspace = true
 pythia-plsql.workspace = true
+russh.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

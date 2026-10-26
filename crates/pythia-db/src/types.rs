@@ -1,10 +1,12 @@
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use pythia_config::{DbKind, Privilege};
 
 use crate::dialect::Dialect;
 use crate::meta::{CompileError, MetaQuery, MetaResult};
+use crate::ssh::{HostKey, Tunnel};
 
 #[derive(Clone)]
 pub struct ConnectParams {
@@ -16,6 +18,19 @@ pub struct ConnectParams {
     pub privilege: Privilege,
     /// Statements run on every new session (login script, NLS, schema).
     pub init_sql: Vec<String>,
+    /// Reach the database through this SSH connection, shared by the
+    /// connection's sessions (MySQL).
+    pub ssh: Option<Arc<Tunnel>>,
+}
+
+impl ConnectParams {
+    /// A connect error, explained by the tunnel when it was the cause.
+    pub(crate) fn explain(&self, error: DbError) -> DbError {
+        match &self.ssh {
+            Some(tunnel) => tunnel.explain(error),
+            None => error,
+        }
+    }
 }
 
 impl fmt::Debug for ConnectParams {
@@ -26,6 +41,7 @@ impl fmt::Debug for ConnectParams {
             .field("username", &self.username)
             .field("connect_string", &self.connect_string)
             .field("privilege", &self.privilege)
+            .field("ssh", &self.ssh)
             .finish_non_exhaustive()
     }
 }
@@ -244,6 +260,9 @@ pub struct DbError {
     pub offset: Option<u32>,
     /// Set by backends that know from the error that the session is gone.
     pub lost: bool,
+    /// The SSH server's host key isn't known: connecting works once the
+    /// user trusts it.
+    pub host_key: Option<Box<HostKey>>,
 }
 
 impl DbError {
@@ -253,6 +272,19 @@ impl DbError {
             message: message.into(),
             offset: None,
             lost: false,
+            host_key: None,
+        }
+    }
+
+    pub(crate) fn unknown_host_key(server: impl fmt::Display, key: HostKey) -> Self {
+        let message = format!(
+            "SSH: the server {server} isn't known yet. Its host key is {}. Trust it only if \
+             that is the server's key.",
+            key.fingerprint
+        );
+        Self {
+            host_key: Some(Box::new(key)),
+            ..Self::new(message)
         }
     }
 
@@ -304,9 +336,8 @@ impl From<crate::oracle::Error> for DbError {
                 }
                 Self {
                     code: Some(db.code()).filter(|c| *c != 0),
-                    message,
                     offset: Some(db.offset()).filter(|o| *o != 0),
-                    lost: false,
+                    ..Self::new(message)
                 }
             }
             None => Self::new(e.to_string()),

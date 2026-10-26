@@ -8,8 +8,11 @@
 //! behind the browser, completion and compiles on the main session.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use pythia_config::ConnectionProfile;
+use pythia_db::ssh::{SshParams, Tunnel};
 use pythia_db::{ConnectParams, DbEvent, DbKind, DbRequest, Dialect, ServerInfo, Session};
 
 use crate::documents::DocId;
@@ -193,6 +196,14 @@ impl Notify {
     }
 }
 
+/// What a connection logs in with; kept in memory only.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Passwords {
+    pub database: String,
+    /// The SSH password, or the key file's passphrase.
+    pub ssh: String,
+}
+
 #[derive(Default)]
 pub struct Connections {
     /// Keyed by display name, which is also how documents refer to them.
@@ -200,19 +211,32 @@ pub struct Connections {
 }
 
 impl Connections {
+    /// Host keys the user trusts for SSH tunnels go to `known_hosts`.
     pub fn connect(
         &mut self,
         profile: ConnectionProfile,
-        password: String,
+        passwords: Passwords,
+        known_hosts: &Path,
         notify: &Notify,
     ) -> String {
+        let ssh = &profile.ssh;
+        let tunnel = ssh.enabled.then(|| {
+            Arc::new(Tunnel::new(SshParams {
+                host: ssh.host.clone(),
+                username: ssh.username.clone(),
+                password: passwords.ssh,
+                key_file: key_file(&ssh.key_file),
+                known_hosts: known_hosts.to_owned(),
+            }))
+        });
         let params = ConnectParams {
             kind: profile.kind,
             username: profile.username.clone(),
-            password,
+            password: passwords.database,
             connect_string: profile.connect_string.clone(),
             privilege: profile.privilege,
             init_sql: init_sql(&profile),
+            ssh: tunnel,
         };
         let name = profile.display_name();
         let main = Session::connect(params.clone(), notify.callback());
@@ -291,6 +315,22 @@ impl Connections {
             None => false,
         }
     }
+}
+
+/// The key file's path, with `~` for the home directory.
+fn key_file(text: &str) -> Option<PathBuf> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let home = text
+        .strip_prefix("~/")
+        .or_else(|| text.strip_prefix("~\\"))
+        .zip(std::env::home_dir());
+    Some(match home {
+        Some((rest, home)) => home.join(rest),
+        None => PathBuf::from(text),
+    })
 }
 
 /// Statements every session of `profile` runs after connecting.

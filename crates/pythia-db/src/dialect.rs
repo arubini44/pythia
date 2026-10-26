@@ -54,6 +54,8 @@ pub enum Feature {
     /// Comparing project files with the stored objects, and exporting a
     /// schema into files.
     ObjectFiles,
+    /// Connecting through an SSH server ([`crate::ssh`]).
+    SshTunnel,
 }
 
 /// The database of a connection and what it supports.
@@ -83,8 +85,13 @@ impl Dialect {
     /// was built for Oracle; other databases list what they have so far.
     pub fn supports(self, feature: Feature) -> bool {
         match self.0 {
-            DbKind::Oracle => true,
-            DbKind::MySql => matches!(feature, Feature::ExplainPlan | Feature::Completion),
+            // Its connect strings (TNS aliases, descriptors) aren't pointed
+            // at a tunnel yet.
+            DbKind::Oracle => feature != Feature::SshTunnel,
+            DbKind::MySql => matches!(
+                feature,
+                Feature::ExplainPlan | Feature::Completion | Feature::SshTunnel
+            ),
         }
     }
 

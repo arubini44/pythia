@@ -38,7 +38,7 @@ pub(crate) fn run(
 ) {
     info!(?params, "connecting");
     let connected = options(&params).and_then(|opts| {
-        let conn = Conn::new(opts.clone())?;
+        let conn = Conn::new(opts.clone()).map_err(|e| params.explain(e.into()))?;
         Ok((opts, conn))
     });
     let (opts, conn) = match connected {
@@ -442,12 +442,20 @@ pub(crate) fn all_rows<T: Protocol>(
 }
 
 /// Connection options from `host[:port][/database][?tls[=skip-verify]]`
-/// (a `mysql://` prefix is allowed).
+/// (a `mysql://` prefix is allowed). Through SSH, the host is as the SSH
+/// server sees it.
 pub(crate) fn options(params: &ConnectParams) -> Result<Opts, DbError> {
     let target = parse_target(&params.connect_string)?;
+    let (host, port) = match &params.ssh {
+        Some(tunnel) => {
+            let local = tunnel.forward(&target.host, target.port)?;
+            (local.ip().to_string(), local.port())
+        }
+        None => (target.host, target.port),
+    };
     let mut builder = OptsBuilder::new()
-        .ip_or_hostname(Some(target.host))
-        .tcp_port(target.port)
+        .ip_or_hostname(Some(host))
+        .tcp_port(port)
         .user(Some(&params.username))
         .pass(Some(&params.password))
         .db_name(target.database)
@@ -455,7 +463,13 @@ pub(crate) fn options(params: &ConnectParams) -> Result<Opts, DbError> {
         .tcp_connect_timeout(Some(Duration::from_secs(15)));
     match target.tls {
         Tls::Off => {}
-        Tls::Verify => builder = builder.ssl_opts(SslOpts::default()),
+        // Through SSH the driver connects to 127.0.0.1: the certificate is
+        // still checked, its host name can't be.
+        Tls::Verify => {
+            builder = builder.ssl_opts(
+                SslOpts::default().with_danger_skip_domain_validation(params.ssh.is_some()),
+            )
+        }
         Tls::SkipVerify => {
             builder = builder.ssl_opts(
                 SslOpts::default()
@@ -842,10 +856,9 @@ impl From<mysql::Error> for DbError {
         match e {
             mysql::Error::MySqlError(e) => Self {
                 code: Some(i32::from(e.code)),
-                message: format!("ERROR {} ({}): {}", e.code, e.state, e.message),
-                offset: None,
                 // Killed connection, shutdown, idle timeout.
                 lost: matches!(e.code, 1053 | 1927 | 4031),
+                ..Self::new(format!("ERROR {} ({}): {}", e.code, e.state, e.message))
             },
             mysql::Error::IoError(e) => Self {
                 lost: true,

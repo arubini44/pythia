@@ -74,6 +74,7 @@ fn main() -> eframe::Result {
         connect_string: db.into(),
         privilege: Privilege::Normal,
         init_sql: Vec::new(),
+        ssh: None,
     };
     eframe::run_native(
         "Pythia monitor",
