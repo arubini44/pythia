@@ -6,6 +6,8 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-26
+
 ### Added
 - MySQL connections (experimental): pick *Type: MySQL* when connecting.
   SQL windows, explain plan, completion, the object browser and object views
@@ -26,6 +28,18 @@ All notable changes to Pythia are documented here. The format follows
   open transactions, the largest databases and tables, and the top
   statements from `performance_schema` with *Analyze*. What needs the
   `PROCESS` privilege or `SELECT` on `performance_schema` says so.
+
+### Fixed
+- When the window system went away mid-session (WSLg's compositor
+  crashed), Pythia started again with OpenGL and then reported that
+  neither Vulkan nor OpenGL works. It now says the window system ended
+  the connection (#60).
+- Settings: the Formatter page was taller than an 800 px window, which
+  pushed the close button off screen. Pages scroll inside a window that
+  fits the screen (#62).
+- Light theme: black showed outside the tabs' rounded corners and in the
+  gaps between the dock's areas and the bars; it's the theme's background
+  now (#64).
 
 ## [0.3.0] - 2026-10-23
 
@@ -417,7 +431,8 @@ First release.
 - Scheduler jobs window: run, stop, enable, disable, drop, run history.
 - Saved user reports with parameters.
 
-[Unreleased]: https://github.com/ortic/pythia/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ortic/pythia/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ortic/pythia/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ortic/pythia/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ortic/pythia/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ortic/pythia/releases/tag/v0.1.0
