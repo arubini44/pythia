@@ -15,7 +15,8 @@ use pythia_db::{
 use pythia_ui::icons::{Icon, IconSize, paint_invalid_badge};
 
 use crate::documents::{Effects, ObjectRef, OpenRequest, Target, quote_ident, request_id};
-use crate::object_editor::{EditTarget, has_editor, has_grants};
+use crate::object_editor::{EditTarget, can_create, has_editor, has_grants};
+use crate::table_editor::TableTab;
 use crate::table_parts::{Part, PartKind, TableParts};
 
 enum Loaded<T> {
@@ -43,6 +44,38 @@ enum Node {
 enum Section {
     Favorites,
     Recent,
+    Users,
+    Roles,
+    Profiles,
+    Directories,
+}
+
+impl Section {
+    /// Sections listing the database's own objects, in display order.
+    const DATABASE: [Section; 4] = [
+        Section::Users,
+        Section::Roles,
+        Section::Profiles,
+        Section::Directories,
+    ];
+
+    /// The users, roles, profiles or directories a section lists.
+    fn accounts(self) -> Option<ObjectType> {
+        match self {
+            Section::Users => Some(ObjectType::User),
+            Section::Roles => Some(ObjectType::Role),
+            Section::Profiles => Some(ObjectType::Profile),
+            Section::Directories => Some(ObjectType::Directory),
+            Section::Favorites | Section::Recent => None,
+        }
+    }
+
+    /// The section listing objects of a type.
+    fn listing(object_type: ObjectType) -> Option<Section> {
+        Section::DATABASE
+            .into_iter()
+            .find(|s| s.accounts() == Some(object_type))
+    }
 }
 
 /// Favorite and recently opened objects per connection; saved with the
@@ -144,6 +177,8 @@ enum Pending {
     TestLink(ObjectRef),
     /// DDL for a script that replaces the object.
     Script(ObjectRef),
+    /// Users or roles of the database.
+    Accounts(ObjectType),
 }
 
 /// The folders of a schema; Oracle's `PUBLIC` only owns synonyms and links.
@@ -191,11 +226,15 @@ enum Row<'a> {
     Member(&'a Member, ObjectRef),
     Section {
         section: Section,
-        count: usize,
+        /// Unknown until loaded (users and roles).
+        count: Option<usize>,
         open: bool,
     },
     /// An object listed under Favorites or Recent.
     Shortcut(&'a ObjectRef),
+    /// A user, role, profile or directory: name, and what else to show
+    /// (a directory's path).
+    Account(&'a str, &'a str, ObjectType),
     Message {
         depth: usize,
         text: String,
@@ -215,6 +254,8 @@ pub struct Browser {
     changed: Changed,
     pub marks: Marks,
     folders: HashMap<(String, ObjectType), Loaded<Vec<DbObject>>>,
+    /// Users, roles, profiles and directories by type: name and detail.
+    accounts: HashMap<ObjectType, Loaded<Vec<(String, String)>>>,
     children: HashMap<ObjectRef, Loaded<Children>>,
     parts: HashMap<ObjectRef, TableParts>,
     expanded: HashSet<Node>,
@@ -339,6 +380,11 @@ impl Browser {
     }
 
     #[cfg(test)]
+    pub fn set_filter(&mut self, filter: &str) {
+        self.filter = filter.to_owned();
+    }
+
+    #[cfg(test)]
     pub fn selected(&self) -> Option<&ObjectRef> {
         self.selected.as_ref()
     }
@@ -358,6 +404,11 @@ impl Browser {
         }
         self.expanded.insert(Node::Object(table));
         effects
+    }
+
+    /// The schema shown.
+    pub fn schema(&self) -> Option<&str> {
+        self.schema.as_deref()
     }
 
     pub fn owns(&self, id: u64) -> bool {
@@ -389,6 +440,18 @@ impl Browser {
                 filter: None,
             },
         );
+    }
+
+    /// Loads the users, roles, profiles or directories of the database.
+    fn load_accounts(&mut self, effects: &mut Effects, object_type: ObjectType) {
+        self.accounts.insert(object_type, Loaded::Loading);
+        let id = request_id();
+        self.pending.insert(id, Pending::Accounts(object_type));
+        let task: pythia_db::TaskFn = Box::new(move |conn: &pythia_db::oracle::Connection| {
+            let names = account_names(conn, object_type)?;
+            Ok(Box::new(names) as Box<dyn std::any::Any + Send>)
+        });
+        effects.request(Target::Main, DbRequest::Task { id, task });
     }
 
     fn load_children(&mut self, effects: &mut Effects, object: &ObjectRef) {
@@ -445,6 +508,27 @@ impl Browser {
         for o in objects {
             self.load_children(effects, &o);
         }
+        let accounts: Vec<ObjectType> = self.accounts.keys().copied().collect();
+        for t in accounts {
+            self.load_accounts(effects, t);
+        }
+    }
+
+    /// An object was created or changed elsewhere (in an editor): lists it
+    /// as it is now and shows it.
+    pub fn show_changed(&mut self, object: ObjectRef) -> Effects {
+        let mut effects = Effects::default();
+        match Section::listing(object.object_type) {
+            Some(section) => {
+                self.load_accounts(&mut effects, object.object_type);
+                self.expanded.insert(Node::Section(section));
+            }
+            None => {
+                self.refresh(&mut effects);
+                self.reveal(object, &mut effects);
+            }
+        }
+        effects
     }
 
     fn open_test(
@@ -491,6 +575,17 @@ impl Browser {
                 if let Ok(Ok(parts)) = result.map(|any| any.downcast::<TableParts>()) {
                     self.parts.insert(object, *parts);
                 }
+                return effects;
+            }
+            if let Some(Pending::Accounts(t)) = self.pending.get(&id) {
+                let t = *t;
+                self.pending.remove(&id);
+                let loaded = match result.map(|any| any.downcast::<Vec<(String, String)>>()) {
+                    Ok(Ok(names)) => Loaded::Ready(*names),
+                    Ok(Err(_)) => Loaded::Failed("unexpected result".into()),
+                    Err(e) => Loaded::Failed(e.to_string()),
+                };
+                self.accounts.insert(t, loaded);
                 return effects;
             }
             if let Some(Pending::Test { object, member }) = self.pending.remove(&id) {
@@ -778,6 +873,13 @@ impl Browser {
                     Node::Object(o) if !self.children.contains_key(o) => {
                         self.load_children(&mut effects, &o.clone())
                     }
+                    Node::Section(section) => {
+                        if let Some(t) = section.accounts()
+                            && !self.accounts.contains_key(&t)
+                        {
+                            self.load_accounts(&mut effects, t);
+                        }
+                    }
                     _ => {}
                 }
                 self.expanded.insert(node);
@@ -811,7 +913,7 @@ impl Browser {
             let open = self.expanded.contains(&Node::Section(section));
             rows.push(Row::Section {
                 section,
-                count: matching.len(),
+                count: Some(matching.len()),
                 open,
             });
             if open {
@@ -934,6 +1036,54 @@ impl Browser {
                 }
             }
         }
+        let accounts = if self.dialect.supports(Feature::Accounts) {
+            &Section::DATABASE[..]
+        } else {
+            &[]
+        };
+        for &section in accounts {
+            let Some(object_type) = section.accounts() else {
+                continue;
+            };
+            let open = self.expanded.contains(&Node::Section(section));
+            let list = self.accounts.get(&object_type);
+            let matching: Vec<&(String, String)> = match list {
+                Some(Loaded::Ready(names)) => names
+                    .iter()
+                    .filter(|(n, _)| filter.is_empty() || n.contains(&filter))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let count = matches!(list, Some(Loaded::Ready(_))).then_some(matching.len());
+            if filtering && count == Some(0) {
+                continue;
+            }
+            rows.push(Row::Section {
+                section,
+                count,
+                open,
+            });
+            if !open {
+                continue;
+            }
+            match list {
+                Some(Loaded::Loading) | None => rows.push(Row::Message {
+                    depth: 1,
+                    text: "Loading…".into(),
+                    error: false,
+                }),
+                Some(Loaded::Failed(e)) => rows.push(Row::Message {
+                    depth: 1,
+                    text: e.clone(),
+                    error: true,
+                }),
+                Some(Loaded::Ready(_)) => rows.extend(
+                    matching
+                        .into_iter()
+                        .map(|(name, detail)| Row::Account(name, detail, object_type)),
+                ),
+            }
+        }
         rows
     }
 
@@ -993,10 +1143,15 @@ impl Browser {
                     if toggle || label.clicked() {
                         toggles.push(Node::Folder((*owner).to_owned(), *object_type));
                     }
-                    if has_editor(*object_type) && self.dialect.supports(Feature::ObjectEditors) {
+                    if can_create(*object_type) && self.dialect.supports(Feature::ObjectEditors) {
                         label.context_menu(|ui| {
                             let kind = object_type.dictionary_name().to_lowercase();
-                            if ui.button(format!("New {kind}…")).clicked() {
+                            let label = if *owner == "PUBLIC" {
+                                format!("New public {kind}…")
+                            } else {
+                                format!("New {kind}…")
+                            };
+                            if ui.button(label).clicked() {
                                 actions.push(ObjectAction::New((*owner).to_owned(), *object_type));
                                 ui.close();
                             }
@@ -1026,9 +1181,7 @@ impl Browser {
                     let selected = self.selected.as_ref() == Some(&r);
                     let response = self.drag_source(ui, &r, |ui| {
                         ui.add(
-                            egui::Button::selectable(selected, text)
-                                .frame_when_inactive(false)
-                                .sense(Sense::click_and_drag()),
+                            egui::Button::selectable(selected, text).sense(Sense::click_and_drag()),
                         )
                     });
                     let response = response.on_hover_ui(|ui| {
@@ -1086,6 +1239,9 @@ impl Browser {
                     );
                     if label.clicked() {
                         toggles.push(Node::Group(table.clone(), *group));
+                    }
+                    if *group != Group::ReferencedBy {
+                        label.context_menu(|ui| group_menu(ui, table, *group, actions));
                     }
                     ui.weak(count.to_string());
                 }
@@ -1175,6 +1331,10 @@ impl Browser {
                     let (icon, label) = match section {
                         Section::Favorites => (Icon::Star, "Favorites"),
                         Section::Recent => (Icon::History, "Recent"),
+                        Section::Users => (Icon::Schema, "Users"),
+                        Section::Roles => (Icon::Lock, "Roles"),
+                        Section::Profiles => (Icon::Settings, "Profiles"),
+                        Section::Directories => (Icon::Folder, "Directories"),
                     };
                     ui.add(icon.sized(ui, small));
                     let r = ui
@@ -1182,7 +1342,47 @@ impl Browser {
                     if r.clicked() {
                         toggles.push(Node::Section(*section));
                     }
-                    ui.weak(count.to_string());
+                    if let Some(t) = section.accounts() {
+                        r.context_menu(|ui| {
+                            let kind = t.dictionary_name().to_lowercase();
+                            if ui.button(format!("New {kind}…")).clicked() {
+                                actions.push(ObjectAction::New(String::new(), t));
+                                ui.close();
+                            }
+                        });
+                    }
+                    if let Some(n) = count {
+                        ui.weak(n.to_string());
+                    }
+                }
+                Row::Account(name, detail, object_type) => {
+                    ui.add_space(INDENT);
+                    ui.add_space(small.points());
+                    let icon =
+                        Icon::for_object_type(object_type.dictionary_name()).unwrap_or(Icon::Text);
+                    ui.add(icon.sized(ui, small));
+                    let account = ObjectRef {
+                        owner: String::new(),
+                        name: (*name).to_owned(),
+                        object_type: *object_type,
+                    };
+                    let selected = self.selected.as_ref() == Some(&account);
+                    let response = ui.add(egui::Button::selectable(
+                        selected,
+                        RichText::new(name.to_lowercase()).monospace(),
+                    ));
+                    if response.clicked() {
+                        actions.push(ObjectAction::Select(account.clone()));
+                    }
+                    if response.double_clicked() {
+                        actions.push(ObjectAction::EditObject(account.clone()));
+                    }
+                    response.context_menu(|ui| account_menu(ui, &account, actions));
+                    if !detail.is_empty() {
+                        ui.add(
+                            egui::Label::new(RichText::new(*detail).weak().monospace()).truncate(),
+                        );
+                    }
                 }
                 Row::Shortcut(object) => {
                     ui.add_space(INDENT);
@@ -1202,9 +1402,7 @@ impl Browser {
                     }
                     let response = self.drag_source(ui, object, |ui| {
                         ui.add(
-                            egui::Button::selectable(selected, text)
-                                .frame_when_inactive(false)
-                                .sense(Sense::click_and_drag()),
+                            egui::Button::selectable(selected, text).sense(Sense::click_and_drag()),
                         )
                     });
                     let response = response.on_hover_text(format!(
@@ -1265,6 +1463,7 @@ impl Browser {
             drop: true,
             reveal: false,
             member: None,
+            create: true,
         };
         actions.extend(object_menu(ui, object, &options));
     }
@@ -1347,13 +1546,54 @@ impl Browser {
                     self.expanded.insert(Node::Section(Section::Favorites));
                 }
             }
-            ObjectAction::EditTable(object) => effects
-                .open
-                .push(OpenRequest::EditTable { connection, object }),
+            ObjectAction::EditTable(object, tab) => effects.open.push(OpenRequest::EditTable {
+                connection,
+                object,
+                tab,
+            }),
+            ObjectAction::New(owner, ObjectType::Table) => {
+                effects.open.push(OpenRequest::NewTable {
+                    connection,
+                    owner,
+                    like: None,
+                })
+            }
             ObjectAction::New(owner, object_type) => effects.open.push(OpenRequest::EditObject {
                 connection,
-                target: EditTarget::New { owner, object_type },
+                target: EditTarget::New {
+                    owner,
+                    object_type,
+                    from: None,
+                },
             }),
+            ObjectAction::NewFrom(ObjectType::Table, like) => {
+                effects.open.push(OpenRequest::NewTable {
+                    connection,
+                    owner: like.owner.clone(),
+                    like: Some(like),
+                })
+            }
+            ObjectAction::NewFrom(object_type, from) => {
+                // A synonym goes to the schema shown, other objects to the
+                // one of the object they're on.
+                let owner = match object_type {
+                    ObjectType::Synonym => {
+                        self.schema.clone().unwrap_or_else(|| from.owner.clone())
+                    }
+                    _ => from.owner.clone(),
+                };
+                effects.open.push(OpenRequest::EditObject {
+                    connection,
+                    target: EditTarget::New {
+                        owner,
+                        object_type,
+                        from: Some(from),
+                    },
+                })
+            }
+            ObjectAction::ShowSchema(user) => {
+                self.set_schema(user, effects);
+            }
             ObjectAction::EditObject(object) => effects.open.push(OpenRequest::EditObject {
                 connection,
                 target: EditTarget::Edit(object),
@@ -1420,6 +1660,18 @@ impl Browser {
                 object.object_type.dictionary_name().to_lowercase(),
                 object.qualified()
             ));
+            match object.object_type {
+                ObjectType::User => {
+                    ui.weak("A user who owns objects isn't dropped (that needs CASCADE).");
+                }
+                ObjectType::Profile => {
+                    ui.weak("Users with this profile get the DEFAULT profile.");
+                }
+                ObjectType::Directory => {
+                    ui.weak("The folder on the server stays; the grants on the directory go.");
+                }
+                _ => {}
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 let drop = egui::Button::new(RichText::new("Drop").color(Color32::WHITE))
@@ -1444,16 +1696,154 @@ impl Browser {
     }
 }
 
+/// The New submenu of an object: another object of its type, and objects
+/// on it (label, action).
+fn new_entries(object: &ObjectRef) -> Vec<(String, ObjectAction)> {
+    let t = object.object_type;
+    let on = |kind: ObjectType| ObjectAction::NewFrom(kind, object.clone());
+    let mut out = Vec::new();
+    if can_create(t) {
+        let kind = t.dictionary_name().to_lowercase();
+        let mut label = format!("{kind}…");
+        label[..1].make_ascii_uppercase();
+        out.push((label, ObjectAction::New(object.owner.clone(), t)));
+    }
+    match t {
+        ObjectType::Table => out.extend([
+            ("Table like this…".to_owned(), on(ObjectType::Table)),
+            ("Index on this table…".to_owned(), on(ObjectType::Index)),
+            ("Trigger on this table…".to_owned(), on(ObjectType::Trigger)),
+            ("View on this table…".to_owned(), on(ObjectType::View)),
+        ]),
+        ObjectType::View => out.extend([
+            ("Trigger on this view…".to_owned(), on(ObjectType::Trigger)),
+            ("View on this view…".to_owned(), on(ObjectType::View)),
+        ]),
+        _ => {}
+    }
+    if matches!(
+        t,
+        ObjectType::Table
+            | ObjectType::View
+            | ObjectType::MaterializedView
+            | ObjectType::Sequence
+            | ObjectType::Package
+            | ObjectType::Procedure
+            | ObjectType::Function
+            | ObjectType::Type
+    ) {
+        out.push(("Synonym for this…".to_owned(), on(ObjectType::Synonym)));
+    }
+    out
+}
+
+/// The context menu of a table's Indexes, Constraints or Triggers.
+fn group_menu(ui: &mut Ui, table: &ObjectRef, group: Group, actions: &mut Vec<ObjectAction>) {
+    let (label, action) = match group {
+        Group::Indexes => (
+            "New index…",
+            ObjectAction::NewFrom(ObjectType::Index, table.clone()),
+        ),
+        Group::Constraints => (
+            "Add constraint…",
+            ObjectAction::EditTable(table.clone(), TableTab::Keys),
+        ),
+        Group::Triggers => (
+            "New trigger…",
+            ObjectAction::NewFrom(ObjectType::Trigger, table.clone()),
+        ),
+        Group::ReferencedBy => return,
+    };
+    if ui.button(label).clicked() {
+        actions.push(action);
+        ui.close();
+    }
+}
+
+/// The context menu of a user, role, profile or directory.
+fn account_menu(ui: &mut Ui, account: &ObjectRef, actions: &mut Vec<ObjectAction>) {
+    let kind = account.object_type.dictionary_name().to_lowercase();
+    let mut item = |ui: &mut Ui, label: &str, action: ObjectAction| {
+        if ui.button(label).clicked() {
+            actions.push(action);
+            ui.close();
+        }
+    };
+    item(
+        ui,
+        &format!("Edit {kind}…"),
+        ObjectAction::EditObject(account.clone()),
+    );
+    if account.object_type == ObjectType::User {
+        item(
+            ui,
+            "Show schema",
+            ObjectAction::ShowSchema(account.name.clone()),
+        );
+    }
+    if has_grants(account.object_type) {
+        item(ui, "Grants…", ObjectAction::Grants(account.clone()));
+    }
+    item(
+        ui,
+        &format!("New {kind}…"),
+        ObjectAction::New(String::new(), account.object_type),
+    );
+    ui.separator();
+    item(ui, "Copy name", ObjectAction::CopyName(account.clone()));
+    // The DEFAULT profile can't be dropped.
+    if !(account.object_type == ObjectType::Profile && account.name == "DEFAULT") {
+        ui.separator();
+        item(ui, "Drop…", ObjectAction::Drop(account.clone()));
+    }
+}
+
+/// Names of the database's users, of its roles (all of them with catalog
+/// access, else those granted to the session's user), of its profiles
+/// (with catalog access), or of the directories the session can use (with
+/// their paths); each with what else to show.
+fn account_names(
+    conn: &pythia_db::oracle::Connection,
+    object_type: ObjectType,
+) -> Result<Vec<(String, String)>, pythia_db::DbError> {
+    let read = |sql: &str| -> Result<Vec<(String, String)>, pythia_db::DbError> {
+        let mut out = Vec::new();
+        for row in conn.query_as::<(String, Option<String>)>(sql, &[])? {
+            let (name, detail) = row?;
+            out.push((name, detail.unwrap_or_default()));
+        }
+        Ok(out)
+    };
+    match object_type {
+        ObjectType::User => read("select username, null from all_users order by username"),
+        ObjectType::Directory => read(
+            "select directory_name, directory_path from all_directories order by directory_name",
+        ),
+        ObjectType::Profile => {
+            read("select distinct profile, null from dba_profiles order by profile").map_err(|_| {
+                pythia_db::DbError::new("Listing profiles needs access to DBA_PROFILES")
+            })
+        }
+        _ => read("select role, null from dba_roles order by role").or_else(|_| {
+            read("select granted_role, null from user_role_privs order by granted_role")
+        }),
+    }
+}
+
 /// `DROP` for an object. Public synonyms and links have their own syntax,
-/// and a link's name can't be qualified: its dots belong to the name.
+/// a link's name can't be qualified (its dots belong to the name), and a
+/// scheduler job is dropped through DBMS_SCHEDULER.
 fn drop_sql(dialect: Dialect, o: &ObjectRef) -> String {
     let kind = o.object_type.dictionary_name().to_lowercase();
     if dialect != Dialect::ORACLE {
         return format!("drop {kind} {}", dialect.qualified(&o.owner, &o.name));
     }
     match (o.owner.as_str(), o.object_type) {
+        (_, ObjectType::Job) => crate::jobs_window::action_sql("drop", &o.owner, &o.name),
         ("PUBLIC", _) => format!("drop public {kind} {}", quote_ident(&o.name)),
         (_, ObjectType::DatabaseLink) => format!("drop {kind} {}", quote_ident(&o.name)),
+        // Users with the profile get DEFAULT.
+        (_, ObjectType::Profile) => format!("drop {kind} {} cascade", o.qualified()),
         _ => format!("drop {kind} {}", o.qualified()),
     }
 }
@@ -1482,6 +1872,8 @@ pub struct MenuOptions {
     pub reveal: bool,
     /// A subprogram of the package, e.g. `PROC` in `pkg.proc`.
     pub member: Option<String>,
+    /// Offer the New submenu (new objects of the type, or on this one).
+    pub create: bool,
 }
 
 /// The context menu of a database object, shared by the object browser and
@@ -1521,13 +1913,27 @@ pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Op
     }
     item(ui, "Describe", ObjectAction::Describe(object.clone()));
     if t == ObjectType::Table && editors {
-        item(ui, "Edit table…", ObjectAction::EditTable(object.clone()));
+        item(
+            ui,
+            "Edit table…",
+            ObjectAction::EditTable(object.clone(), TableTab::Columns),
+        );
     }
     if has_editor(t) && editors {
         item(ui, "Edit…", ObjectAction::EditObject(object.clone()));
     }
     if has_grants(t) && editors {
         item(ui, "Grants…", ObjectAction::Grants(object.clone()));
+    }
+    if options.create && editors {
+        let news = new_entries(object);
+        if !news.is_empty() {
+            ui.menu_button("New", |ui| {
+                for (label, action) in news {
+                    item(ui, &label, action);
+                }
+            });
+        }
     }
     if t.has_data() {
         ui.menu_button("Generate", |ui| {
@@ -1596,9 +2002,15 @@ pub enum ObjectAction {
     /// Show the object in the browser's tree.
     Reveal(ObjectRef),
     Generate(ObjectRef, Template),
-    EditTable(ObjectRef),
-    /// Form editor for a new object of this type in this schema.
+    EditTable(ObjectRef, TableTab),
+    /// Form editor (or table builder) for a new object of this type in this
+    /// schema.
     New(String, ObjectType),
+    /// A new object of this type on (or like) an object: an index on a
+    /// table, a synonym for it, a table like it.
+    NewFrom(ObjectType, ObjectRef),
+    /// Browse a user's schema.
+    ShowSchema(String),
     EditObject(ObjectRef),
     Grants(ObjectRef),
     ToggleFavorite(ObjectRef),
@@ -1728,6 +2140,11 @@ mod tests {
             drop_sql(Dialect::ORACLE, &o("HR", "EMP", ObjectType::Table)),
             "drop table HR.EMP"
         );
+        // There's no DROP JOB (#46).
+        assert_eq!(
+            drop_sql(Dialect::ORACLE, &o("HR", "NIGHTLY", ObjectType::Job)),
+            "begin dbms_scheduler.drop_job('HR.NIGHTLY', force => true); end;"
+        );
         assert_eq!(folders(Dialect::ORACLE, "PUBLIC"), ObjectType::PUBLIC);
     }
 
@@ -1806,6 +2223,51 @@ mod tests {
         let statements = pythia_plsql::split_statements(&script);
         assert_eq!(statements.len(), 2, "{statements:?}");
         assert!(statements[1].text(&script).ends_with("end"));
+    }
+
+    #[test]
+    fn new_submenu() {
+        let o = |owner: &str, name: &str, object_type| ObjectRef {
+            owner: owner.into(),
+            name: name.into(),
+            object_type,
+        };
+        let labels = |t: ObjectType| -> Vec<String> {
+            new_entries(&o("HR", "EMP", t))
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect()
+        };
+        assert_eq!(
+            labels(ObjectType::Table),
+            [
+                "Table…",
+                "Table like this…",
+                "Index on this table…",
+                "Trigger on this table…",
+                "View on this table…",
+                "Synonym for this…"
+            ]
+        );
+        assert_eq!(
+            labels(ObjectType::View),
+            [
+                "View…",
+                "Trigger on this view…",
+                "View on this view…",
+                "Synonym for this…"
+            ]
+        );
+        assert_eq!(
+            labels(ObjectType::Procedure),
+            ["Procedure…", "Synonym for this…"]
+        );
+        assert_eq!(labels(ObjectType::JavaSource), Vec::<String>::new());
+        let (_, action) = new_entries(&o("HR", "EMP", ObjectType::Table)).remove(2);
+        assert_eq!(
+            action,
+            ObjectAction::NewFrom(ObjectType::Index, o("HR", "EMP", ObjectType::Table))
+        );
     }
 }
 

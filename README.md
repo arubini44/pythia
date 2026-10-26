@@ -31,7 +31,8 @@ for Linux, Windows and macOS.
 - Bind and substitution variables are prompted and remembered.
 - Results in a virtualized grid: sorting, rectangular selection, aggregates,
   record view, value viewer, copy and export (CSV, TSV, JSON, Excel,
-  INSERT statements, Markdown, HTML).
+  INSERT statements, Markdown, HTML). Columns can be resized, hidden,
+  moved by dragging their header and frozen at the left.
 - **Follow foreign keys**: right-click a row to open its parent row or its
   child rows in any table referencing it.
 - **Chart any result** as bars or lines: the x axis defaults to the first text
@@ -50,9 +51,19 @@ for Linux, Windows and macOS.
 - Object browser with lazy, virtualized folders, invalid markers, compile,
   drop, describe, query, test; favorites and recently opened objects;
   filters for invalid or recently changed objects; tables expand to
-  columns, indexes, constraints, triggers and referencing tables.
-- Form editors for sequences, views, synonyms, indexes and grants, with a
-  preview of the generated DDL.
+  columns, indexes, constraints, triggers and referencing tables; users
+  and roles.
+- Create objects from the browser's right-click menu (or File → New
+  Object): a table builder (columns with a type picker, primary and
+  foreign keys, checks, indexes, identity columns, range, interval, list
+  or hash partitioning, temporary tables, a copy of another table), and
+  forms for views, materialized views, sequences, synonyms, indexes,
+  database links, scheduler jobs, users, roles, profiles and directories,
+  with a preview of the generated DDL. Triggers, procedures, functions, packages and types start
+  from a form that writes their first source for a program window.
+- Form editors for existing sequences, views, materialized views, synonyms,
+  indexes, database links, scheduler jobs, users, roles, profiles,
+  directories and grants.
 - Program windows with spec and body, compile with clickable errors
   (gutter markers and squiggles), unsaved-change tracking, save to file.
 - **Test…** generates a ready-to-run block for any procedure or function
@@ -122,6 +133,9 @@ for Linux, Windows and macOS.
 **Scheduler jobs**
 - All DBMS_SCHEDULER jobs with state, schedule, last and next run; run now,
   stop, enable, disable, drop; recent runs with errors.
+- A form for new jobs and a job's settings: a PL/SQL block or a stored
+  procedure, start and end, the repeat interval from presets or as a
+  calendar expression, with the next runs it gives.
 
 ![Scheduler jobs](docs/screenshots/scheduler-jobs.png)
 
@@ -178,52 +192,51 @@ Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
 macOS (`.dmg`) are attached to each [GitHub
 release](https://github.com/ortic/pythia/releases).
 
-Pythia talks to Oracle through the **Oracle Instant Client**, which Oracle's
-license doesn't allow us to bundle. Install it once:
+Pythia connects to Oracle directly, with a pure-Rust driver: **no Oracle
+client libraries are needed**. Easy Connect strings (`host:port/service`)
+work as they are; for net service names, point `TNS_ADMIN` at the directory
+with your `tnsnames.ora` (or put it into `$ORACLE_HOME/network/admin`), and
+Pythia offers the aliases when connecting.
 
-1. Download *Basic* for your platform from
-   <https://www.oracle.com/database/technologies/instant-client/downloads.html>.
-   *Basic Light* works too, but it only has the small time zone file:
-   `TIMESTAMP WITH TIME ZONE` values with region names (e.g. scheduler job
-   times) then fail with ORA-01805.
-2. Unpack it, e.g. to `/opt/oracle/instantclient_23` or `C:\oracle\instantclient_23`.
-3. Make it findable:
-   - **Linux:** `sudo apt install libaio1t64` (or `libaio1` on older
-     distributions), then either set `LD_LIBRARY_PATH=/opt/oracle/instantclient_23`
-     or register it once with
-     `echo /opt/oracle/instantclient_23 | sudo tee /etc/ld.so.conf.d/oracle.conf && sudo ldconfig`.
-   - **Windows:** add the directory to `PATH` (System Properties → Environment
-     Variables) and install the Visual C++ redistributable it lists.
-   - **macOS:** run `install_ic.sh` from the DMG (it copies the client to
-     `Downloads`), then link the library where Pythia finds it:
-     `mkdir -p ~/lib && ln -s ~/Downloads/instantclient_23_*/libclntsh.dylib ~/lib/`.
-4. Optional: put your `tnsnames.ora` into `network/admin` inside the Instant
-   Client directory or point `TNS_ADMIN` at it; Pythia then offers the aliases
-   when connecting.
-
-**Database versions:** Pythia is developed against Oracle 23ai and also
-tested against 11.2 XE, 18c XE and 21c XE. A few features need a newer
-release: the profiler, *Cancel current SQL* in the monitor and restarting a
-sequence need 18c; reading trace files through the database needs 12.2.
-Instant Client 23 connected to all of these in our tests, but Oracle
-supports it only for Database 19c and later. For older databases use
-Instant Client 19 (11.2 and later) or 21 (12.1 and later).
+**Database versions:** Pythia is developed against Oracle 23ai and tested
+against 18c XE and 21c XE. A few features need a newer release: the
+profiler, *Cancel current SQL* in the monitor and restarting a sequence need
+18c; reading trace files through the database needs 12.2.
 
 Proxy authentication works with the usual `proxy_user[target_user]` user
-name; an empty user name with a wallet or OS authentication connects as
-`/@alias`.
+name. TLS (TCPS) works, cancelling a running statement included; the
+driver's tests run over TLS too, while Pythia itself hasn't been tried on a
+TLS server yet. For a server certificate from a private CA, put the CA's
+certificate as `ewallet.pem` in a folder and name it in the connect string:
+`tcps://host:2484/service?wallet_location=/path/to/folder`, or
+`(SECURITY=(MY_WALLET_DIRECTORY=/path/to/folder))` in tnsnames.ora.
+`TIMESTAMP WITH TIME ZONE` values with a region show the region's name
+(`2026-07-01 12:00:00 Europe/Zurich`); its offset comes from the IANA time
+zone rules built into Pythia, which can differ from the server's time zone
+file for very old dates and for rule changes newer than that file.
 
-If the client can't be loaded, Pythia says so when you connect and shows these
-steps.
+**When you need the Oracle Instant Client:** Oracle 11.2 databases (12.1 is
+untested), servers that *require* Native Network Encryption
+(`SQLNET.ENCRYPTION_SERVER = REQUIRED`; use TLS instead where you can), and
+OS or wallet logins (`/@alias`). Build Pythia with `cargo build --release --features
+pythia-db/thick` and install the [Instant
+Client](https://www.oracle.com/database/technologies/instant-client/downloads.html)
+(*Basic*; on Linux also `libaio`), on the library path (`LD_LIBRARY_PATH`,
+`PATH` on Windows).
 
 ## Building from source
 
-Requirements: Rust (stable) and the Instant Client as above.
+Requirements: Rust (stable).
 
 ```sh
 cargo build --release
-LD_LIBRARY_PATH=/path/to/instantclient ./target/release/pythia
+./target/release/pythia
 ```
+
+The database driver is our fork of
+[rust-oracledb](https://github.com/ortic/rust-oracledb) (branch `pythia`:
+upstream fixes that aren't released yet, and cancelling a running call),
+pinned to a commit in `Cargo.toml`.
 
 Packages are built with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager)
 (`cargo install cargo-packager --locked`):
@@ -247,9 +260,12 @@ docker compose up -d        # or: podman compose up -d
 Tests that need the database are skipped unless configured:
 
 ```sh
-export LD_LIBRARY_PATH=/path/to/instantclient
 PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 ```
+
+`--features pythia-db/thick` runs them against the Instant Client instead
+(set `LD_LIBRARY_PATH`); `cargo run -p pythia-db --example thin_probe
+--features thick` compares the two drivers.
 
 | Variable | Used by |
 |---|---|
@@ -266,10 +282,11 @@ network ACL; `pythia_debugger::target::setup_script` prints what a DBA has to
 run. `crates/pythia-debugger/tests/scenario.rs` steps through a larger
 scenario (packages, records, collections, an object type, a trigger).
 
-Several app tests use the demo schema that the screenshot test creates, so
-on a fresh database run `cargo test -p pythia-app screenshots::screenshots`
-once with `PYTHIA_SCREENSHOT_DIR` set. The reports test needs
-`SELECT_CATALOG_ROLE` for the test user.
+The tests set up what they need on a new database: the demo schema
+several app tests use, and, with `PYTHIA_TEST_DB_DBA` set,
+`SELECT_CATALOG_ROLE` and the debugger privileges for the test user
+(without a DBA, grant those yourself). CI runs the whole suite against a
+fresh Oracle Free container.
 
 ### Workspace
 

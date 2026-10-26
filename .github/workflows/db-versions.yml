@@ -1,0 +1,23 @@
+# Weekly: the test suite against the older releases Pythia supports (CI
+# covers 23ai on every push).
+name: Database versions
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  db:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: gvenzl/oracle-xe:21-slim
+            service: XEPDB1
+          - image: gvenzl/oracle-xe:18-slim
+            service: XEPDB1
+    uses: ./.github/workflows/db-tests.yml
+    with:
+      image: ${{ matrix.image }}
+      service: ${{ matrix.service }}

@@ -277,6 +277,21 @@ impl Connections {
         }
     }
 
+    /// Commits or rolls back a window's transaction, then closes its
+    /// session (no cancel, which could hit the commit).
+    pub fn end_doc(&mut self, doc: DocId, commit: bool) {
+        for conn in self.open.values_mut() {
+            if let Some(s) = conn.docs.remove(&doc) {
+                s.session.send(if commit {
+                    DbRequest::Commit
+                } else {
+                    DbRequest::Rollback
+                });
+                // Dropping it queues the disconnect after that.
+            }
+        }
+    }
+
     pub fn any_pending_tx(&self) -> bool {
         self.open.values().any(Connection::any_pending_tx)
     }

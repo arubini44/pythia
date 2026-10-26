@@ -1,7 +1,6 @@
 //! Standalone monitor window for trying the views.
 //!
 //! ```sh
-//! export LD_LIBRARY_PATH=/path/to/instantclient
 //! PYTHIA_MONITOR_DB=system/oracle@localhost:1521/FREEPDB1 cargo run -p pythia-monitor --example monitor
 //! ```
 

@@ -30,12 +30,12 @@ pub use types::{
     ServerInfo, TaskFn, TaskResult,
 };
 
-/// Re-exported so tools running [`DbRequest::Task`] can use the driver.
-/// The database driver: the `oracle` crate (ODPI-C, needs the Instant
-/// Client), or with the `thin` feature a stand-in with the same API on the
-/// pure-Rust `oracledb` driver (#13).
-#[cfg(not(feature = "thin"))]
+/// The database driver, for tools running [`DbRequest::Task`]: the `oracle`
+/// API on the pure-Rust `oracledb` driver (no client libraries needed), or
+/// with the `thick` feature the `oracle` crate itself (ODPI-C, needs the
+/// Oracle Instant Client).
+#[cfg(feature = "thick")]
 pub use ::oracle;
-#[cfg(feature = "thin")]
+#[cfg(not(feature = "thick"))]
 #[path = "thin.rs"]
 pub mod oracle;

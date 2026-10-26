@@ -15,7 +15,7 @@ use crate::browser::Browser;
 use crate::commands::{Command, Keymap};
 use crate::connections::{Connection, Connections, Notify, Passwords, SessionKey};
 use crate::dialogs::{
-    CommandPalette, Confirm, ConfirmAction, ConnectDialog, FinderAction, HistoryDialog,
+    Answer, CommandPalette, Confirm, ConfirmAction, ConnectDialog, FinderAction, HistoryDialog,
     ObjectFinder, confirm_ui, opens_as_program,
 };
 use crate::documents::{
@@ -489,10 +489,11 @@ impl PythiaApp {
             } if !self.dialect_of(Some(&connection)).supports(Feature::PlSql) => {
                 OpenRequest::Object { connection, object }
             }
-            OpenRequest::EditTable { connection, object }
-                if !self
-                    .dialect_of(Some(&connection))
-                    .supports(Feature::ObjectEditors) =>
+            OpenRequest::EditTable {
+                connection, object, ..
+            } if !self
+                .dialect_of(Some(&connection))
+                .supports(Feature::ObjectEditors) =>
             {
                 OpenRequest::Object { connection, object }
             }
@@ -503,7 +504,9 @@ impl PythiaApp {
             connection, object, ..
         }
         | OpenRequest::Object { connection, object }
-        | OpenRequest::EditTable { connection, object } = &request
+        | OpenRequest::EditTable {
+            connection, object, ..
+        } = &request
         {
             self.browser.marks.touch(connection, object.clone());
         }
@@ -626,10 +629,36 @@ impl PythiaApp {
                     }
                 }
             }
-            OpenRequest::EditTable { connection, object } => {
+            OpenRequest::EditTable {
+                connection,
+                object,
+                tab,
+            } => {
                 self.add_doc(
                     Some(connection),
-                    DocKind::TableEditor(crate::table_editor::TableEditor::new(object)),
+                    DocKind::TableEditor(
+                        crate::table_editor::TableEditor::new(object).with_tab(tab),
+                    ),
+                );
+            }
+            OpenRequest::NewTable {
+                connection,
+                owner,
+                like,
+            } => {
+                self.add_doc(
+                    Some(connection),
+                    DocKind::TableEditor(crate::table_editor::TableEditor::create(owner, like)),
+                );
+            }
+            OpenRequest::NewProgram {
+                connection,
+                object,
+                sources,
+            } => {
+                self.add_doc(
+                    Some(connection),
+                    DocKind::Program(ProgramWindow::with_sources(object, sources)),
                 );
             }
             OpenRequest::InsertText { text } => {
@@ -771,6 +800,46 @@ impl PythiaApp {
         }
     }
 
+    /// Closes windows; for those with an open transaction it asks first
+    /// whether to commit or roll it back.
+    fn close_windows(&mut self, ids: Vec<DocId>) {
+        let (open, idle): (Vec<DocId>, Vec<DocId>) =
+            ids.into_iter().partition(|id| self.has_pending_tx(*id));
+        for id in idle {
+            self.remove_window(id);
+        }
+        if open.is_empty() {
+            return;
+        }
+        let names: Vec<String> = open
+            .iter()
+            .filter_map(|id| self.docs.get(id))
+            .map(Document::title)
+            .collect();
+        let text = match names.as_slice() {
+            [one] => format!("{one} has uncommitted changes."),
+            many => format!("{} have uncommitted changes.", many.join(", ")),
+        };
+        if let Some(&first) = open.first() {
+            self.open_tab(Tab::Doc(first));
+        }
+        self.confirm = Some(Confirm {
+            action: ConfirmAction::CloseWindows(open),
+            title: "Uncommitted transaction".into(),
+            text,
+            yes: "Commit and close",
+            other: Some("Roll back and close"),
+        });
+    }
+
+    /// Takes a window's tab out of the dock and closes it.
+    fn remove_window(&mut self, id: DocId) {
+        if let Some(path) = self.dock.find_tab(&Tab::Doc(id)) {
+            self.dock.remove_tab(path);
+        }
+        self.close_doc(id);
+    }
+
     fn close_doc(&mut self, id: DocId) {
         self.conns.close_doc(id);
         if let Some(doc) = self.docs.remove(&id) {
@@ -794,6 +863,7 @@ impl PythiaApp {
         let connection = doc
             .and_then(|id| self.docs.get(&id))
             .and_then(|d| d.connection.clone());
+        let close = effects.close;
         for (target, request) in effects.requests {
             let target_connection = match &target {
                 Target::Connection(c) => Some(c.clone()),
@@ -911,8 +981,41 @@ impl PythiaApp {
                 .unwrap_or_default();
             self.ai_start(request, None, source, connection.clone());
         }
+        // A job form applied: the connection's Scheduler Jobs windows list
+        // the job as it is now.
+        if let (Some(object), Some(name)) = (&effects.changed, &connection)
+            && object.object_type == pythia_db::ObjectType::Job
+        {
+            let windows: Vec<DocId> = self
+                .docs
+                .iter()
+                .filter(|(_, d)| {
+                    d.connection.as_deref() == Some(name.as_str())
+                        && matches!(d.kind, DocKind::Jobs(_))
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for id in windows {
+                if let Some(DocKind::Jobs(j)) = self.docs.get_mut(&id).map(|d| &mut d.kind) {
+                    let effects = j.refresh();
+                    self.apply(Some(id), effects);
+                }
+            }
+        }
+        if let (Some(object), Some(name)) = (effects.changed, &connection)
+            && self.browser.connection.as_deref() == Some(name.as_str())
+        {
+            let effects = self.browser.show_changed(object);
+            self.apply_browser(effects);
+        }
         for request in effects.open {
             self.open(request);
+        }
+        if close && let Some(id) = doc {
+            if let Some(path) = self.dock.find_tab(&Tab::Doc(id)) {
+                self.dock.remove_tab(path);
+            }
+            self.close_doc(id);
         }
     }
 
@@ -1735,6 +1838,46 @@ impl PythiaApp {
 
     // ----- commands -------------------------------------------------------
 
+    /// Opens the form (or table builder) for a new object in the schema the
+    /// object browser shows, else the connection's current one.
+    fn new_object(&mut self, object_type: pythia_db::ObjectType) {
+        use pythia_db::ObjectType;
+        let Some(connection) = self.current_connection() else {
+            self.connect_dialog.show(self.last_profile.as_ref());
+            return;
+        };
+        let owner = match object_type {
+            t if t.is_database_object() => String::new(),
+            _ => self
+                .browser
+                .schema()
+                .filter(|_| self.browser.connection.as_deref() == Some(connection.as_str()))
+                // PUBLIC only owns synonyms and links.
+                .filter(|s| {
+                    *s != "PUBLIC"
+                        || matches!(object_type, ObjectType::Synonym | ObjectType::DatabaseLink)
+                })
+                .map(str::to_owned)
+                .or_else(|| self.conns.get(&connection).map(|c| c.current_schema()))
+                .unwrap_or_default(),
+        };
+        self.open(match object_type {
+            ObjectType::Table => OpenRequest::NewTable {
+                connection,
+                owner,
+                like: None,
+            },
+            _ => OpenRequest::EditObject {
+                connection,
+                target: crate::object_editor::EditTarget::New {
+                    owner,
+                    object_type,
+                    from: None,
+                },
+            },
+        });
+    }
+
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
         // Shortcuts reach commands the menus don't offer.
         let dialect = self.dialect();
@@ -1747,6 +1890,29 @@ impl PythiaApp {
             return;
         }
         match command {
+            Command::NewTable
+            | Command::NewView
+            | Command::NewMaterializedView
+            | Command::NewSequence
+            | Command::NewSynonym
+            | Command::NewIndex
+            | Command::NewTrigger
+            | Command::NewProcedure
+            | Command::NewFunction
+            | Command::NewPackage
+            | Command::NewType
+            | Command::NewJob
+            | Command::NewDatabaseLink
+            | Command::NewUser
+            | Command::NewRole
+            | Command::NewProfile
+            | Command::NewDirectory => {
+                if let Some((_, object_type)) =
+                    Command::NEW_OBJECTS.iter().find(|(c, _)| *c == command)
+                {
+                    self.new_object(*object_type);
+                }
+            }
             Command::NewSqlWindow => {
                 let title = self.new_sql_title();
                 let connection = self.current_connection();
@@ -1757,10 +1923,9 @@ impl PythiaApp {
             }
             Command::CloseTab => {
                 if let Some(id) = self.focused
-                    && let Some(path) = self.dock.find_tab(&Tab::Doc(id))
+                    && self.dock.find_tab(&Tab::Doc(id)).is_some()
                 {
-                    self.dock.remove_tab(path);
-                    self.close_doc(id);
+                    self.close_windows(vec![id]);
                 }
             }
             Command::CloseOtherTabs => {
@@ -1771,12 +1936,7 @@ impl PythiaApp {
                     .copied()
                     .filter(|id| Some(*id) != keep)
                     .collect();
-                for id in others {
-                    if let Some(path) = self.dock.find_tab(&Tab::Doc(id)) {
-                        self.dock.remove_tab(path);
-                    }
-                    self.close_doc(id);
-                }
+                self.close_windows(others);
             }
             Command::Connect => self.connect_dialog.show(self.last_profile.as_ref()),
             Command::Settings => self.settings_dialog.open = true,
@@ -1858,6 +2018,7 @@ impl PythiaApp {
                             "{name} has uncommitted changes. Disconnecting rolls them back."
                         ),
                         yes: "Disconnect and roll back",
+                        other: None,
                     });
                 } else {
                     self.disconnect(&name);
@@ -1919,6 +2080,7 @@ impl PythiaApp {
                         title: "Commit on production".into(),
                         text: format!("Commit the transaction on production connection {name}?"),
                         yes: "Commit",
+                        other: None,
                     });
                 } else {
                     self.end_transaction(true);
@@ -2233,6 +2395,7 @@ impl PythiaApp {
                         "{changing} statement(s) can modify data or objects on the production connection {name}."
                     ),
                     yes: "Run on production",
+                    other: None,
                 });
                 return;
             }
@@ -2734,15 +2897,34 @@ impl PythiaApp {
         };
         egui::MenuBar::new().ui(ui, |ui| {
             bar_menu(ui, "File", |ui| {
+                groups(ui, &[&[Command::NewSqlWindow]]);
+                if Command::NEW_OBJECTS
+                    .iter()
+                    .any(|(c, _)| c.available(dialect))
+                {
+                    ui.menu_button("New Object", |ui| {
+                        // Tables and views, code and jobs, then links and
+                        // accounts.
+                        let objects: Vec<Command> =
+                            Command::NEW_OBJECTS.iter().map(|(c, _)| *c).collect();
+                        let at = |t| {
+                            Command::NEW_OBJECTS
+                                .iter()
+                                .position(|(_, o)| *o == t)
+                                .unwrap_or(objects.len())
+                        };
+                        let code = at(pythia_db::ObjectType::Trigger);
+                        let links = at(pythia_db::ObjectType::DatabaseLink);
+                        groups(
+                            ui,
+                            &[&objects[..code], &objects[code..links], &objects[links..]],
+                        );
+                    });
+                }
                 groups(
                     ui,
                     &[
-                        &[
-                            Command::NewSqlWindow,
-                            Command::OpenFile,
-                            Command::SaveFile,
-                            Command::SaveFileAs,
-                        ],
+                        &[Command::OpenFile, Command::SaveFile, Command::SaveFileAs],
                         &[
                             Command::CloseTab,
                             Command::CloseOtherTabs,
@@ -3407,6 +3589,7 @@ impl PythiaApp {
                 text: "There are sessions with uncommitted changes. Exiting rolls them back."
                     .into(),
                 yes: "Exit and roll back",
+                other: None,
             });
         }
     }
@@ -3587,11 +3770,18 @@ impl PythiaApp {
             }
         }
         if let Some(confirm) = &self.confirm
-            && let Some(yes) = confirm_ui(ctx, confirm)
+            && let Some(answer) = confirm_ui(ctx, confirm)
         {
             let action = confirm.action.clone();
             self.confirm = None;
-            if yes {
+            if let ConfirmAction::CloseWindows(ids) = &action
+                && answer != Answer::Cancel
+            {
+                for &id in ids {
+                    self.conns.end_doc(id, answer == Answer::Yes);
+                    self.remove_window(id);
+                }
+            } else if answer == Answer::Yes {
                 match action {
                     ConfirmAction::Commit => self.end_transaction(true),
                     ConfirmAction::Execute { doc, current_only } => {
@@ -3603,6 +3793,7 @@ impl PythiaApp {
                         self.quit_confirmed = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+                    ConfirmAction::CloseWindows(_) => {}
                 }
             }
         }
@@ -3750,6 +3941,7 @@ impl eframe::App for PythiaApp {
             effects: Vec::new(),
             browser_effects: Effects::default(),
             closed: Vec::new(),
+            close_asked: Vec::new(),
             rebind: Vec::new(),
             pending_tx: &pending_tx,
         };
@@ -3766,6 +3958,7 @@ impl eframe::App for PythiaApp {
             browser_effects,
             project_actions,
             closed,
+            close_asked,
             rebind,
             debug_actions,
             assistant_actions,
@@ -3778,6 +3971,9 @@ impl eframe::App for PythiaApp {
         }
         for id in closed {
             self.close_doc(id);
+        }
+        if !close_asked.is_empty() {
+            self.close_windows(close_asked);
         }
         for (id, effects) in effects {
             self.apply(Some(id), effects);
@@ -3924,6 +4120,14 @@ impl PythiaApp {
         match self.docs.get_mut(&id).map(|d| &mut d.kind) {
             Some(DocKind::ObjectEditor(e)) => e,
             _ => panic!("not an object editor"),
+        }
+    }
+
+    pub fn test_table_editor(&mut self) -> &mut crate::table_editor::TableEditor {
+        let id = self.focused.expect("focused document");
+        match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+            Some(DocKind::TableEditor(e)) => e,
+            _ => panic!("not a table editor"),
         }
     }
 
@@ -4276,6 +4480,9 @@ struct Viewer<'a> {
     effects: Vec<(DocId, Effects)>,
     browser_effects: Effects,
     closed: Vec<DocId>,
+    /// Closed tabs with an open transaction: they stay until the user
+    /// says whether to commit or roll back.
+    close_asked: Vec<DocId>,
     /// Documents moved to another connection.
     rebind: Vec<(DocId, String)>,
     /// Documents whose session has a pending transaction.
@@ -4427,6 +4634,11 @@ impl TabViewer for Viewer<'_> {
 
     fn on_close(&mut self, tab: &mut Tab) -> egui_dock::widgets::tab_viewer::OnCloseResponse {
         if let Tab::Doc(id) = tab {
+            if self.pending_tx.contains(id) {
+                // Asked first: commit, roll back or keep it.
+                self.close_asked.push(*id);
+                return egui_dock::widgets::tab_viewer::OnCloseResponse::Ignore;
+            }
             self.closed.push(*id);
         }
         egui_dock::widgets::tab_viewer::OnCloseResponse::Close

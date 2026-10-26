@@ -43,7 +43,11 @@ pub struct ObjectRef {
 }
 
 impl ObjectRef {
+    /// `owner.name`, or just the name of a user or role (no owner).
     pub fn qualified(&self) -> String {
+        if self.owner.is_empty() {
+            return quote_ident(&self.name);
+        }
         format!("{}.{}", quote_ident(&self.owner), quote_ident(&self.name))
     }
 }
@@ -87,6 +91,12 @@ pub struct Effects {
     pub references: Option<Vec<Reference>>,
     /// Requests for the AI assistant (e.g. slow SQL in the monitor).
     pub ai: Vec<crate::ai::AiRequest>,
+    /// An object was created or changed: the object browser shows it as
+    /// it is now.
+    pub changed: Option<ObjectRef>,
+    /// The document is done (e.g. a form that handed over to another
+    /// window) and closes.
+    pub close: bool,
 }
 
 /// A found reference in a document.
@@ -148,6 +158,8 @@ impl Effects {
         self.invalid_changed |= other.invalid_changed;
         self.references = other.references.or(self.references.take());
         self.ai.extend(other.ai);
+        self.changed = other.changed.or(self.changed.take());
+        self.close |= other.close;
     }
 }
 
@@ -177,10 +189,24 @@ pub enum OpenRequest {
         connection: String,
         target: crate::object_editor::EditTarget,
     },
-    /// Edit a table's structure.
+    /// Edit a table's structure, starting on a tab.
     EditTable {
         connection: String,
         object: ObjectRef,
+        tab: crate::table_editor::TableTab,
+    },
+    /// Build a new table in `owner`, empty or as a copy of `like`.
+    NewTable {
+        connection: String,
+        owner: String,
+        like: Option<ObjectRef>,
+    },
+    /// A new program unit, not compiled yet: a program window with these
+    /// sources (spec first).
+    NewProgram {
+        connection: String,
+        object: ObjectRef,
+        sources: Vec<String>,
     },
     /// Open a program window and put the cursor on a 1-based line.
     ProgramAt {

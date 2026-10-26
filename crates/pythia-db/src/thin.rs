@@ -1,16 +1,15 @@
-//! A stand-in for the `oracle` crate (ODPI-C, which needs the Instant
-//! Client) on top of the pure-Rust `oracledb` driver, for the spike in #13.
-//! It has the part of the `oracle` API Pythia uses, under the same names, so
-//! the workspace builds unchanged with `--features pythia-db/thin`.
+//! The `oracle` crate's API (as far as Pythia uses it) on top of the
+//! pure-Rust `oracledb` driver, so no Oracle client libraries are needed
+//! (#13). The rest of the workspace uses it as `pythia_db::oracle`; with
+//! `--features pythia-db/thick` that is the `oracle` crate (ODPI-C) instead.
 //!
-//! Known gaps (see #13): cancel (`break_execution`) isn't possible, no
-//! external authentication or proxy logins (#23), LOB columns are typed
-//! LONG, values with a time zone region make the driver panic (caught here
-//! and shown as an error), and batch errors are found row by row.
+//! Known gaps: no external authentication (OS or wallet), no Native Network
+//! Encryption, no 11.2, and LOB columns are typed LONG.
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use oracledb::{
@@ -134,6 +133,8 @@ impl From<oracledb::Error> for Error {
     }
 }
 
+const CANCELLED: &str = "ORA-01013: user requested cancel of current operation";
+
 fn unsupported(what: &str) -> Error {
     Error::new(
         ErrorKind::NotSupported,
@@ -190,9 +191,16 @@ impl Connector {
                 "External authentication (OS or wallet, `/@alias`)",
             ));
         }
-        let mut config = oracledb::Config::default()
-            .set_credentials(&self.user, &self.password)
-            .set_connect_string(&self.connect_string)?;
+        let mut config = oracledb::Config::default().set_credentials(&self.user, &self.password);
+        // Aliases from the tnsnames.ora the connect dialog offers them from
+        // (the driver itself only looks at TNS_ADMIN and ORACLE_HOME).
+        if let Some(dir) = pythia_config::tns::admin_dirs()
+            .into_iter()
+            .find(|d| d.join("tnsnames.ora").exists())
+        {
+            config = config.set_config_dir(&dir.to_string_lossy());
+        }
+        let mut config = config.set_connect_string(&self.connect_string)?;
         if let Some(privilege) = self.privilege {
             config = config.set_auth_mode(match privilege {
                 Privilege::Sysdba => oracledb::AUTH_MODE_SYSDBA,
@@ -215,6 +223,7 @@ impl Connector {
             inner,
             ltz_offset,
             banner: OnceLock::new(),
+            cancelled: Arc::default(),
         })
     }
 }
@@ -224,6 +233,8 @@ pub struct Connection {
     /// The session time zone's offset in minutes, for TSLTZ values.
     ltz_offset: i32,
     banner: OnceLock<String>,
+    /// Set by break_execution(); the open result set stops at its next row.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Connection {
@@ -320,10 +331,13 @@ impl Connection {
         Ok(self.inner.rollback()?)
     }
 
-    /// Not possible with the thin driver (oracle/rust-oracledb#24): a call
-    /// can't be interrupted from another thread.
+    /// Interrupts the call this connection is making on another thread: it
+    /// fails with ORA-01013 (our oracledb fork's Connection::cancel()). A
+    /// query whose rows are being read between fetches fails at its next
+    /// row, as with the Instant Client, whose break fails the next fetch.
     pub fn break_execution(&self) -> Result<()> {
-        Err(unsupported("Cancelling a running statement"))
+        self.cancelled.store(true, Ordering::Relaxed);
+        Ok(self.inner.cancel()?)
     }
 
     pub fn set_module(&self, module: &str) -> Result<()> {
@@ -360,28 +374,6 @@ impl Connection {
             }
         };
         Ok((version, banner))
-    }
-
-    /// Runs DDL whose text the driver would take for having bind variables
-    /// (`:new` in a trigger, oracle/rust-oracledb#33) as dynamic SQL, where
-    /// the text is a value. Compile errors (ORA-24344) are success, as when
-    /// the statement runs directly.
-    fn execute_ddl_text(&self, sql: &str) -> Result<()> {
-        let text = sql.to_owned();
-        match self
-            .inner
-            .execute("begin execute immediate :1; end;", &[&text])
-        {
-            Err(e) => {
-                let e = Error::from(e);
-                if e.db.as_ref().is_some_and(|d| d.code == 24344) {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            }
-            Ok(_) => Ok(()),
-        }
     }
 }
 
@@ -503,41 +495,12 @@ impl<'conn> StatementBuilder<'conn> {
     }
 }
 
-/// The driver doesn't take a statement that starts with a `--` comment for
-/// what it is (a query isn't one; the server answers ORA-00900). Leading
-/// comments become spaces, byte for byte, so error offsets still match.
-fn blank_leading_comments(sql: &str) -> std::borrow::Cow<'_, str> {
-    let mut end = 0;
-    let mut line_comment = false;
-    for token in pythia_plsql::tokenize(sql) {
-        if !token.kind.is_trivia() {
-            break;
-        }
-        line_comment |= sql[token.span.clone()].starts_with("--");
-        end = token.span.end;
-    }
-    if !line_comment {
-        return std::borrow::Cow::Borrowed(sql);
-    }
-    let mut blanked = String::with_capacity(sql.len());
-    for c in sql[..end].chars() {
-        if c == '\n' || c == '\r' {
-            blanked.push(c);
-        } else {
-            blanked.extend(std::iter::repeat_n(' ', c.len_utf8()));
-        }
-    }
-    blanked.push_str(&sql[end..]);
-    std::borrow::Cow::Owned(blanked)
-}
-
 fn prepare(
     conn: &Connection,
     sql: &str,
     fetch_array_size: Option<u32>,
 ) -> Result<oracledb::Statement> {
-    let sql = blank_leading_comments(sql);
-    let mut builder = conn.inner.statement(&sql)?;
+    let mut builder = conn.inner.statement(sql)?;
     if let Some(size) = fetch_array_size {
         builder = builder.fetch_array_size(size);
     }
@@ -601,11 +564,6 @@ impl Statement<'_> {
         Ok(self.row_count)
     }
 
-    /// DDL the driver thinks has binds while none are given.
-    fn ddl_with_colons(&self, given: usize) -> bool {
-        given == 0 && self.is_ddl && !self.bind_names.is_empty()
-    }
-
     /// Positional values as named ones, if there's one per unique name: the
     /// Instant Client binds positions to unique names, while the thin
     /// driver wants a value for each occurrence of a repeated placeholder in
@@ -627,10 +585,6 @@ impl Statement<'_> {
             // OUT binds keep their positions: the names are in that order.
             return self.execute_named(&named);
         }
-        if self.ddl_with_colons(params.len()) {
-            self.row_count = 0;
-            return self.conn.execute_ddl_text(&self.sql);
-        }
         let binds: Vec<Bind> = params.iter().map(|p| p.to_bind()).collect();
         let values: Vec<&dyn ToDbValue> = binds.iter().map(Bind::as_db).collect();
         let mut result = self.inner()?.execute(&values)?;
@@ -640,10 +594,6 @@ impl Statement<'_> {
     }
 
     pub fn execute_named(&mut self, params: &[(&str, &dyn ToSql)]) -> Result<()> {
-        if self.ddl_with_colons(params.len()) {
-            self.row_count = 0;
-            return self.conn.execute_ddl_text(&self.sql);
-        }
         let binds: Vec<Bind> = params.iter().map(|(_, p)| p.to_bind()).collect();
         let values: Vec<(&str, &dyn ToDbValue)> = params
             .iter()
@@ -706,8 +656,9 @@ impl Statement<'_> {
         }
         let binds: Vec<Bind> = params.iter().map(|p| p.to_bind()).collect();
         let values: Vec<&dyn ToDbValue> = binds.iter().map(Bind::as_db).collect();
+        self.conn.cancelled.store(false, Ordering::Relaxed);
         let cursor = self.take_inner()?.query(&values)?;
-        Ok(ResultSet::new(cursor, self.conn.ltz_offset))
+        Ok(ResultSet::new(cursor, self.conn))
     }
 
     pub fn query_named(
@@ -720,8 +671,9 @@ impl Statement<'_> {
             .zip(&binds)
             .map(|((n, _), b)| (*n, b.as_db()))
             .collect();
+        self.conn.cancelled.store(false, Ordering::Relaxed);
         let cursor = self.take_inner()?.query_named(&values)?;
-        Ok(ResultSet::new(cursor, self.conn.ltz_offset))
+        Ok(ResultSet::new(cursor, self.conn))
     }
 }
 
@@ -776,7 +728,7 @@ impl<'conn> BatchBuilder<'conn> {
     pub fn build(&self) -> Result<Batch<'conn>> {
         Ok(Batch {
             conn: self.conn,
-            sql: blank_leading_comments(&self.sql).into_owned(),
+            sql: self.sql.clone(),
             max_batch_size: self.max_batch_size,
             batch_errors: self.batch_errors,
             rows: Vec::new(),
@@ -801,39 +753,40 @@ impl Batch<'_> {
         Ok(())
     }
 
-    /// Runs the rows appended so far. With batch errors, rows run one by one
-    /// (the driver doesn't report batch errors yet, oracle/rust-oracledb#41)
-    /// and the failed ones are returned as [`Error::batch_errors`].
+    /// Runs the rows appended so far, in one round trip. With batch errors,
+    /// the failed rows are returned as [`Error::batch_errors`].
     pub fn execute(&mut self) -> Result<()> {
         let rows = std::mem::take(&mut self.rows);
         if rows.is_empty() {
             return Ok(());
         }
+        let values: Vec<Vec<&dyn ToDbValue>> = rows
+            .iter()
+            .map(|r| r.iter().map(Bind::as_db).collect())
+            .collect();
+        let slices: Vec<&[&dyn ToDbValue]> = values.iter().map(Vec::as_slice).collect();
         if !self.batch_errors {
-            let values: Vec<Vec<&dyn ToDbValue>> = rows
-                .iter()
-                .map(|r| r.iter().map(Bind::as_db).collect())
-                .collect();
-            let slices: Vec<&[&dyn ToDbValue]> = values.iter().map(Vec::as_slice).collect();
             self.conn
                 .inner
                 .execute_batch(&self.sql, slices.as_slice())?;
             return Ok(());
         }
-        let mut errors = Vec::new();
-        for (i, row) in rows.iter().enumerate() {
-            let values: Vec<&dyn ToDbValue> = row.iter().map(Bind::as_db).collect();
-            if let Err(e) = self.conn.inner.execute(&self.sql, &values) {
-                let e = Error::from(e);
-                match e.db {
-                    Some(mut db) => {
-                        db.offset = i as u32;
-                        errors.push(db);
-                    }
-                    None => return Err(e),
-                }
-            }
-        }
+        let mut statement = self
+            .conn
+            .inner
+            .statement(&self.sql)?
+            .batch_errors()
+            .build()?;
+        let result = statement.execute_batch(slices.as_slice().into())?;
+        let errors: Vec<DbError> = result
+            .batch_errors()
+            .iter()
+            .map(|e| DbError {
+                code: e.code() as i32,
+                offset: e.offset() as u32,
+                message: e.message().to_owned(),
+            })
+            .collect();
         if errors.is_empty() {
             Ok(())
         } else {
@@ -903,13 +856,11 @@ impl ToSql for String {
     }
 }
 
-// As text: 26.0.0-beta.4 encodes integers ending in 00 wrongly (ORA-03089,
-// oracle/rust-oracledb#37, fixed after beta.4); the database converts.
 macro_rules! int_to_sql {
     ($($t:ty),*) => {$(
         impl ToSql for $t {
             fn to_bind(&self) -> Bind {
-                Bind::Text(Some(self.to_string()))
+                Bind::Int(Some(*self as i64))
             }
             fn null() -> Bind {
                 Bind::Int(None)
@@ -1253,14 +1204,8 @@ fn decode(row: &oracledb::Row, i: usize, m: &Metadata, ltz: i32) -> Result<Value
         } else {
             TsKind::Plain
         };
-        // A time zone region makes the driver panic (oracle/rust-oracledb#42).
-        let read = catch_unwind(AssertUnwindSafe(|| row.get::<Option<OracleTimestamp>>(i)));
-        match read {
-            Ok(v) => v?.map(|ts| Value::Timestamp(ts, kind, scale)),
-            Err(_) => Some(Value::Text(
-                "<time zone region: needs the Instant Client>".into(),
-            )),
-        }
+        row.get::<Option<OracleTimestamp>>(i)?
+            .map(|ts| Value::Timestamp(ts, kind, scale))
     } else if t == DB_TYPE_INTERVAL_DS {
         row.get::<Option<OracleIntervalDS>>(i)?
             .map(|v| Value::IntervalDS(v, i32::from(m.precision()), i32::from(m.scale())))
@@ -1435,11 +1380,12 @@ pub struct ResultSet<'a, T> {
     meta: Arc<Vec<Metadata>>,
     columns: Arc<Vec<ColumnInfo>>,
     ltz: i32,
+    cancelled: Arc<AtomicBool>,
     _row: PhantomData<(&'a (), T)>,
 }
 
 impl ResultSet<'static, Row> {
-    fn new(cursor: oracledb::Cursor, ltz: i32) -> Self {
+    fn new(cursor: oracledb::Cursor, conn: &Connection) -> Self {
         let meta: Vec<Metadata> = cursor.columns().to_vec();
         let columns = meta
             .iter()
@@ -1453,7 +1399,8 @@ impl ResultSet<'static, Row> {
             cursor,
             meta: Arc::new(meta),
             columns: Arc::new(columns),
-            ltz,
+            ltz: conn.ltz_offset,
+            cancelled: conn.cancelled.clone(),
             _row: PhantomData,
         }
     }
@@ -1464,6 +1411,7 @@ impl ResultSet<'static, Row> {
             meta: self.meta,
             columns: self.columns,
             ltz: self.ltz,
+            cancelled: self.cancelled,
             _row: PhantomData,
         }
     }
@@ -1479,6 +1427,18 @@ impl<T: RowValue> Iterator for ResultSet<'_, T> {
     type Item = Result<T>;
 
     fn next(&mut self) -> Option<Result<T>> {
+        if self.cancelled.swap(false, Ordering::Relaxed) {
+            return Some(Err(Error {
+                kind: ErrorKind::OciError,
+                message: CANCELLED.to_owned(),
+                db: Some(DbError {
+                    code: 1013,
+                    offset: 0,
+                    message: CANCELLED.to_owned(),
+                }),
+                batch: None,
+            }));
+        }
         let next = catch_unwind(AssertUnwindSafe(|| self.cursor.next()));
         let row = match next {
             Ok(row) => row?,
@@ -1506,12 +1466,18 @@ impl<T: RowValue> Iterator for ResultSet<'_, T> {
 
 // ----- formats -----------------------------------------------------------
 
-/// `YYYY-MM-DD HH24:MI:SS[.FF][ +TZH:TZM]`, local time. The driver hands over
-/// TIMESTAMP WITH TIME ZONE values as UTC fields with the value's offset
-/// (oracle/rust-oracledb, see #25), so the offset is added here.
+/// `YYYY-MM-DD HH24:MI:SS[.FF][ +TZH:TZM| TZR]`, local time: a TIMESTAMP
+/// WITH TIME ZONE value in its own time zone (its region's name if it has
+/// one), a TIMESTAMP WITH LOCAL TIME ZONE value, which the driver hands over
+/// in UTC, in the session's.
 fn timestamp(ts: &OracleTimestamp, kind: TsKind, scale: u8) -> String {
     let offset = match kind {
         TsKind::Tz => i32::from(ts.tz_hour_offset()) * 60 + i32::from(ts.tz_minute_offset()),
+        TsKind::Ltz(minutes) => minutes,
+        _ => 0,
+    };
+    // Only LTZ values are moved; TZ values arrive in their own time zone.
+    let shift = match kind {
         TsKind::Ltz(minutes) => minutes,
         _ => 0,
     };
@@ -1521,7 +1487,7 @@ fn timestamp(ts: &OracleTimestamp, kind: TsKind, scale: u8) -> String {
         u32::from(ts.day()),
     );
     let minutes =
-        (days * 24 + i64::from(ts.hour())) * 60 + i64::from(ts.minute()) + i64::from(offset);
+        (days * 24 + i64::from(ts.hour())) * 60 + i64::from(ts.minute()) + i64::from(shift);
     let (days, minute_of_day) = (minutes.div_euclid(1440), minutes.rem_euclid(1440));
     let (y, m, d) = civil_from_days(days);
     let mut out = format!(
@@ -1535,7 +1501,10 @@ fn timestamp(ts: &OracleTimestamp, kind: TsKind, scale: u8) -> String {
         out.push('.');
         out.push_str(&fraction[..usize::from(scale.min(9))]);
     }
-    if matches!(kind, TsKind::Tz | TsKind::Ltz(_)) {
+    if let (TsKind::Tz, Some(region)) = (kind, ts.tz_region()) {
+        out.push(' ');
+        out.push_str(region);
+    } else if matches!(kind, TsKind::Tz | TsKind::Ltz(_)) {
         let sign = if offset < 0 { '-' } else { '+' };
         out.push_str(&format!(
             " {sign}{:02}:{:02}",
@@ -1693,25 +1662,6 @@ mod tests {
     }
 
     #[test]
-    fn leading_line_comments_are_blanked() {
-        assert_eq!(
-            blank_leading_comments("select 1 from dual -- c"),
-            "select 1 from dual -- c"
-        );
-        assert_eq!(
-            blank_leading_comments("/* c */ select 1"),
-            "/* c */ select 1"
-        );
-        let sql = "-- Käse\n  select 1 from dual -- x";
-        let blanked = blank_leading_comments(sql);
-        assert_eq!(blanked.len(), sql.len(), "offsets stay");
-        assert_eq!(
-            blanked,
-            format!("{}\n  select 1 from dual -- x", " ".repeat("-- Käse".len()))
-        );
-    }
-
-    #[test]
     fn statement_types() {
         assert_eq!(
             StatementType::of("  -- x\n select 1 from dual"),
@@ -1729,5 +1679,78 @@ mod tests {
             StatementType::of("with a as (select 1 from dual) select * from a"),
             StatementType::Select
         );
+    }
+
+    fn connect() -> Option<Connection> {
+        let Some((cred, db)) = std::env::var("PYTHIA_TEST_DB").ok().and_then(|s| {
+            s.rsplit_once('@')
+                .map(|(c, d)| (c.to_owned(), d.to_owned()))
+        }) else {
+            eprintln!("PYTHIA_TEST_DB not set, skipping");
+            return None;
+        };
+        let (user, pw) = cred.split_once('/').unwrap();
+        Some(Connection::connect(user, pw, db).unwrap())
+    }
+
+    /// A break while a query's rows are read between fetches stops it at
+    /// the next row; a break while idle doesn't stop the next query.
+    #[test]
+    fn break_stops_reading_rows() {
+        let Some(conn) = connect() else {
+            return;
+        };
+        let sql = "select level from dual connect by level <= 100000";
+        let mut rows = conn.query_as::<i64>(sql, &[]).unwrap();
+        assert_eq!(rows.next().unwrap().unwrap(), 1);
+        conn.break_execution().unwrap();
+        let err = rows.next().unwrap().unwrap_err();
+        assert_eq!(err.db_error().map(DbError::code), Some(1013), "{err}");
+        drop(rows);
+
+        conn.break_execution().unwrap();
+        let n = conn.query_as::<i64>(sql, &[]).unwrap().count();
+        assert_eq!(n, 100_000);
+        assert_eq!(
+            conn.query_row_as::<i64>("select 1 from dual", &[]).unwrap(),
+            1
+        );
+    }
+
+    /// TIMESTAMP WITH TIME ZONE values show in their own time zone, a
+    /// region's name or the offset, and that text reads back as the value.
+    #[test]
+    fn time_zones() {
+        let Some(conn) = connect() else {
+            return;
+        };
+        let row = conn
+            .query_row(
+                "select from_tz(timestamp '2026-07-01 12:00:00', 'Europe/Zurich'), \
+                        timestamp '2026-01-01 01:30:00 +05:30', \
+                        timestamp '2025-12-31 22:00:00 -03:30' \
+                   from dual",
+                &[],
+            )
+            .unwrap();
+        for (i, (start, end)) in [
+            ("2026-07-01 12:00:00", " Europe/Zurich"),
+            ("2026-01-01 01:30:00", " +05:30"),
+            ("2025-12-31 22:00:00", " -03:30"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let text: String = row.get(i).unwrap();
+            assert!(text.starts_with(start) && text.ends_with(end), "{text}");
+            let back = conn
+                .query_row_as::<String>(
+                    "select to_char(to_timestamp_tz(:1, 'YYYY-MM-DD HH24:MI:SS.FF TZR'), \
+                            'YYYY-MM-DD HH24:MI:SS TZR') from dual",
+                    &[&text],
+                )
+                .unwrap();
+            assert_eq!(back.to_lowercase(), format!("{start}{end}").to_lowercase());
+        }
     }
 }

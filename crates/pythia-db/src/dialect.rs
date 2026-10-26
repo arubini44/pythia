@@ -51,6 +51,8 @@ pub enum Feature {
     Completion,
     /// Indexes, constraints and triggers below a table in the object browser.
     TableParts,
+    /// Users, roles, profiles and directories in the object browser.
+    Accounts,
     /// Dictionary lookups for the AI assistant.
     AiLookups,
     /// Comparing project files with the stored objects, and exporting a

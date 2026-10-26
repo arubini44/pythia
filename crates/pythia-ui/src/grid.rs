@@ -4,7 +4,8 @@
 //! millions of fetched rows stays cheap. Supports client-side sorting,
 //! rectangular selection with mouse and keyboard, copy (plain, with header or
 //! in any export format), aggregates of the selection, a transposed record
-//! view and a viewer for long values.
+//! view and a viewer for long values. Columns can be resized, hidden,
+//! reordered by dragging their header, and frozen at the left.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,8 +41,52 @@ pub struct GridState {
     follow: Option<(usize, usize)>,
     /// Columns hidden by the user; left out of copies and exports too.
     pub hidden: BTreeSet<usize>,
+    /// The columns in the order shown (hidden ones included); empty: as
+    /// queried.
+    column_order: Vec<usize>,
+    /// Leading shown columns that stay in place when the others scroll
+    /// sideways.
+    frozen: usize,
+    /// Column widths as last drawn (or dragged), by column.
+    widths: std::collections::HashMap<usize, f32>,
+    /// The tables drop their stored widths next frame and take `widths`
+    /// (after columns moved, were shown, hidden or frozen).
+    relayout: bool,
+    /// The widths were fitted with rows to measure (not just the headers).
+    fitted_to_rows: bool,
+    /// Vertical scroll shared by the frozen and the scrolling part.
+    scroll_y: f32,
+    /// The frozen part was scrolled: the other one follows next frame.
+    follow_y: Option<f32>,
+    /// Width of the frozen part as laid out last frame.
+    frozen_width: Option<f32>,
     /// Cell edited in the dialog (long text, dates).
     value_editor: Option<ValueEditor>,
+}
+
+/// A header being dragged to another place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ColumnDrag {
+    grid: egui::Id,
+    col: usize,
+}
+
+/// A change to the columns chosen in the header or its menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnAction {
+    Hide(usize),
+    Show(usize),
+    ShowAll,
+    /// Move a column next to another one.
+    Move {
+        col: usize,
+        to: usize,
+        after: bool,
+    },
+    /// Keep this many shown columns in place.
+    Freeze(usize),
+    ResetOrder,
+    ResetWidths,
 }
 
 struct ValueEditor {
@@ -128,9 +173,71 @@ impl GridState {
         self.follow.take()
     }
 
+    /// All column indices in the order shown, hidden ones included.
+    pub fn column_order(&self, count: usize) -> Vec<usize> {
+        let mut seen = vec![false; count];
+        let valid = self.column_order.len() == count
+            && self
+                .column_order
+                .iter()
+                .all(|&c| c < count && !std::mem::replace(&mut seen[c], true));
+        if valid {
+            self.column_order.clone()
+        } else {
+            (0..count).collect()
+        }
+    }
+
     /// Column indices shown, in order.
     pub fn visible_columns(&self, count: usize) -> Vec<usize> {
-        (0..count).filter(|c| !self.hidden.contains(c)).collect()
+        self.column_order(count)
+            .into_iter()
+            .filter(|c| !self.hidden.contains(c))
+            .collect()
+    }
+
+    /// Shown columns that stay in place when scrolling sideways (at least
+    /// one column always scrolls).
+    pub fn frozen_columns(&self, count: usize) -> usize {
+        self.frozen
+            .min(self.visible_columns(count).len().saturating_sub(1))
+    }
+
+    /// Moves a column before (or after) another one.
+    fn move_column(&mut self, count: usize, col: usize, to: usize, after: bool) {
+        if col == to || col >= count || to >= count {
+            return;
+        }
+        let mut order = self.column_order(count);
+        order.retain(|&c| c != col);
+        let at = order.iter().position(|&c| c == to).unwrap_or(order.len());
+        order.insert(at + usize::from(after), col);
+        self.column_order = order;
+    }
+
+    fn column_action(&mut self, count: usize, action: ColumnAction) {
+        match action {
+            ColumnAction::Hide(c) => {
+                // At least one column stays.
+                if self.visible_columns(count).len() > 1 {
+                    self.hidden.insert(c);
+                }
+            }
+            ColumnAction::Show(c) => {
+                self.hidden.remove(&c);
+            }
+            ColumnAction::ShowAll => self.hidden.clear(),
+            ColumnAction::Move { col, to, after } => self.move_column(count, col, to, after),
+            ColumnAction::Freeze(n) => {
+                self.frozen = n;
+                self.frozen_width = None;
+            }
+            ColumnAction::ResetOrder => self.column_order.clear(),
+            ColumnAction::ResetWidths => {
+                self.widths.clear();
+                self.frozen_width = None;
+            }
+        }
     }
 
     /// Fetched rows passing the filter.
@@ -184,14 +291,22 @@ impl GridState {
         self.sync(rows, columns);
     }
 
-    fn selection(&self) -> Option<(RangeInclusive<usize>, RangeInclusive<usize>)> {
+    /// The selected rows (view order) and columns (in the order shown,
+    /// between the anchor's and the cursor's).
+    fn selection(&self, count: usize) -> Option<(RangeInclusive<usize>, Vec<usize>)> {
         let (ar, ac) = self.anchor?;
         let (cr, cc) = self.cursor.unwrap_or((ar, ac));
-        Some((ar.min(cr)..=ar.max(cr), ac.min(cc)..=ac.max(cc)))
+        let visible = self.visible_columns(count);
+        let position = |c: usize| visible.iter().position(|&v| v == c);
+        let (pa, pc) = (position(ac)?, position(cc)?);
+        Some((
+            ar.min(cr)..=ar.max(cr),
+            visible[pa.min(pc)..=pa.max(pc)].to_vec(),
+        ))
     }
 
-    fn is_selected(&self, row: usize, col: usize) -> bool {
-        self.selection()
+    fn is_selected(&self, count: usize, row: usize, col: usize) -> bool {
+        self.selection(count)
             .is_some_and(|(r, c)| r.contains(&row) && c.contains(&col))
     }
 
@@ -332,10 +447,15 @@ impl GridState {
 
     fn insert_row(&mut self, columns: usize) {
         let len = self.order.len();
+        let visible = self.visible_columns(columns);
         if let Some(edit) = &mut self.edit {
             edit.changes.inserts.push(vec![None; columns]);
             let row = len + edit.changes.inserts.len() - 1;
-            let col = usize::from(edit.locked == Some(0));
+            let col = visible
+                .iter()
+                .copied()
+                .find(|&c| Some(c) != edit.locked)
+                .unwrap_or(0);
             self.anchor = Some((row, col));
             self.cursor = Some((row, col));
             self.scroll_to_cursor = true;
@@ -343,8 +463,8 @@ impl GridState {
     }
 
     /// Toggles deletion of the selected rows (new rows are removed).
-    fn delete_rows(&mut self) {
-        let Some((rows, _)) = self.selection() else {
+    fn delete_rows(&mut self, columns: usize) {
+        let Some((rows, _)) = self.selection(columns) else {
             return;
         };
         let refs: Vec<RowRef> = rows.map(|r| self.row_ref(r)).collect();
@@ -367,12 +487,12 @@ impl GridState {
         }
     }
 
-    fn set_null(&mut self, rows: &[Vec<Cell>]) {
-        let Some((r, c)) = self.selection() else {
+    fn set_null(&mut self, rows: &[Vec<Cell>], columns: usize) {
+        let Some((r, c)) = self.selection(columns) else {
             return;
         };
         for row in r {
-            for col in c.clone() {
+            for &col in &c {
                 self.set_value(rows, row, col, None);
             }
         }
@@ -385,15 +505,17 @@ impl GridState {
             return;
         };
         self.sync(rows, &[]);
-        let targets: Vec<usize> = self
-            .visible_columns(columns)
-            .into_iter()
-            .filter(|&c| Some(c) != locked)
-            .collect();
+        let visible = self.visible_columns(columns);
         let (r0, c0) = self
             .cursor
-            .unwrap_or((0, targets.first().copied().unwrap_or(0)));
-        let targets: Vec<usize> = targets.into_iter().filter(|&c| c >= c0).collect();
+            .unwrap_or((0, visible.first().copied().unwrap_or(0)));
+        // From the cursor's column on, in the order shown.
+        let from = visible.iter().position(|&c| c == c0).unwrap_or(0);
+        let targets: Vec<usize> = visible[from..]
+            .iter()
+            .copied()
+            .filter(|&c| Some(c) != locked)
+            .collect();
         let text = text.strip_suffix('\n').unwrap_or(text);
         let text = text.strip_suffix('\r').unwrap_or(text);
         let mut last = None;
@@ -547,17 +669,10 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
         return;
     }
     let (r, c) = state.cursor.unwrap_or((0, first_col));
-    let prev_col = visible
-        .iter()
-        .rev()
-        .find(|&&v| v < c)
-        .copied()
-        .unwrap_or(first_col);
-    let next_col = visible
-        .iter()
-        .find(|&&v| v > c)
-        .copied()
-        .unwrap_or(last_col);
+    // Left and right go by the order shown.
+    let at = visible.iter().position(|&v| v == c).unwrap_or(0);
+    let prev_col = visible[at.saturating_sub(1)];
+    let next_col = visible[(at + 1).min(visible.len() - 1)];
     let page = 20;
     let (mut nr, mut nc) = (r, c);
     let mut extend = false;
@@ -613,7 +728,7 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
         state.start_edit(rows, cell, initial);
     }
     if set_null {
-        state.set_null(rows);
+        state.set_null(rows, columns.len());
     }
     if let Some(text) = paste {
         state.paste(rows, columns.len(), &text);
@@ -621,6 +736,97 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
     if let Some(with_header) = copy {
         ui.ctx()
             .copy_text(selection_text(columns, rows, state, with_header));
+    }
+}
+
+/// Colors and sizes of the table, from the style.
+struct Look {
+    null_color: egui::Color32,
+    selected_bg: egui::Color32,
+    cursor_stroke: egui::Stroke,
+    header_bg: egui::Color32,
+    changed_bg: egui::Color32,
+    inserted_bg: egui::Color32,
+    deleted_bg: egui::Color32,
+    drop_stroke: egui::Stroke,
+    row_height: f32,
+    char_width: f32,
+}
+
+impl Look {
+    fn new(ui: &mut Ui) -> Self {
+        let visuals = ui.visuals().clone();
+        let tint = |c: egui::Color32| c.gamma_multiply(if visuals.dark_mode { 0.22 } else { 0.18 });
+        let mono = egui::TextStyle::Monospace.resolve(ui.style());
+        Self {
+            null_color: visuals.weak_text_color(),
+            selected_bg: visuals.selection.bg_fill,
+            cursor_stroke: egui::Stroke::new(1.5, visuals.hyperlink_color),
+            header_bg: visuals.faint_bg_color,
+            changed_bg: tint(visuals.hyperlink_color),
+            inserted_bg: tint(egui::Color32::from_rgb(0x3f, 0xb9, 0x50)),
+            deleted_bg: tint(visuals.error_fg_color),
+            drop_stroke: egui::Stroke::new(2.0, visuals.selection.stroke.color),
+            row_height: ui.text_style_height(&egui::TextStyle::Monospace) + 6.0,
+            char_width: ui.fonts_mut(|f| f.glyph_width(&mono, '0')),
+        }
+    }
+}
+
+/// What the user did in the table this frame; applied after drawing.
+#[derive(Default)]
+struct Interactions {
+    reached_end: bool,
+    clicked: Option<(usize, usize)>,
+    sort_clicked: Option<usize>,
+    row_clicked: Option<usize>,
+    open_viewer: Option<(usize, usize)>,
+    menu_cell: Option<(usize, usize)>,
+    edit_done: Option<bool>,
+    edit_click: Option<(usize, usize)>,
+    column: Option<ColumnAction>,
+    /// Widths of the columns drawn: (column, width).
+    widths: Vec<(usize, f32)>,
+}
+
+/// What the frozen and the scrolling part of the table draw from.
+struct Draw<'a> {
+    columns: &'a [Column],
+    rows: &'a [Vec<Cell>],
+    id: egui::Id,
+    look: Look,
+    /// Shown columns, in order.
+    visible: Vec<usize>,
+    frozen: usize,
+    selected_rows: Option<RangeInclusive<usize>>,
+    /// By column: part of the selection.
+    selected_cols: Vec<bool>,
+    data_rows: usize,
+    view_len: usize,
+    pointer_down: bool,
+    act: Interactions,
+}
+
+impl Draw<'_> {
+    /// The row numbers' column.
+    fn numbers_width(&self) -> f32 {
+        let digits = self.view_len.max(1).to_string().len();
+        digits as f32 * self.look.char_width + 18.0
+    }
+
+    /// A column's width before the user resized it: its header and the first
+    /// rows' values, within limits.
+    fn initial_width(&self, c: usize) -> f32 {
+        let content = self
+            .rows
+            .iter()
+            .take(200)
+            .filter_map(|r| r.get(c)?.as_deref())
+            .map(|v| v.lines().next().unwrap_or_default().chars().count())
+            .max()
+            .unwrap_or(4);
+        let chars = content.max(self.columns[c].name.chars().count() + 2).max(4) as f32;
+        (chars * self.look.char_width + 16.0).min(self.look.char_width * 48.0)
     }
 }
 
@@ -632,25 +838,6 @@ fn table(
     id: egui::Id,
     focus_id: egui::Id,
 ) -> bool {
-    let mut reached_end = false;
-    let visuals = ui.visuals().clone();
-    let null_color = visuals.weak_text_color();
-    let selected_bg = visuals.selection.bg_fill;
-    let cursor_stroke = egui::Stroke::new(1.5, visuals.hyperlink_color);
-    let header_bg = visuals.faint_bg_color;
-    let row_height = ui.text_style_height(&egui::TextStyle::Monospace) + 6.0;
-    let view_len = state.view_len(rows);
-    let data_rows = state.order.len();
-    let row_digits = view_len.max(1).to_string().len();
-    let tint = |c: egui::Color32| c.gamma_multiply(if visuals.dark_mode { 0.22 } else { 0.18 });
-    let changed_bg = tint(visuals.hyperlink_color);
-    let inserted_bg = tint(egui::Color32::from_rgb(0x3f, 0xb9, 0x50));
-    let deleted_bg = tint(visuals.error_fg_color);
-    let mut edit_done: Option<bool> = None;
-    let mut edit_click = None;
-    let mono = egui::TextStyle::Monospace.resolve(ui.style());
-    let char_width = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
-    let shift = ui.input(|i| i.modifiers.shift);
     let pointer_down = ui.input(|i| i.pointer.primary_down());
     if !pointer_down {
         state.dragging = false;
@@ -661,280 +848,199 @@ fn table(
         .flatten()
         .map(|(r, _)| r);
     state.scroll_to_cursor = false;
-
-    let mut clicked: Option<(usize, usize)> = None;
-    let mut sort_clicked = None;
-    let mut row_clicked = None;
-    let mut open_viewer = None;
-    let mut menu_cell = None;
-    let mut hide_column = None;
-    let mut show_all = false;
-    let visible = state.visible_columns(columns.len());
-    let hidden_count = state.hidden.len();
-
-    egui::ScrollArea::horizontal()
-        .id_salt(id.with("h"))
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            let mut builder = TableBuilder::new(ui)
-                .id_salt(id)
-                .striped(true)
-                .resizable(true)
-                .auto_shrink(false)
-                .sense(Sense::click_and_drag())
-                .cell_layout(Layout::left_to_right(Align::Center))
-                .column(TableColumn::exact(row_digits as f32 * char_width + 18.0));
-            if let Some(row) = scroll_to {
-                builder = builder.scroll_to_row(row, None);
+    let (selected_rows, selected_cols) = match state.selection(columns.len()) {
+        Some((r, cols)) => {
+            let mut selected = vec![false; columns.len()];
+            for c in cols {
+                selected[c] = true;
             }
-            for &c in &visible {
-                let col = &columns[c];
-                // Fit the header and the first rows' values, within limits.
-                let content = rows
-                    .iter()
-                    .take(200)
-                    .filter_map(|r| r.get(c)?.as_deref())
-                    .map(|v| v.lines().next().unwrap_or_default().chars().count())
-                    .max()
-                    .unwrap_or(4);
-                let chars = content.max(col.name.chars().count() + 2).max(4) as f32;
-                let width = (chars * char_width + 16.0).min(char_width * 48.0);
-                builder = builder.column(TableColumn::initial(width).at_least(30.0).clip(true));
-            }
-            builder
-                .header(row_height + 4.0, |mut header| {
-                    header.col(|ui| {
-                        ui.painter().rect_filled(ui.max_rect(), 0.0, header_bg);
-                    });
-                    for &c in &visible {
-                        let col = &columns[c];
-                        header.col(|ui| {
-                            ui.painter().rect_filled(ui.max_rect(), 0.0, header_bg);
-                            let arrow = match state.sort {
-                                Some((s, true)) if s == c => " ▲",
-                                Some((s, false)) if s == c => " ▼",
-                                _ => "",
-                            };
-                            let text = RichText::new(format!("{}{arrow}", col.name)).strong();
-                            let layout = if col.numeric {
-                                Layout::right_to_left(Align::Center)
-                            } else {
-                                Layout::left_to_right(Align::Center)
-                            };
-                            ui.with_layout(layout, |ui| {
-                                let r = ui.add(
-                                    egui::Label::new(text)
-                                        .sense(Sense::click())
-                                        .selectable(false),
-                                );
-                                if r.clicked() {
-                                    sort_clicked = Some(c);
-                                }
-                                r.context_menu(|ui| {
-                                    if ui.button(format!("Hide {}", col.name)).clicked() {
-                                        hide_column = Some(c);
-                                        ui.close();
-                                    }
-                                    if hidden_count > 0
-                                        && ui
-                                            .button(format!(
-                                                "Show all columns ({hidden_count} hidden)"
-                                            ))
-                                            .clicked()
-                                    {
-                                        show_all = true;
-                                        ui.close();
-                                    }
-                                });
-                                r.on_hover_text(format!(
-                                    "{}\nClick to sort, right-click to hide",
-                                    col.type_name
-                                ));
-                            });
-                        });
-                    }
+            (Some(r), selected)
+        }
+        None => (None, vec![false; columns.len()]),
+    };
+    let mut d = Draw {
+        columns,
+        rows,
+        id,
+        look: Look::new(ui),
+        visible: state.visible_columns(columns.len()),
+        frozen: state.frozen_columns(columns.len()),
+        selected_rows,
+        selected_cols,
+        data_rows: state.order.len(),
+        view_len: state.view_len(rows),
+        pointer_down,
+        act: Interactions::default(),
+    };
+    // After columns moved, were shown or frozen: the tables forget their
+    // stored widths and take the ones remembered per column.
+    let mut relayout = std::mem::take(&mut state.relayout);
+    // Columns can show before the first rows arrive: fitted to their
+    // headers only, they are fitted again to the values.
+    if !rows.is_empty() && !state.fitted_to_rows {
+        state.fitted_to_rows = true;
+        state.widths.clear();
+        state.frozen_width = None;
+        relayout = true;
+    }
+
+    if d.frozen == 0 {
+        egui::ScrollArea::horizontal()
+            .id_salt(id.with("h"))
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                let cols = d.visible.clone();
+                let mut builder = table_builder(ui, &d, state, id, &cols, true);
+                if relayout {
+                    builder.reset();
+                }
+                if let Some(row) = scroll_to {
+                    builder = builder.scroll_to_row(row, None);
+                }
+                draw_part(builder, &cols, true, state, &mut d);
+            });
+    } else {
+        let (left, right) = d.visible.split_at(d.frozen);
+        let (left, right) = (left.to_vec(), right.to_vec());
+        let spacing = ui.spacing().item_spacing.x;
+        let width = state
+            .frozen_width
+            .unwrap_or_else(|| {
+                d.numbers_width()
+                    + left
+                        .iter()
+                        .map(|&c| state.widths.get(&c).copied().unwrap_or(d.initial_width(c)))
+                        .sum::<f32>()
+                    + spacing * (left.len() + 1) as f32
+            })
+            .min(ui.available_width() - 60.0)
+            .max(40.0);
+        ui.horizontal_top(|ui| {
+            let height = ui.available_height();
+            let left_y = ui
+                .allocate_ui_with_layout(
+                    egui::vec2(width, height),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.set_min_size(egui::vec2(width, height));
+                        let builder = table_builder(ui, &d, state, id.with("frozen"), &left, true)
+                            .vertical_scroll_offset(state.scroll_y)
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                            );
+                        if relayout {
+                            builder.reset();
+                        }
+                        draw_part(builder, &left, true, state, &mut d)
+                    },
+                )
+                .inner;
+            let edge = ui.min_rect().right();
+            let line = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+            ui.painter()
+                .vline(edge + spacing / 2.0, ui.min_rect().y_range(), line);
+            // Top-down again: header above the rows.
+            let rest = egui::vec2(ui.available_width(), height);
+            let right_y = ui
+                .allocate_ui_with_layout(rest, Layout::top_down(Align::Min), |ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt(id.with("h"))
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            let mut builder = table_builder(ui, &d, state, id, &right, false);
+                            if relayout {
+                                builder.reset();
+                            }
+                            if let Some(y) = state.follow_y.take() {
+                                builder = builder.vertical_scroll_offset(y);
+                            }
+                            if let Some(row) = scroll_to {
+                                builder = builder.scroll_to_row(row, None);
+                            }
+                            draw_part(builder, &right, false, state, &mut d)
+                        })
+                        .inner
                 })
-                .body(|body| {
-                    body.rows(row_height, view_len, |mut row| {
-                        let view_row = row.index();
-                        if view_row + 1 >= data_rows {
-                            reached_end = true;
-                        }
-                        let (_, number) = row.col(|ui| {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new((view_row + 1).to_string())
-                                        .monospace()
-                                        .color(null_color),
-                                );
-                            });
-                        });
-                        if number.clicked() {
-                            row_clicked = Some(view_row);
-                        }
-                        for &c in &visible {
-                            let col = &columns[c];
-                            let selected = state.is_selected(view_row, c);
-                            let is_cursor = state.cursor == Some((view_row, c));
-                            let cell_state = state.cell_state(view_row, c);
-                            let editing_here = state
-                                .edit
-                                .as_ref()
-                                .and_then(|e| e.active.as_ref())
-                                .is_some_and(|(r, ec, _)| *r == view_row && *ec == c);
-                            let value = state.value(rows, view_row, c).map(str::to_owned);
-                            let (_, response) = row.col(|ui| {
-                                let rect = ui.max_rect();
-                                let tint = match cell_state {
-                                    CellState::Changed => Some(changed_bg),
-                                    CellState::Inserted => Some(inserted_bg),
-                                    CellState::Deleted => Some(deleted_bg),
-                                    CellState::Clean => None,
-                                };
-                                if let Some(tint) = tint {
-                                    ui.painter().rect_filled(rect, 0.0, tint);
-                                }
-                                if editing_here
-                                    && let Some(edit) = state.edit.as_mut()
-                                    && let Some((_, _, text)) = edit.active.as_mut()
-                                {
-                                    let r = ui.add(
-                                        egui::TextEdit::singleline(text)
-                                            .font(egui::TextStyle::Monospace)
-                                            .desired_width(f32::INFINITY)
-                                            .margin(egui::Margin::symmetric(2, 0)),
-                                    );
-                                    if std::mem::take(&mut edit.focus_editor) {
-                                        r.request_focus();
-                                    }
-                                    let (enter, escape) = ui.input(|i| {
-                                        (
-                                            i.key_pressed(Key::Enter) || i.key_pressed(Key::Tab),
-                                            i.key_pressed(Key::Escape),
-                                        )
-                                    });
-                                    if escape {
-                                        edit_done = Some(false);
-                                    } else if enter || r.lost_focus() {
-                                        edit_done = Some(true);
-                                    }
-                                    return;
-                                }
-                                if selected {
-                                    ui.painter().rect_filled(rect, 0.0, selected_bg);
-                                }
-                                if is_cursor {
-                                    ui.painter().rect_stroke(
-                                        rect.shrink(1.0),
-                                        2.0,
-                                        cursor_stroke,
-                                        egui::StrokeKind::Inside,
-                                    );
-                                }
-                                let layout = if col.numeric {
-                                    Layout::right_to_left(Align::Center)
-                                } else {
-                                    Layout::left_to_right(Align::Center)
-                                };
-                                let strike = cell_state == CellState::Deleted;
-                                let binary = is_binary(col);
-                                ui.with_layout(layout, |ui| match value.as_deref() {
-                                    Some(text) if binary => {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(binary_summary(text))
-                                                    .monospace()
-                                                    .color(null_color),
-                                            )
-                                            .truncate()
-                                            .selectable(false),
-                                        );
-                                    }
-                                    Some(text) => {
-                                        let first = text.lines().next().unwrap_or_default();
-                                        let more =
-                                            if first.len() < text.len() { " …" } else { "" };
-                                        let mut rich =
-                                            RichText::new(format!("{first}{more}")).monospace();
-                                        if strike {
-                                            rich = rich.strikethrough();
-                                        }
-                                        let label =
-                                            egui::Label::new(rich).truncate().selectable(false);
-                                        ui.add(label);
-                                    }
-                                    _ => {
-                                        ui.label(
-                                            RichText::new("NULL")
-                                                .monospace()
-                                                .italics()
-                                                .color(null_color),
-                                        );
-                                    }
-                                });
-                            });
-                            if response.drag_started() || response.clicked() {
-                                clicked = Some((view_row, c));
-                                state.dragging = response.drag_started();
-                            } else if state.dragging && pointer_down && response.contains_pointer()
-                            {
-                                state.cursor = Some((view_row, c));
-                            }
-                            if response.double_clicked() {
-                                if state.is_editable() {
-                                    edit_click = Some((view_row, c));
-                                } else {
-                                    open_viewer = Some((view_row, c));
-                                }
-                            }
-                            if response.secondary_clicked() {
-                                menu_cell = Some((view_row, c));
-                            }
-                            response.context_menu(|ui| context_menu(ui, columns, rows, state));
-                        }
-                    });
-                });
+                .inner;
+            // Keep both parts at the same row: whichever was scrolled
+            // leads, the other follows next frame.
+            if (left_y - state.scroll_y).abs() > 0.5 {
+                state.scroll_y = left_y;
+                state.follow_y = Some(left_y);
+                ui.ctx().request_repaint();
+            } else if (right_y - state.scroll_y).abs() > 0.5 {
+                state.scroll_y = right_y;
+                ui.ctx().request_repaint();
+            }
         });
+    }
 
-    if let Some(commit) = edit_done {
+    // A header being dragged follows the pointer.
+    if let Some(drag) = egui::DragAndDrop::payload::<ColumnDrag>(ui.ctx())
+        && drag.grid == id
+        && let Some(pos) = ui.ctx().pointer_hover_pos()
+        && let Some(col) = columns.get(drag.col)
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        egui::Area::new(id.with("column-drag"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(pos + egui::vec2(12.0, 4.0))
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(RichText::new(&col.name).strong());
+                });
+            });
+    }
+
+    let act = std::mem::take(&mut d.act);
+    let frozen_cols = d.visible[..d.frozen].to_vec();
+    for (c, w) in &act.widths {
+        state.widths.insert(*c, *w);
+    }
+    if d.frozen > 0 {
+        let spacing = ui.spacing().item_spacing.x;
+        let sum: f32 = frozen_cols.iter().filter_map(|c| state.widths.get(c)).sum();
+        state.frozen_width = Some(d.numbers_width() + sum + spacing * (d.frozen + 1) as f32);
+    }
+    if let Some(commit) = act.edit_done {
         state.finish_edit(rows, commit);
         ui.memory_mut(|m| m.request_focus(focus_id));
     }
-    if let Some(cell) = edit_click {
+    if let Some(cell) = act.edit_click {
         state.start_edit(rows, cell, None);
     }
-    if let Some(c) = hide_column
-        && visible.len() > 1
-    {
-        state.hidden.insert(c);
+    if let Some(action) = act.column {
+        state.column_action(columns.len(), action);
+        state.relayout = true;
+        state.frozen_width = None;
+        ui.ctx().request_repaint();
     }
-    if show_all {
-        state.hidden.clear();
-    }
-    if let Some(c) = sort_clicked {
+    if let Some(c) = act.sort_clicked {
         state.set_sort(c, rows, columns);
     }
-    if let Some(cell) = clicked {
+    let shift = ui.input(|i| i.modifiers.shift);
+    if let Some(cell) = act.clicked {
         state.select(cell, shift);
         ui.memory_mut(|m| m.request_focus(focus_id));
     }
-    if let Some(cell) = menu_cell
-        && !state.is_selected(cell.0, cell.1)
+    if let Some(cell) = act.menu_cell
+        && !state.is_selected(columns.len(), cell.0, cell.1)
     {
         state.select(cell, false);
     }
-    if let Some(row) = row_clicked
-        && !columns.is_empty()
+    if let Some(row) = act.row_clicked
+        && let (Some(&first), Some(&last)) = (d.visible.first(), d.visible.last())
     {
         let anchor_row = match state.anchor {
             Some((r, _)) if shift => r,
             _ => row,
         };
-        state.anchor = Some((anchor_row, 0));
-        state.cursor = Some((row, columns.len() - 1));
+        state.anchor = Some((anchor_row, first));
+        state.cursor = Some((row, last));
         ui.memory_mut(|m| m.request_focus(focus_id));
     }
-    if let Some(cell) = open_viewer {
+    if let Some(cell) = act.open_viewer {
         state.viewer = Some(cell);
     }
     // Arrow keys and Tab stay in the grid while it has focus.
@@ -951,7 +1057,364 @@ fn table(
             );
         }
     });
-    reached_end
+    act.reached_end
+}
+
+/// A table of `cols`, with the row numbers first if `numbers`.
+fn table_builder<'u>(
+    ui: &'u mut Ui,
+    d: &Draw,
+    state: &GridState,
+    id: egui::Id,
+    cols: &[usize],
+    numbers: bool,
+) -> TableBuilder<'u> {
+    let mut builder = TableBuilder::new(ui)
+        .id_salt(id)
+        .striped(true)
+        .resizable(true)
+        .auto_shrink(false)
+        .sense(Sense::click_and_drag())
+        .cell_layout(Layout::left_to_right(Align::Center));
+    if numbers {
+        builder = builder.column(TableColumn::exact(d.numbers_width()));
+    }
+    for &c in cols {
+        let width = state
+            .widths
+            .get(&c)
+            .copied()
+            .unwrap_or_else(|| d.initial_width(c));
+        builder = builder.column(TableColumn::initial(width).at_least(30.0).clip(true));
+    }
+    builder
+}
+
+/// Draws the header and the visible rows of `cols`; returns the vertical
+/// scroll offset.
+fn draw_part(
+    builder: TableBuilder<'_>,
+    cols: &[usize],
+    numbers: bool,
+    state: &mut GridState,
+    d: &mut Draw,
+) -> f32 {
+    let mut widths = Vec::new();
+    let table = builder.header(d.look.row_height + 4.0, |mut header| {
+        if numbers {
+            header.col(|ui| {
+                ui.painter()
+                    .rect_filled(ui.max_rect(), 0.0, d.look.header_bg);
+            });
+        }
+        for &c in cols {
+            header.col(|ui| header_cell(ui, c, state, d));
+        }
+    });
+    let output = table.body(|body| {
+        widths = body.widths().to_vec();
+        body.rows(d.look.row_height, d.view_len, |mut row| {
+            let view_row = row.index();
+            if view_row + 1 >= d.data_rows {
+                d.act.reached_end = true;
+            }
+            if numbers {
+                let (_, number) = row.col(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new((view_row + 1).to_string())
+                                .monospace()
+                                .color(d.look.null_color),
+                        );
+                    });
+                });
+                if number.clicked() {
+                    d.act.row_clicked = Some(view_row);
+                }
+            }
+            for &c in cols {
+                data_cell(&mut row, view_row, c, state, d);
+            }
+        });
+    });
+    let skip = usize::from(numbers);
+    d.act
+        .widths
+        .extend(cols.iter().copied().zip(widths.into_iter().skip(skip)));
+    output.state.offset.y
+}
+
+/// A column's header: click to sort, drag onto another header to move it,
+/// right-click for the column menu.
+fn header_cell(ui: &mut Ui, c: usize, state: &GridState, d: &mut Draw) {
+    let col = &d.columns[c];
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, 0.0, d.look.header_bg);
+    let arrow = match state.sort {
+        Some((s, true)) if s == c => " ▲",
+        Some((s, false)) if s == c => " ▼",
+        _ => "",
+    };
+    let text = RichText::new(format!("{}{arrow}", col.name)).strong();
+    let layout = if col.numeric {
+        Layout::right_to_left(Align::Center)
+    } else {
+        Layout::left_to_right(Align::Center)
+    };
+    ui.with_layout(layout, |ui| {
+        let r = ui.add(
+            egui::Label::new(text)
+                .sense(Sense::click_and_drag())
+                .selectable(false),
+        );
+        if r.clicked() {
+            d.act.sort_clicked = Some(c);
+        }
+        r.dnd_set_drag_payload(ColumnDrag { grid: d.id, col: c });
+        r.context_menu(|ui| {
+            if let Some(action) = header_menu(ui, c, state, d) {
+                d.act.column = Some(action);
+                ui.close();
+            }
+        });
+        r.on_hover_text(format!(
+            "{}\nClick to sort, drag to move, right-click for more",
+            col.type_name
+        ));
+    });
+    // The whole cell takes a dropped header, before or after this one.
+    let zone = ui.interact(rect, d.id.with(("header-drop", c)), Sense::hover());
+    let dragged = zone
+        .dnd_hover_payload::<ColumnDrag>()
+        .filter(|p| p.grid == d.id && p.col != c);
+    if let (Some(_), Some(pos)) = (dragged, ui.ctx().pointer_hover_pos()) {
+        let after = pos.x > rect.center().x;
+        let x = if after { rect.right() } else { rect.left() };
+        ui.painter().vline(x, rect.y_range(), d.look.drop_stroke);
+        if let Some(drop) = zone.dnd_release_payload::<ColumnDrag>()
+            && drop.grid == d.id
+        {
+            d.act.column = Some(ColumnAction::Move {
+                col: drop.col,
+                to: c,
+                after,
+            });
+        }
+    }
+}
+
+/// The menu of a column's header.
+fn header_menu(ui: &mut Ui, c: usize, state: &GridState, d: &Draw) -> Option<ColumnAction> {
+    let count = d.columns.len();
+    let name = &d.columns[c].name;
+    let mut action = None;
+    if ui
+        .add_enabled(
+            d.visible.len() > 1,
+            egui::Button::new(format!("Hide {name}")),
+        )
+        .clicked()
+    {
+        action = Some(ColumnAction::Hide(c));
+    }
+    let position = d.visible.iter().position(|&v| v == c);
+    if let Some(p) = position.filter(|p| p + 1 < d.visible.len()) {
+        let label = if p + 1 == d.frozen {
+            format!("Frozen up to {name}")
+        } else {
+            format!("Freeze up to {name}")
+        };
+        if ui
+            .add_enabled(p + 1 != d.frozen, egui::Button::new(label))
+            .on_hover_text(
+                "Keep the row numbers and the columns up to here in place when scrolling sideways",
+            )
+            .clicked()
+        {
+            action = Some(ColumnAction::Freeze(p + 1));
+        }
+    }
+    if d.frozen > 0 && ui.button("Unfreeze columns").clicked() {
+        action = Some(ColumnAction::Freeze(0));
+    }
+    ui.separator();
+    ui.menu_button("Columns", |ui| {
+        for col in state.column_order(count) {
+            let mut shown = !state.hidden.contains(&col);
+            let only = shown && d.visible.len() == 1;
+            if ui
+                .add_enabled(!only, egui::Checkbox::new(&mut shown, &d.columns[col].name))
+                .changed()
+            {
+                action = Some(if shown {
+                    ColumnAction::Show(col)
+                } else {
+                    ColumnAction::Hide(col)
+                });
+            }
+        }
+        ui.separator();
+        if ui
+            .add_enabled(!state.hidden.is_empty(), egui::Button::new("Show all"))
+            .clicked()
+        {
+            action = Some(ColumnAction::ShowAll);
+            ui.close();
+        }
+        let reordered = state.column_order(count) != (0..count).collect::<Vec<_>>();
+        if ui
+            .add_enabled(reordered, egui::Button::new("Reset order"))
+            .on_hover_text("Back to the query's order")
+            .clicked()
+        {
+            action = Some(ColumnAction::ResetOrder);
+            ui.close();
+        }
+        if ui.button("Reset widths").clicked() {
+            action = Some(ColumnAction::ResetWidths);
+            ui.close();
+        }
+    });
+    let hidden = state.hidden.len();
+    if hidden > 0
+        && ui
+            .button(format!("Show all columns ({hidden} hidden)"))
+            .clicked()
+    {
+        action = Some(ColumnAction::ShowAll);
+    }
+    action
+}
+
+/// A data cell: value (or the inline editor), selection, cursor, edit state.
+fn data_cell(
+    row: &mut egui_extras::TableRow<'_, '_>,
+    view_row: usize,
+    c: usize,
+    state: &mut GridState,
+    d: &mut Draw,
+) {
+    let col = &d.columns[c];
+    let look = &d.look;
+    let selected = d.selected_cols[c]
+        && d.selected_rows
+            .as_ref()
+            .is_some_and(|r| r.contains(&view_row));
+    let is_cursor = state.cursor == Some((view_row, c));
+    let cell_state = state.cell_state(view_row, c);
+    let editing_here = state
+        .edit
+        .as_ref()
+        .and_then(|e| e.active.as_ref())
+        .is_some_and(|(r, ec, _)| *r == view_row && *ec == c);
+    let value = state.value(d.rows, view_row, c).map(str::to_owned);
+    let mut edit_done = None;
+    let (_, response) = row.col(|ui| {
+        let rect = ui.max_rect();
+        let tint = match cell_state {
+            CellState::Changed => Some(look.changed_bg),
+            CellState::Inserted => Some(look.inserted_bg),
+            CellState::Deleted => Some(look.deleted_bg),
+            CellState::Clean => None,
+        };
+        if let Some(tint) = tint {
+            ui.painter().rect_filled(rect, 0.0, tint);
+        }
+        if editing_here
+            && let Some(edit) = state.edit.as_mut()
+            && let Some((_, _, text)) = edit.active.as_mut()
+        {
+            let r = ui.add(
+                egui::TextEdit::singleline(text)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .margin(egui::Margin::symmetric(2, 0)),
+            );
+            if std::mem::take(&mut edit.focus_editor) {
+                r.request_focus();
+            }
+            let (enter, escape) = ui.input(|i| {
+                (
+                    i.key_pressed(Key::Enter) || i.key_pressed(Key::Tab),
+                    i.key_pressed(Key::Escape),
+                )
+            });
+            if escape {
+                edit_done = Some(false);
+            } else if enter || r.lost_focus() {
+                edit_done = Some(true);
+            }
+            return;
+        }
+        if selected {
+            ui.painter().rect_filled(rect, 0.0, look.selected_bg);
+        }
+        if is_cursor {
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                2.0,
+                look.cursor_stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        let layout = if col.numeric {
+            Layout::right_to_left(Align::Center)
+        } else {
+            Layout::left_to_right(Align::Center)
+        };
+        let strike = cell_state == CellState::Deleted;
+        let binary = is_binary(col);
+        ui.with_layout(layout, |ui| match value.as_deref() {
+            Some(text) if binary => {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(binary_summary(text))
+                            .monospace()
+                            .color(look.null_color),
+                    )
+                    .truncate()
+                    .selectable(false),
+                );
+            }
+            Some(text) => {
+                let first = text.lines().next().unwrap_or_default();
+                let more = if first.len() < text.len() { " …" } else { "" };
+                let mut rich = RichText::new(format!("{first}{more}")).monospace();
+                if strike {
+                    rich = rich.strikethrough();
+                }
+                ui.add(egui::Label::new(rich).truncate().selectable(false));
+            }
+            _ => {
+                ui.label(
+                    RichText::new("NULL")
+                        .monospace()
+                        .italics()
+                        .color(look.null_color),
+                );
+            }
+        });
+    });
+    if edit_done.is_some() {
+        d.act.edit_done = edit_done;
+    }
+    if response.drag_started() || response.clicked() {
+        d.act.clicked = Some((view_row, c));
+        state.dragging = response.drag_started();
+    } else if state.dragging && d.pointer_down && response.contains_pointer() {
+        state.cursor = Some((view_row, c));
+    }
+    if response.double_clicked() {
+        if state.is_editable() {
+            d.act.edit_click = Some((view_row, c));
+        } else {
+            d.act.open_viewer = Some((view_row, c));
+        }
+    }
+    if response.secondary_clicked() {
+        d.act.menu_cell = Some((view_row, c));
+    }
+    response.context_menu(|ui| context_menu(ui, d.columns, d.rows, state));
 }
 
 fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut GridState) {
@@ -969,7 +1432,7 @@ fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut
             ui.close();
         }
         if ui.button("Set NULL").clicked() {
-            state.set_null(rows);
+            state.set_null(rows, columns.len());
             ui.close();
         }
         if ui.button("Insert row").clicked() {
@@ -977,7 +1440,7 @@ fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut
             ui.close();
         }
         if ui.button("Delete / undelete rows").clicked() {
-            state.delete_rows();
+            state.delete_rows(columns.len());
             ui.close();
         }
         ui.separator();
@@ -1077,27 +1540,34 @@ pub fn selection_data(
     rows: &[Vec<Cell>],
     state: &GridState,
 ) -> (Vec<Column>, Vec<Vec<Cell>>) {
-    let shown = |c: &usize| !state.hidden.contains(c);
-    let Some((r, c)) = state.selection().filter(|(_, c)| *c.end() < columns.len()) else {
-        if state.hidden.is_empty() {
-            return (columns.to_vec(), rows.to_vec());
-        }
-        let keep: Vec<usize> = (0..columns.len()).filter(shown).collect();
-        let cols = keep.iter().map(|&i| columns[i].clone()).collect();
-        let data = rows
-            .iter()
-            .map(|row| {
-                keep.iter()
-                    .map(|&i| row.get(i).cloned().flatten())
-                    .collect()
-            })
-            .collect();
-        return (cols, data);
+    let Some((r, keep)) = state.selection(columns.len()) else {
+        return shown_data(columns, rows, state);
     };
-    let keep: Vec<usize> = c.filter(shown).collect();
     let cols = keep.iter().map(|&i| columns[i].clone()).collect();
     let data = r
         .filter_map(|vr| rows.get(state.row_index(vr)))
+        .map(|row| {
+            keep.iter()
+                .map(|&i| row.get(i).cloned().flatten())
+                .collect()
+        })
+        .collect();
+    (cols, data)
+}
+
+/// All fetched rows (as fetched) with the columns shown, in the order shown.
+pub fn shown_data(
+    columns: &[Column],
+    rows: &[Vec<Cell>],
+    state: &GridState,
+) -> (Vec<Column>, Vec<Vec<Cell>>) {
+    let keep = state.visible_columns(columns.len());
+    if keep.iter().copied().eq(0..columns.len()) {
+        return (columns.to_vec(), rows.to_vec());
+    }
+    let cols = keep.iter().map(|&i| columns[i].clone()).collect();
+    let data = rows
+        .iter()
         .map(|row| {
             keep.iter()
                 .map(|&i| row.get(i).cloned().flatten())
@@ -1133,8 +1603,8 @@ fn selection_text(
 }
 
 fn summary(columns: &[Column], rows: &[Vec<Cell>], state: &GridState) -> Option<String> {
-    let (r, c) = state.selection()?;
-    let cells = (r.end() - r.start() + 1) * (c.end() - c.start() + 1);
+    let (r, c) = state.selection(columns.len())?;
+    let cells = (r.end() - r.start() + 1) * c.len();
     if cells < 2 {
         return None;
     }
@@ -1144,7 +1614,7 @@ fn summary(columns: &[Column], rows: &[Vec<Cell>], state: &GridState) -> Option<
         let Some(row) = rows.get(state.row_index(vr)) else {
             continue;
         };
-        for ci in c.clone().filter(|ci| !state.hidden.contains(ci)) {
+        for &ci in &c {
             if let Some(Some(v)) = row.get(ci) {
                 non_null += 1;
                 if columns.get(ci).is_some_and(|col| col.numeric)
@@ -1213,7 +1683,8 @@ fn record_view(
                 .num_columns(3)
                 .spacing([16.0, 6.0])
                 .show(ui, |ui| {
-                    for (c, col) in columns.iter().enumerate() {
+                    for c in state.visible_columns(columns.len()) {
+                        let col = &columns[c];
                         ui.label(RichText::new(&col.name).strong());
                         ui.weak(&col.type_name);
                         match row.get(c).and_then(|v| v.as_deref()) {
@@ -1627,5 +2098,115 @@ mod tests {
         // Short values still edit inline.
         state.start_edit(&rows, (0, 0), None);
         assert!(state.edit.as_ref().unwrap().active.is_some());
+    }
+
+    fn three() -> (Vec<Column>, Vec<Vec<Cell>>) {
+        let mut columns = cols();
+        columns.push(Column {
+            name: "C".into(),
+            type_name: "VARCHAR2(10)".into(),
+            numeric: false,
+        });
+        let row = |a: &str, b: &str, c: &str| vec![Some(a.into()), Some(b.into()), Some(c.into())];
+        (columns, vec![row("1", "x", "p"), row("2", "y", "q")])
+    }
+
+    #[test]
+    fn columns_move_hide_and_freeze() {
+        let mut s = GridState::default();
+        assert_eq!(s.column_order(3), [0, 1, 2]);
+        s.move_column(3, 0, 2, true);
+        assert_eq!(s.column_order(3), [1, 2, 0]);
+        s.move_column(3, 2, 1, false);
+        assert_eq!(s.column_order(3), [2, 1, 0]);
+        // Another result (other columns) starts in query order.
+        assert_eq!(s.column_order(2), [0, 1]);
+        s.column_action(3, ColumnAction::ResetOrder);
+        assert_eq!(s.column_order(3), [0, 1, 2]);
+        // One column always stays.
+        for c in 0..3 {
+            s.column_action(3, ColumnAction::Hide(c));
+        }
+        assert_eq!(s.visible_columns(3), [2]);
+        s.column_action(3, ColumnAction::ShowAll);
+        // At least one column scrolls.
+        s.column_action(3, ColumnAction::Freeze(5));
+        assert_eq!(s.frozen_columns(3), 2);
+        s.hidden.insert(1);
+        assert_eq!(s.frozen_columns(3), 1);
+    }
+
+    #[test]
+    fn reordered_columns_select_copy_and_paste_as_shown() {
+        let (columns, rows) = three();
+        let mut s = GridState::default();
+        s.sync(&rows, &columns);
+        s.move_column(3, 2, 0, false);
+        assert_eq!(s.visible_columns(3), [2, 0, 1]);
+        // From C to A: two columns, in the order shown.
+        s.select((0, 2), false);
+        s.select((1, 0), true);
+        assert_eq!(
+            selection_text(&columns, &rows, &s, true),
+            "C\tA\np\t1\nq\t2"
+        );
+        assert_eq!(
+            summary(&columns, &rows, &s).unwrap(),
+            "Count 4 · Sum 3 · Avg 1.5 · Min 1 · Max 2"
+        );
+        // A hidden column in the range stays out.
+        s.hidden.insert(0);
+        s.select((0, 2), false);
+        s.select((0, 1), true);
+        assert_eq!(selection_text(&columns, &rows, &s, true), "C\tB\np\tx");
+        // Without a selection: all rows, the columns shown, in order.
+        s.anchor = None;
+        s.cursor = None;
+        let (c, d) = selection_data(&columns, &rows, &s);
+        let names: Vec<&str> = c.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["C", "B"]);
+        assert_eq!(d[1], vec![Some("q".to_owned()), Some("y".to_owned())]);
+        let (shown, all) = shown_data(&columns, &rows, &s);
+        assert_eq!(shown.len(), c.len());
+        assert_eq!(all, d);
+        // Pasting goes right in the order shown: A, then B.
+        s.hidden.clear();
+        s.set_editable(None);
+        s.cursor = Some((0, 0));
+        s.paste(&rows, 3, "9\tz");
+        let updates = &s.changes().unwrap().updates[&0];
+        assert_eq!(updates[&0].as_deref(), Some("9"));
+        assert_eq!(updates[&1].as_deref(), Some("z"));
+        assert!(!updates.contains_key(&2));
+    }
+
+    /// Columns drawn before the first rows arrive are fitted again once
+    /// they're there, instead of staying as wide as their header.
+    #[test]
+    fn widths_fit_the_first_rows() {
+        let columns = vec![Column {
+            name: "C".into(),
+            type_name: "VARCHAR2(40)".into(),
+            numeric: false,
+        }];
+        let rows = vec![vec![Some("a value much wider than its header".to_owned())]];
+        let ctx = egui::Context::default();
+        let mut state = GridState::default();
+        let frame = |rows: &[Vec<Cell>], state: &mut GridState| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ResultGrid::new(&columns, rows, state, "grid").show(ui);
+            });
+            // Nothing is rendered.
+            output.textures_delta.clear();
+        };
+        frame(&[], &mut state);
+        let header_only = state.widths[&0];
+        frame(&rows, &mut state);
+        frame(&rows, &mut state);
+        assert!(
+            state.widths[&0] > header_only * 3.0,
+            "{} vs {header_only}",
+            state.widths[&0]
+        );
     }
 }

@@ -58,6 +58,8 @@ pub fn package_body(spec: &str, body: Option<&str>) -> Option<Stubs> {
         .iter()
         .find(|i| i.kind == OutlineKind::PackageSpec)?;
     let name = package.name.to_lowercase();
+    // `END` repeats the name without the schema (`hr.pkg` ends `end pkg;`).
+    let end = name.rsplit('.').next().unwrap_or(&name).to_owned();
     let existing: Vec<String> = match body {
         Some(body) if !body.trim().is_empty() => {
             subprograms(&Analysis::new(body).outline(), OutlineKind::PackageBody)
@@ -89,7 +91,7 @@ pub fn package_body(spec: &str, body: Option<&str>) -> Option<Stubs> {
     let added = stubs.len();
     let body = match body.filter(|b| !b.trim().is_empty()) {
         None => format!(
-            "create or replace package body {name} as\n\n{}\nend {name};\n",
+            "create or replace package body {name} as\n\n{}\nend {end};\n",
             stubs.join("\n")
         ),
         Some(body) => {
@@ -199,6 +201,18 @@ mod tests {
                 .contains("  function b(y varchar2) return number is\n  begin\n    return null;")
         );
         assert!(stubs.body.trim_end().ends_with("end p;"));
+    }
+
+    #[test]
+    fn qualified_spec() {
+        let spec = "create or replace package hr.p as\n  procedure a;\nend p;";
+        let body = package_body(spec, None).unwrap().body;
+        assert!(
+            body.starts_with("create or replace package body hr.p as"),
+            "{body}"
+        );
+        // END takes the name without the schema.
+        assert!(body.trim_end().ends_with("\nend p;"), "{body}");
     }
 
     #[test]

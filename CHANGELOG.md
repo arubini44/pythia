@@ -26,6 +26,73 @@ All notable changes to Pythia are documented here. The format follows
   open transactions, the largest databases and tables, and the top
   statements from `performance_schema` with *Analyze*. What needs the
   `PROCESS` privilege or `SELECT` on `performance_schema` says so.
+
+## [0.3.0] - 2026-10-23
+
+### Added
+- Directories (#43), listed with their paths in the object browser below
+  profiles, with New directory…, Edit directory…, Grants… (read, write and
+  execute) and Drop…. The form takes the name and the path on the server
+  (`CREATE OR REPLACE DIRECTORY`, which keeps the grants) and warns
+  without CREATE ANY DIRECTORY. New: Directory… joins File → New Object.
+- Scheduler job form (#42), from New job… on the object browser's
+  Scheduler jobs folder, File → New Object, or New job… and Edit… in the
+  Scheduler Jobs window. It sets what the job runs (a PL/SQL block or a
+  stored procedure, picked from the schema), its start, a repeat interval
+  from presets (every few minutes or hours, daily, weekly on some days,
+  monthly) or typed as a calendar expression, its end, enabled, drop after
+  its last run and comments, and shows the next five runs as the database
+  computes them. A new job is DBMS_SCHEDULER.CREATE_JOB, a change sets the
+  changed attributes; Open in SQL window ends such blocks with `/`.
+- Profiles (#41), listed in the object browser below users and roles,
+  with New profile…, Edit profile… and Drop…. The form sets each password
+  and resource limit to default, unlimited or a value, says what default
+  stands for and lists the users with the profile; a change alters the
+  limits that changed. Dropping a profile gives its users DEFAULT.
+- Type form: methods (member and static procedures and functions,
+  constructors, a map or order method) and "not instantiable". A type with
+  methods opens with its body too, a stub per method (#40).
+- User and role form: quotas on any number of tablespaces, the admin
+  option of granted roles and system privileges, a user's default roles,
+  and object privileges (with grant option for users) to add and revoke
+  (#39).
+- Table editor: a Partitions tab (#37). A new table can be partitioned by
+  range, interval, list or hash, with its key, partitions (and a MAXVALUE
+  or DEFAULT one) and tablespaces; a copy of a partitioned table is
+  partitioned the same way. An existing table shows its partitions and
+  takes new ones; truncating and dropping partitions run only with Allow
+  dropping on the Script tab.
+- Creating objects without writing DDL (#29). The object browser's
+  right-click menu offers **New …** on every folder, a **New** submenu on
+  objects (a table like this one, an index, trigger or view on a table, a
+  synonym for an object) and **New index… / Add constraint… / New
+  trigger…** on a table's groups; File → New Object and the command palette
+  have the same, for the schema the browser shows.
+  - **Table builder**: the table editor starts empty (or as a copy of a
+    table). Columns with a type picker, primary key and identity column
+    (12c+) checkboxes, not null, default and comment; primary, unique and
+    foreign keys (referenced table picked, its key filled in) and checks
+    with names generated from the table's; indexes, with one click for
+    unindexed foreign keys; tablespace or a global temporary table. The
+    script is `CREATE TABLE` and what follows it.
+  - Forms for **materialized views** (build, refresh method and schedule,
+    query rewrite), **database links** (password hidden in the preview; a
+    change recreates the link, as `ALTER DATABASE LINK` needs a privilege
+    of its own), **users** (authentication, tablespaces, quota, profile,
+    lock, roles and system privileges) and **roles**, new and existing.
+    Users and roles are listed in the object browser.
+  - **Triggers, procedures, functions, packages and types** start from a
+    form (events and timing, parameters, return type, `AUTHID`, attributes
+    or collection type); **Open in editor** hands the source to a program
+    window, where compiling creates the unit. A package's body gets a stub
+    per subprogram. The form warns when the name exists.
+  - What was created shows up selected in the object browser.
+- Result grid: drag a header onto another to move its column, and freeze
+  the row numbers and the columns up to one (right-click its header) so
+  they stay in place when scrolling sideways (#33). The header menu's
+  Columns submenu shows or hides each column and resets the order or the
+  widths. Selection, arrow keys, paste, copy and export follow the order
+  shown.
 - Toolbar: a Debug button next to Execute (Ctrl+F9). It is enabled only
   with the cursor in an anonymous block of a connected SQL window, and when
   disabled says why; in a program window it points to Test… for a block
@@ -36,6 +103,25 @@ All notable changes to Pythia are documented here. The format follows
   says which package it is and how to get the contents.
 
 ### Changed
+- **No Oracle Instant Client needed any more.** Pythia connects with a
+  pure-Rust driver (our fork of rust-oracledb, pinned: upstream fixes not
+  released yet, proxy logins, statements starting with a `--` comment,
+  cancelling a running statement, also on TLS connections (#53), and LOB
+  queries that failed once no longer failing with ORA-01008 afterwards,
+  #48). Packages no longer depend on libaio.
+  JSON and VECTOR columns are shown (the Instant Client driver couldn't
+  fetch them). `TIMESTAMP WITH TIME ZONE` values with a region show the
+  region's name (`… Europe/Zurich`, #50), and SQL literals of such values
+  keep it. For TLS, the connect string can name the wallet folder with a
+  private CA's certificate (`?wallet_location=`, #54). Not covered (#13): 11.2 databases, servers that require Native
+  Network Encryption, and OS and wallet logins; for those, build with
+  `--features pythia-db/thick` against the Instant Client.
+- Table editor: renaming a column of an existing table renames it
+  (`ALTER TABLE … RENAME COLUMN`), so it keeps its data, keys and indexes,
+  instead of adding a new column next to the old one (#38).
+- The table editor applies its script in its window (like the other
+  forms) and says which statement failed; Open in SQL window is still
+  there. It can add foreign keys, and its Null column is now Not null.
 - Auto-commit is a setting (Settings → Query, off by default) instead of a
   toolbar toggle per window. It applies to all SQL windows, including those
   already open, but never to production connections, where Commit asks
@@ -47,6 +133,29 @@ All notable changes to Pythia are documented here. The format follows
   Query. A window without an open connection can still pick one.
 
 ### Fixed
+- Object browser: another schema's private database links were missing
+  on 18c and 21c although their details showed; they're read from
+  DBA_DB_LINKS where the user may (#51).
+- The grants editor read ALL_TAB_PRIVS only, so a DBA saw none or some
+  of the grants on another schema's object. It reads DBA_TAB_PRIVS when
+  it can (#47).
+- Drop… on a scheduler job in the object browser failed with ORA-00950
+  (there is no DROP JOB); it drops the job through DBMS_SCHEDULER (#46).
+- A window learned whether a transaction is open, and got the statement's
+  DBMS_OUTPUT, only after the statement's result. For a moment after an
+  INSERT it showed no transaction (#44).
+- Closing a SQL window with an uncommitted transaction (its tab's ×,
+  Close Window, Close Other Windows) rolled the transaction back without
+  asking. It now asks: Commit and close, Roll back and close, or Cancel
+  (#35).
+- The object browser, project tree and saved connections list didn't
+  highlight the selected row unless the mouse was over it (#31).
+- Hiding or showing a result grid column reset the widths of all the
+  others; the grid now remembers each column's width.
+- Result grid columns could stay as narrow as their header when the grid
+  was drawn before the first rows arrived.
+- Generate body on a package spec with a schema (`create package hr.pkg`)
+  ended the body with `end hr.pkg;`, which doesn't compile.
 - The connection picker above a SQL window switched connections with a
   pending transaction, dropping the window's session without asking. Like
   the toolbar's menu, it now offers other connections only after a commit
@@ -308,6 +417,7 @@ First release.
 - Scheduler jobs window: run, stop, enable, disable, drop, run history.
 - Saved user reports with parameters.
 
-[Unreleased]: https://github.com/ortic/pythia/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ortic/pythia/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ortic/pythia/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ortic/pythia/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ortic/pythia/releases/tag/v0.1.0

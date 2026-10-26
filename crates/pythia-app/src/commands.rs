@@ -40,6 +40,23 @@ macro_rules! commands {
 
 commands! {
     NewSqlWindow => "File: New SQL Window",
+    NewTable => "New: Table…",
+    NewView => "New: View…",
+    NewMaterializedView => "New: Materialized View…",
+    NewSequence => "New: Sequence…",
+    NewSynonym => "New: Synonym…",
+    NewIndex => "New: Index…",
+    NewTrigger => "New: Trigger…",
+    NewProcedure => "New: Procedure…",
+    NewFunction => "New: Function…",
+    NewPackage => "New: Package…",
+    NewType => "New: Type…",
+    NewJob => "New: Scheduler Job…",
+    NewDatabaseLink => "New: Database Link…",
+    NewUser => "New: User…",
+    NewRole => "New: Role…",
+    NewProfile => "New: Profile…",
+    NewDirectory => "New: Directory…",
     OpenFile => "File: Open…",
     SaveFile => "File: Save",
     SaveFileAs => "File: Save As…",
@@ -118,6 +135,33 @@ commands! {
 }
 
 impl Command {
+    /// The commands creating a database object, with its type.
+    pub const NEW_OBJECTS: &[(Command, pythia_db::ObjectType)] = &[
+        (Command::NewTable, pythia_db::ObjectType::Table),
+        (Command::NewView, pythia_db::ObjectType::View),
+        (
+            Command::NewMaterializedView,
+            pythia_db::ObjectType::MaterializedView,
+        ),
+        (Command::NewSequence, pythia_db::ObjectType::Sequence),
+        (Command::NewSynonym, pythia_db::ObjectType::Synonym),
+        (Command::NewIndex, pythia_db::ObjectType::Index),
+        (Command::NewTrigger, pythia_db::ObjectType::Trigger),
+        (Command::NewProcedure, pythia_db::ObjectType::Procedure),
+        (Command::NewFunction, pythia_db::ObjectType::Function),
+        (Command::NewPackage, pythia_db::ObjectType::Package),
+        (Command::NewType, pythia_db::ObjectType::Type),
+        (Command::NewJob, pythia_db::ObjectType::Job),
+        (
+            Command::NewDatabaseLink,
+            pythia_db::ObjectType::DatabaseLink,
+        ),
+        (Command::NewUser, pythia_db::ObjectType::User),
+        (Command::NewRole, pythia_db::ObjectType::Role),
+        (Command::NewProfile, pythia_db::ObjectType::Profile),
+        (Command::NewDirectory, pythia_db::ObjectType::Directory),
+    ];
+
     /// Label without the category prefix, for menus.
     pub fn short_label(self) -> &'static str {
         let label = self.label();
@@ -144,6 +188,11 @@ impl Command {
             SwitchSpecBody => Feature::PlSql,
             DebugStart | ToggleBreakpoint | DebugContinue | DebugStepOver | DebugStepInto
             | DebugStepOut | DebugStop | ShowDebugger => Feature::Debugger,
+            NewTable | NewView | NewMaterializedView | NewSequence | NewSynonym | NewIndex
+            | NewTrigger | NewProcedure | NewFunction | NewPackage | NewType | NewJob
+            | NewDatabaseLink | NewUser | NewRole | NewProfile | NewDirectory => {
+                Feature::ObjectEditors
+            }
             MonitorDashboard => Feature::Dashboard,
             MonitorSessions | MonitorBlocking | MonitorAwr | MonitorTrace => Feature::Monitor,
             AiAnalyzePlan => Feature::ExplainPlan,
@@ -440,6 +489,20 @@ mod tests {
         let current = fuzzy_score("ex cur", Command::ExecuteCurrent.label()).unwrap();
         let all = fuzzy_score("ex cur", Command::ExecuteAll.label());
         assert!(all.is_none_or(|all| current > all));
+    }
+
+    #[test]
+    fn new_object_commands() {
+        let news: Vec<Command> = Command::ALL
+            .iter()
+            .copied()
+            .filter(|c| c.id().starts_with("New") && *c != Command::NewSqlWindow)
+            .collect();
+        assert_eq!(news.len(), Command::NEW_OBJECTS.len());
+        for (command, t) in Command::NEW_OBJECTS {
+            assert!(news.contains(command));
+            assert!(crate::object_editor::can_create(*t), "{t:?}");
+        }
     }
 
     #[test]

@@ -113,8 +113,11 @@ fn wait_until(harness: &mut Harness<'_, PythiaApp>, what: &str, done: impl Fn(&P
     harness.run_steps(3);
 }
 
+/// The test database's profile (`PYTHIA_TEST_DB`), with the demo schema in
+/// place.
 fn profile() -> Option<(ConnectionProfile, String)> {
     let spec = std::env::var("PYTHIA_TEST_DB").ok()?;
+    crate::test_db::demo_schema();
     let (credentials, connect_string) = spec.rsplit_once('@')?;
     let (username, password) = credentials.split_once('/')?;
     Some((
@@ -129,66 +132,6 @@ fn profile() -> Option<(ConnectionProfile, String)> {
         password.into(),
     ))
 }
-
-const DEMO_SCHEMA: &str = "
-begin
-  for t in (select table_name from user_tables where table_name in ('DEMO_EMPLOYEES', 'DEMO_DEPARTMENTS')) loop
-    execute immediate 'drop table ' || t.table_name || ' cascade constraints purge';
-  end loop;
-end;
-/
-create table demo_departments (
-  department_id   number(4) primary key,
-  department_name varchar2(30 char) not null,
-  location        varchar2(40 char)
-);
-create table demo_employees (
-  employee_id   number(6) primary key,
-  first_name    varchar2(20 char),
-  last_name     varchar2(25 char) not null,
-  email         varchar2(40 char) not null unique,
-  hire_date     date default sysdate not null,
-  salary        number(8,2),
-  department_id number(4) references demo_departments
-);
-comment on column demo_employees.salary is 'Monthly salary in CHF';
-insert into demo_departments values (10, 'Administration', 'Zurich');
-insert into demo_departments values (20, 'Engineering', 'Basel');
-insert into demo_departments values (30, 'Sales', 'Geneva');
-insert into demo_employees
-  select level, initcap(dbms_random.string('l', 6)), initcap(dbms_random.string('l', 8)),
-         'user' || level || '@example.com', date '2015-01-01' + level * 3,
-         round(4000 + dbms_random.value * 9000, 2), 10 * (mod(level, 3) + 1)
-    from dual connect by level <= 1200;
-commit;
-create or replace package demo_pkg as
-  -- Raises the salary of an employee by a percentage.
-  procedure raise_salary(p_employee_id in number, p_percent in number default 5);
-  function department_total(p_department_id in number) return number;
-end demo_pkg;
-/
-create or replace package body demo_pkg as
-  procedure raise_salary(p_employee_id in number, p_percent in number default 5) is
-  begin
-    update demo_employees
-       set salary = salary * (1 + p_percent / 100)
-     where employee_id = p_employee_id;
-  end raise_salary;
-
-  function department_total(p_department_id in number) return number is
-    l_total number;
-  begin
-    select sum(salary) into l_total from demo_employees where department_id = p_department_id;
-    return l_total;
-  end department_total;
-end demo_pkg;
-/
-create or replace procedure demo_broken is
-begin
-  missing_procedure(42);
-end;
-/
-";
 
 const QUERY: &str = "-- Salary overview per department
 select d.department_name,
@@ -247,17 +190,6 @@ fn screenshots() {
         };
         h.state_mut().test_connect(profile, password);
         wait_until(&mut h, "connection", |app| app.test_connected());
-
-        if dark {
-            // Create the demo schema once, through a SQL window.
-            h.state_mut().test_open(OpenRequest::Sql {
-                connection: "pythia@FREEPDB1".into(),
-                text: DEMO_SCHEMA.into(),
-                run: true,
-            });
-            wait_until(&mut h, "demo schema", |app| !app.test_focused_busy());
-            h.state_mut().test_close_focused();
-        }
 
         h.state_mut().test_open(OpenRequest::Sql {
             connection: "pythia@FREEPDB1".into(),
@@ -354,6 +286,7 @@ fn screenshots() {
             h.state_mut().test_open(OpenRequest::EditTable {
                 connection: "pythia@FREEPDB1".into(),
                 object: object("DEMO_EMPLOYEES", pythia_db::ObjectType::Table),
+                tab: crate::table_editor::TableTab::Columns,
             });
             wait_until(&mut h, "table definition", |app| !app.test_focused_busy());
             save(&mut h, "16-table-editor-dark");
@@ -618,6 +551,8 @@ fn debugger_session() {
         eprintln!("PYTHIA_TEST_DB / PYTHIA_DEBUG_HOST not set, skipping");
         return;
     };
+    let setup = pythia_debugger::target::setup_statements(&profile.username, &host);
+    crate::test_db::as_dba(&setup.iter().map(String::as_str).collect::<Vec<_>>());
     use pythia_debugger::{Unit, UnitType};
     let mut h = harness(true);
     h.state_mut().test_connect(profile, password);
@@ -1274,13 +1209,16 @@ fn scheduler_jobs() {
     let Some((profile, password)) = profile() else {
         return;
     };
+    // Before 23ai, a new user can't create jobs.
+    crate::test_db::as_dba(&["grant create job to {user}"]);
     let mut h = harness(false);
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
         text: "begin
-  for j in (select job_name from user_scheduler_jobs where job_name like 'PYTHIA\\_%' escape '\\') loop
+  for j in (select job_name from user_scheduler_jobs
+             where job_name in ('PYTHIA_NIGHTLY_STATS', 'PYTHIA_PURGE_LOGS')) loop
     dbms_scheduler.drop_job(j.job_name, force => true);
   end loop;
   dbms_scheduler.create_job('PYTHIA_NIGHTLY_STATS', 'PLSQL_BLOCK',
@@ -1327,6 +1265,65 @@ end;
         "SUCCEEDED"
     );
     save(&mut h, "scheduler-jobs");
+
+    // Edit… opens the job form; applying it refreshes the window.
+    let jobs_window = h.state().test_focused();
+    h.get_by_label("Edit…").click();
+    h.run_steps(2);
+    wait_until(&mut h, "job form", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    wait_until(&mut h, "next runs", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    assert_eq!(
+        h.state().test_focused_title().as_deref(),
+        Some("pythia_nightly_stats (job)")
+    );
+    assert!(h.query_by_label_contains("Next runs:").is_some());
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d.downcast_mut::<crate::object_editor::JobDef>().unwrap();
+        d.repeat = "FREQ=DAILY;BYHOUR=3;BYMINUTE=15;BYSECOND=0".into();
+    });
+    h.run_steps(2);
+    wait_until(&mut h, "next runs", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    save(&mut h, "edit-job");
+    assert_eq!(
+        h.state_mut()
+            .test_object_editor()
+            .statements_for_test()
+            .unwrap(),
+        [
+            "begin\n  dbms_scheduler.set_attribute('PYTHIA.PYTHIA_NIGHTLY_STATS', \
+          'repeat_interval', 'FREQ=DAILY;BYHOUR=3;BYMINUTE=15;BYSECOND=0');\nend;"
+        ]
+    );
+    let effects = h.state_mut().test_object_editor().apply_for_test();
+    h.state_mut().test_apply(effects);
+    wait_until(&mut h, "applied", |app| !app.test_focused_busy());
+    h.state_mut().test_focus(jobs_window);
+    h.run_steps(2);
+    wait_until(&mut h, "jobs refreshed", |app| !app.test_focused_busy());
+    let schedule = h
+        .state_mut()
+        .test_jobs_window()
+        .jobs()
+        .iter()
+        .find(|j| j.name == "PYTHIA_NIGHTLY_STATS")
+        .map(|j| j.schedule.clone());
+    assert_eq!(
+        schedule.as_deref(),
+        Some("FREQ=DAILY;BYHOUR=3;BYMINUTE=15;BYSECOND=0")
+    );
+    // New job… opens an empty form for the browser's schema.
+    h.get_by_label("New job…").click();
+    h.run_steps(2);
+    wait_until(&mut h, "new job form", |app| !app.test_focused_busy());
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("New job"));
+    assert_eq!(
+        h.state_mut().test_object_editor().statements_for_test(),
+        Err("Enter a name".into())
+    );
+
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
         text: "begin
@@ -1863,25 +1860,27 @@ fn object_editors() {
     let mut h = harness(false);
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
+    // PYTHIA_OEU_, not PYTHIA_OE_: the unit test `edits_live_objects`
+    // drops those, and runs at the same time.
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
         text: "begin
   for o in (select object_name, object_type from user_objects
-             where object_name like 'PYTHIA\\_OE\\_%' escape '\\'
+             where object_name like 'PYTHIA\\_OEU\\_%' escape '\\'
                and object_type in ('TABLE', 'VIEW', 'SEQUENCE', 'SYNONYM')) loop
     execute immediate 'drop ' || o.object_type || ' ' || o.object_name
       || case o.object_type when 'TABLE' then ' purge' end;
   end loop;
 end;
 /
-create table pythia_oe_orders (order_id number primary key, customer varchar2(40) not null,
+create table pythia_oeu_orders (order_id number primary key, customer varchar2(40) not null,
   status varchar2(10), ordered_at date default sysdate not null);
-create index pythia_oe_orders_ix on pythia_oe_orders (customer, ordered_at desc);
-create or replace view pythia_oe_open_orders as
-  select order_id, customer, ordered_at from pythia_oe_orders where status = 'OPEN'
+create index pythia_oeu_orders_ix on pythia_oeu_orders (customer, ordered_at desc);
+create or replace view pythia_oeu_open_orders as
+  select order_id, customer, ordered_at from pythia_oeu_orders where status = 'OPEN'
   with check option;
-create synonym pythia_oe_ord for pythia_oe_orders;
-grant select, insert on pythia_oe_orders to public;"
+create synonym pythia_oeu_ord for pythia_oeu_orders;
+grant select, insert on pythia_oeu_orders to public;"
             .into(),
         run: true,
     });
@@ -1906,13 +1905,14 @@ grant select, insert on pythia_oe_orders to public;"
         EditTarget::New {
             owner: "PYTHIA".into(),
             object_type: pythia_db::ObjectType::Sequence,
+            from: None,
         },
     );
     h.state_mut().test_object_editor().edit_for_test(|d| {
         let d = d
             .downcast_mut::<crate::object_editor::SequenceDef>()
             .unwrap();
-        d.name = "pythia_oe_invoice_seq".into();
+        d.name = "pythia_oeu_invoice_seq".into();
         d.start = "1000".into();
         d.cache = 50;
     });
@@ -1923,18 +1923,21 @@ grant select, insert on pythia_oe_orders to public;"
     wait_until(&mut h, "apply", |app| !app.test_focused_busy());
     let editor = h.state_mut().test_object_editor();
     assert_eq!(editor.outcome(), Some(("Applied", true)));
-    assert_eq!(editor.title(), "pythia_oe_invoice_seq (sequence)");
+    assert_eq!(editor.title(), "pythia_oeu_invoice_seq (sequence)");
     // Reloaded from the database: nothing left to apply.
     assert_eq!(editor.statements_for_test(), Ok(Vec::new()));
     save(&mut h, "editor-sequence");
 
     open(
         &mut h,
-        EditTarget::Edit(object("PYTHIA_OE_OPEN_ORDERS", pythia_db::ObjectType::View)),
+        EditTarget::Edit(object(
+            "PYTHIA_OEU_OPEN_ORDERS",
+            pythia_db::ObjectType::View,
+        )),
     );
     h.state_mut().test_object_editor().edit_for_test(|d| {
         let d = d.downcast_mut::<crate::object_editor::ViewDef>().unwrap();
-        d.query = "select order_id, customer, ordered_at, status\n  from pythia_oe_orders\n where status in ('OPEN', 'HOLD')".into();
+        d.query = "select order_id, customer, ordered_at, status\n  from pythia_oeu_orders\n where status in ('OPEN', 'HOLD')".into();
     });
     h.run_steps(3);
     save(&mut h, "editor-view");
@@ -1947,13 +1950,13 @@ grant select, insert on pythia_oe_orders to public;"
 
     open(
         &mut h,
-        EditTarget::Edit(object("PYTHIA_OE_ORD", pythia_db::ObjectType::Synonym)),
+        EditTarget::Edit(object("PYTHIA_OEU_ORD", pythia_db::ObjectType::Synonym)),
     );
     save(&mut h, "editor-synonym");
 
     open(
         &mut h,
-        EditTarget::Edit(object("PYTHIA_OE_ORDERS_IX", pythia_db::ObjectType::Index)),
+        EditTarget::Edit(object("PYTHIA_OEU_ORDERS_IX", pythia_db::ObjectType::Index)),
     );
     h.run_steps(3);
     wait_until(&mut h, "columns", |app| !app.test_focused_busy());
@@ -1961,7 +1964,7 @@ grant select, insert on pythia_oe_orders to public;"
 
     open(
         &mut h,
-        EditTarget::Grants(object("PYTHIA_OE_ORDERS", pythia_db::ObjectType::Table)),
+        EditTarget::Grants(object("PYTHIA_OEU_ORDERS", pythia_db::ObjectType::Table)),
     );
     save(&mut h, "editor-grants");
     assert!(
@@ -1974,14 +1977,847 @@ grant select, insert on pythia_oe_orders to public;"
 
     h.state_mut().test_open(OpenRequest::Sql {
         connection: "pythia@FREEPDB1".into(),
-        text: "drop synonym pythia_oe_ord;
-drop view pythia_oe_open_orders;
-drop sequence pythia_oe_invoice_seq;
-drop table pythia_oe_orders purge;"
+        text: "drop synonym pythia_oeu_ord;
+drop view pythia_oeu_open_orders;
+drop sequence pythia_oeu_invoice_seq;
+drop table pythia_oeu_orders purge;"
             .into(),
         run: true,
     });
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// The table builder: a new table from the form, applied in the window,
+/// becomes an edit of the created table, and the browser shows it.
+#[test]
+fn table_builder() {
+    use pythia_compare::table::{ColumnDef, ConstraintDef, ConstraintKind, IndexDef};
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let cleanup = "begin
+  for t in (select table_name from user_tables
+             where table_name like 'PYTHIA\\_TBU\\_%' escape '\\'
+             order by table_name desc) loop
+    execute immediate 'drop table ' || t.table_name || ' cascade constraints purge';
+  end loop;
+end;
+/
+";
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: format!(
+            "{cleanup}create table pythia_tbu_customers (id number(10) primary key, name varchar2(100));"
+        ),
+        run: true,
+    });
+    wait_until(&mut h, "setup", |app| !app.test_focused_busy());
+
+    h.state_mut().test_open(OpenRequest::NewTable {
+        connection: "pythia@FREEPDB1".into(),
+        owner: "PYTHIA".into(),
+        like: None,
+    });
+    h.run_steps(2);
+    wait_until(&mut h, "builder", |app| !app.test_focused_busy());
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("New table"));
+    let column = |name: &str, data_type: &str, nullable: bool| ColumnDef {
+        name: name.into(),
+        data_type: data_type.into(),
+        nullable,
+        default: None,
+        comment: None,
+        identity: false,
+    };
+    h.state_mut().test_table_editor().edit_for_test(|t| {
+        t.name = "pythia_tbu_orders".into();
+        t.columns[0].name = "order_id".into();
+        t.constraints[0].columns = vec!["order_id".into()];
+        t.columns[0].identity = true;
+        t.columns.push(column("customer_id", "NUMBER(10)", false));
+        t.columns.push(ColumnDef {
+            default: Some("'OPEN'".into()),
+            comment: Some("OPEN or DONE".into()),
+            ..column("status", "VARCHAR2(10 CHAR)", false)
+        });
+        t.columns.push(column("total", "NUMBER(12,2)", true));
+        t.comment = Some("Customer orders".into());
+        t.constraints.push(ConstraintDef {
+            name: String::new(),
+            kind: ConstraintKind::Foreign,
+            columns: vec!["customer_id".into()],
+            references: Some(("pythia_tbu_customers".into(), vec!["id".into()])),
+            on_delete: Some("CASCADE".into()),
+            condition: None,
+            generated: false,
+        });
+        t.constraints.push(ConstraintDef {
+            name: String::new(),
+            kind: ConstraintKind::Check,
+            columns: Vec::new(),
+            references: None,
+            on_delete: None,
+            condition: Some("status in ('OPEN', 'DONE')".into()),
+            generated: false,
+        });
+        t.indexes.push(IndexDef {
+            name: String::new(),
+            unique: false,
+            columns: vec!["customer_id".into()],
+            generated: false,
+        });
+    });
+    h.run_steps(3);
+    save(&mut h, "table-builder-columns");
+    h.get_by_label("Keys & checks").click();
+    h.run_steps(3);
+    save(&mut h, "table-builder-keys");
+    h.get_by_label("Script •").click();
+    h.run_steps(3);
+    save(&mut h, "table-builder-script");
+
+    let effects = h.state_mut().test_table_editor().apply_for_test();
+    h.state_mut().test_apply_focused(effects);
+    h.run_steps(2);
+    wait_until(&mut h, "apply", |app| !app.test_focused_busy());
+    let editor = h.state_mut().test_table_editor();
+    assert_eq!(editor.outcome(), Some(("Applied", true)));
+    assert_eq!(editor.title(), "pythia_tbu_orders (edit)");
+    assert_eq!(editor.statements_for_test(), Ok(Vec::new()));
+    // The browser lists and selects the new table.
+    assert_eq!(
+        h.state().test_browser_selected(),
+        Some(ObjectRef {
+            owner: "PYTHIA".into(),
+            name: "PYTHIA_TBU_ORDERS".into(),
+            object_type: pythia_db::ObjectType::Table,
+        })
+    );
+    wait_until(&mut h, "browser", |app| !app.test_browser_loading());
+    save(&mut h, "table-builder-created");
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: cleanup.into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// The table builder's Partitions tab: a range-partitioned table with a
+/// MAXVALUE partition, created and shown as an existing table's partitions.
+#[test]
+fn table_builder_partitions() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let drop = "begin execute immediate 'drop table pythia_tbp_sales purge';
+  exception when others then null; end;";
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: drop.into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+    h.state_mut().test_open(OpenRequest::NewTable {
+        connection: "pythia@FREEPDB1".into(),
+        owner: "PYTHIA".into(),
+        like: None,
+    });
+    h.run_steps(2);
+    wait_until(&mut h, "builder", |app| !app.test_focused_busy());
+    h.state_mut().test_table_editor().edit_for_test(|t| {
+        t.name = "pythia_tbp_sales".into();
+        t.columns.push(pythia_compare::table::ColumnDef {
+            name: "SOLD".into(),
+            data_type: "DATE".into(),
+            nullable: false,
+            default: None,
+            comment: None,
+            identity: false,
+        });
+    });
+    h.get_by_label("Partitions").hover();
+    h.run_steps(1);
+    h.get_by_label("Partitions").click();
+    h.run_steps(2);
+    // A combo box shows its choice as its value.
+    h.get_by_value("not partitioned").click();
+    h.run_steps(2);
+    h.get_by_label("range").click();
+    h.run_steps(2);
+    h.state_mut()
+        .test_table_editor()
+        .set_partition_key_for_test("sold");
+    h.get_by_label("Add partition").click();
+    h.run_steps(2);
+    h.get_by_label("Add MAXVALUE partition").click();
+    h.run_steps(2);
+    // The first partition's bound (a hint text isn't a label to find).
+    h.state_mut()
+        .test_table_editor()
+        .edit_partitioning_for_test(|p| p.partitions[0].bound = "DATE '2026-01-01'".into());
+    h.run_steps(3);
+    save(&mut h, "table-builder-partitions");
+    let sql = h
+        .state_mut()
+        .test_table_editor()
+        .statements_for_test()
+        .unwrap();
+    assert!(
+        sql[0].contains("partition by range (sold)\n(\n  partition p1 values less than (DATE '2026-01-01'),\n  partition p_max values less than (MAXVALUE)\n)"),
+        "{}",
+        sql[0]
+    );
+    let effects = h.state_mut().test_table_editor().apply_for_test();
+    h.state_mut().test_apply_focused(effects);
+    h.run_steps(2);
+    wait_until(&mut h, "apply", |app| !app.test_focused_busy());
+    let editor = h.state_mut().test_table_editor();
+    assert_eq!(editor.outcome(), Some(("Applied", true)));
+    assert_eq!(editor.partition_names_for_test(), ["P1", "P_MAX"]);
+    h.run_steps(3);
+    save(&mut h, "table-editor-partitions");
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: drop.into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// Procedures, packages and triggers start from a form whose source opens
+/// in a program window; compiling there creates them.
+#[test]
+fn new_program_units() {
+    use crate::object_editor::EditTarget;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let cleanup = "begin
+  for o in (select object_name, object_type from user_objects
+             where object_name like 'PYTHIA\\_NPU\\_%' escape '\\'
+               and object_type in ('TABLE', 'PACKAGE', 'PROCEDURE')) loop
+    execute immediate 'drop ' || o.object_type || ' ' || o.object_name
+      || case o.object_type when 'TABLE' then ' purge' end;
+  end loop;
+end;
+/
+";
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: format!(
+            "{cleanup}create table pythia_npu_orders (id number primary key, status varchar2(10));"
+        ),
+        run: true,
+    });
+    wait_until(&mut h, "setup", |app| !app.test_focused_busy());
+    let table = ObjectRef {
+        owner: "PYTHIA".into(),
+        name: "PYTHIA_NPU_ORDERS".into(),
+        object_type: pythia_db::ObjectType::Table,
+    };
+    let open = |h: &mut Harness<'_, PythiaApp>, object_type, from: Option<ObjectRef>| {
+        h.state_mut().test_open(OpenRequest::EditObject {
+            connection: "pythia@FREEPDB1".into(),
+            target: EditTarget::New {
+                owner: "PYTHIA".into(),
+                object_type,
+                from,
+            },
+        });
+        h.run_steps(2);
+        wait_until(h, "form", |app| !app.test_focused_busy());
+    };
+    // Hands the form's source to a program window, which compiles it.
+    let create = |h: &mut Harness<'_, PythiaApp>, name: &str| {
+        let form = h.state().test_focused();
+        let effects = h
+            .state_mut()
+            .test_object_editor()
+            .open_in_editor_for_test("pythia@FREEPDB1");
+        assert!(effects.close);
+        h.state_mut().test_apply_focused(effects);
+        h.run_steps(2);
+        assert_ne!(h.state().test_focused(), form, "the form closed");
+        let program = h.state_mut().test_program();
+        assert!(program.new && program.is_dirty());
+        assert_eq!(program.title(), name);
+        let effects = h.state_mut().test_program().compile(true, false);
+        h.state_mut().test_apply_focused(effects);
+        h.run_steps(2);
+        wait_until(h, "compile", |app| !app.test_focused_busy());
+        let program = h.state_mut().test_program();
+        let message = program.message();
+        assert!(matches!(&message, Some((false, _))), "{name}: {message:?}");
+        assert!(!program.new && !program.is_dirty());
+    };
+
+    // A trigger on the table: the table is filled in.
+    open(&mut h, pythia_db::ObjectType::Trigger, Some(table.clone()));
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d
+            .downcast_mut::<crate::object_editor::TriggerDef>()
+            .unwrap();
+        assert_eq!(d.table, "PYTHIA_NPU_ORDERS");
+        d.update_columns = "status".into();
+    });
+    h.run_steps(3);
+    save(&mut h, "new-trigger");
+    create(&mut h, "pythia_npu_orders_biu");
+    save(&mut h, "new-trigger-compiled");
+
+    // A package with a procedure: spec and body with a stub.
+    open(&mut h, pythia_db::ObjectType::Package, None);
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d
+            .downcast_mut::<crate::object_editor::ProgramDef>()
+            .unwrap();
+        d.name = "pythia_npu_api".into();
+        d.subprograms.push(crate::object_editor::Subprogram {
+            function: false,
+            name: "close_order".into(),
+            params: vec![crate::object_editor::Param {
+                name: "p_id".into(),
+                mode: crate::object_editor::Mode::In,
+                data_type: "pythia_npu_orders.id%type".into(),
+                default: String::new(),
+            }],
+            returns: String::new(),
+        });
+    });
+    h.run_steps(3);
+    save(&mut h, "new-package");
+    create(&mut h, "pythia_npu_api");
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: cleanup.into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// The other forms for new objects open filled in from what they're on
+/// (a view, index or synonym for a table) or with sensible defaults, and
+/// say what's missing before they turn into statements.
+#[test]
+fn new_object_forms() {
+    use crate::object_editor::EditTarget;
+    use pythia_db::ObjectType;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "begin execute immediate 'drop table pythia_nof_items purge';
+  exception when others then null; end;
+/
+create table pythia_nof_items (id number primary key, label varchar2(40), price number(10,2));"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "setup", |app| !app.test_focused_busy());
+    let table = ObjectRef {
+        owner: "PYTHIA".into(),
+        name: "PYTHIA_NOF_ITEMS".into(),
+        object_type: ObjectType::Table,
+    };
+    let open =
+        |h: &mut Harness<'_, PythiaApp>, owner: &str, object_type, from: Option<ObjectRef>| {
+            h.state_mut().test_open(OpenRequest::EditObject {
+                connection: "pythia@FREEPDB1".into(),
+                target: EditTarget::New {
+                    owner: owner.into(),
+                    object_type,
+                    from,
+                },
+            });
+            h.run_steps(2);
+            wait_until(h, "form", |app| !app.test_focused_busy());
+            h.run_steps(2);
+            h.state_mut().test_object_editor().statements_for_test()
+        };
+
+    let view = open(&mut h, "PYTHIA", ObjectType::View, Some(table.clone())).unwrap();
+    assert_eq!(
+        view,
+        [
+            "create or replace view PYTHIA.PYTHIA_NOF_ITEMS_V as\nselect id,\n       label,\n       price\n  from pythia_nof_items"
+        ]
+    );
+    save(&mut h, "new-view-on-table");
+    let index = open(&mut h, "PYTHIA", ObjectType::Index, Some(table.clone()));
+    assert_eq!(index, Err("Add at least one column".into()));
+    let synonym = open(&mut h, "PYTHIA", ObjectType::Synonym, Some(table.clone())).unwrap();
+    assert_eq!(
+        synonym,
+        ["create or replace public synonym PYTHIA_NOF_ITEMS for PYTHIA.PYTHIA_NOF_ITEMS"]
+    );
+    let mview = open(&mut h, "PYTHIA", ObjectType::MaterializedView, None);
+    assert_eq!(mview, Err("Enter a name".into()));
+    save(&mut h, "new-materialized-view");
+    let link = open(&mut h, "PYTHIA", ObjectType::DatabaseLink, None);
+    assert_eq!(link, Err("Enter a name".into()));
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d.downcast_mut::<crate::object_editor::LinkDef>().unwrap();
+        d.name = "remote_hr".into();
+        d.using = "db2:1521/hr".into();
+        d.user = "hr".into();
+        d.password = "secret".into();
+    });
+    h.run_steps(3);
+    save(&mut h, "new-database-link");
+    let public_link = open(&mut h, "PUBLIC", ObjectType::DatabaseLink, None);
+    assert_eq!(public_link, Err("Enter a name".into()));
+    let user = open(&mut h, "", ObjectType::User, None);
+    assert_eq!(user, Err("Enter a name".into()));
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d
+            .downcast_mut::<crate::object_editor::AccountDef>()
+            .unwrap();
+        d.name = "app_reader".into();
+        d.password = "Secret_1".into();
+        d.quotas = vec![("USERS".into(), "100M".into())];
+        d.default_tablespace = "USERS".into();
+        d.roles.insert("CONNECT".into(), Default::default());
+        d.objects.insert(
+            ("PYTHIA".into(), "PYTHIA_NOF_ITEMS".into(), "SELECT".into()),
+            false,
+        );
+    });
+    h.run_steps(3);
+    save(&mut h, "new-user");
+    let s = h
+        .state_mut()
+        .test_object_editor()
+        .statements_for_test()
+        .unwrap();
+    assert!(s[0].starts_with("create user APP_READER"), "{s:?}");
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("New user"));
+    let role = open(&mut h, "", ObjectType::Role, None);
+    assert_eq!(role, Err("Enter a name".into()));
+    let new_directory = open(&mut h, "", ObjectType::Directory, None);
+    assert_eq!(new_directory, Err("Enter a name".into()));
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d
+            .downcast_mut::<crate::object_editor::DirectoryDef>()
+            .unwrap();
+        d.name = "exports".into();
+        d.path = "/u01/app/exports".into();
+    });
+    h.run_steps(3);
+    save(&mut h, "new-directory");
+    assert_eq!(
+        h.state_mut()
+            .test_object_editor()
+            .statements_for_test()
+            .unwrap(),
+        ["create or replace directory EXPORTS as '/u01/app/exports'"]
+    );
+    assert!(
+        h.query_by_label_contains("doesn't have CREATE ANY DIRECTORY")
+            .is_some()
+    );
+    let new_profile = open(&mut h, "", ObjectType::Profile, None);
+    assert_eq!(new_profile, Err("Enter a name".into()));
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d
+            .downcast_mut::<crate::object_editor::ProfileDef>()
+            .unwrap();
+        d.name = "app_users".into();
+        for l in &mut d.limits {
+            match l.resource.as_str() {
+                "FAILED_LOGIN_ATTEMPTS" => l.value = "5".into(),
+                "PASSWORD_LIFE_TIME" => l.value = "90".into(),
+                "SESSIONS_PER_USER" => l.value = "2".into(),
+                _ => {}
+            }
+        }
+    });
+    h.run_steps(3);
+    save(&mut h, "new-profile");
+    let s = h
+        .state_mut()
+        .test_object_editor()
+        .statements_for_test()
+        .unwrap();
+    assert_eq!(
+        s,
+        [
+            "create profile APP_USERS limit\n  failed_login_attempts 5\n  \
+          password_life_time 90\n  sessions_per_user 2"
+        ]
+    );
+    assert_eq!(
+        h.state().test_focused_title().as_deref(),
+        Some("New profile")
+    );
+    let ty = open(&mut h, "PYTHIA", ObjectType::Type, None);
+    assert_eq!(ty, Err("Enter a name".into()));
+    let procedure = open(&mut h, "PYTHIA", ObjectType::Procedure, None);
+    assert_eq!(procedure, Err("Enter a name".into()));
+    // A name that's taken: the form says compiling replaces it.
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "create or replace procedure pythia_nof_proc is begin null; end;\n/".into(),
+        run: true,
+    });
+    wait_until(&mut h, "procedure", |app| !app.test_focused_busy());
+    open(&mut h, "PYTHIA", ObjectType::Procedure, None).ok();
+    h.state_mut().test_object_editor().edit_for_test(|d| {
+        let d = d
+            .downcast_mut::<crate::object_editor::ProgramDef>()
+            .unwrap();
+        d.name = "pythia_nof_proc".into();
+    });
+    h.run_steps(3);
+    assert!(
+        h.query_by_label_contains("compiling the new source replaces it")
+            .is_some()
+    );
+    save(&mut h, "new-procedure");
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "drop table pythia_nof_items purge;\ndrop procedure pythia_nof_proc;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// The object browser's right-click menus open the forms: New table… on
+/// the Tables folder, New ▸ Index on this table… on a table, New user… on
+/// Users.
+#[test]
+fn browser_new_menus() {
+    use crate::object_editor::EditTarget;
+    use pythia_db::ObjectType;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = headless_harness();
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "begin execute immediate 'drop table pythia_bnm_t purge';
+  exception when others then null; end;
+/
+create table pythia_bnm_t (id number primary key);"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "setup", |app| !app.test_focused_busy());
+    // Directories show their path; Grants… is in their menu.
+    let dba = std::env::var("PYTHIA_TEST_DB_DBA").ok().map(|spec| {
+        let (cred, db) = spec.rsplit_once('@').unwrap();
+        let (user, pw) = cred.split_once('/').unwrap();
+        pythia_db::oracle::Connection::connect(user, pw, db).unwrap()
+    });
+    if let Some(dba) = &dba {
+        dba.execute(
+            "create or replace directory pythia_bnm_dir as '/tmp/pythia_bnm'",
+            &[],
+        )
+        .unwrap();
+        dba.execute("grant read on directory pythia_bnm_dir to pythia", &[])
+            .unwrap();
+        h.state_mut().test_browser().set_filter("PYTHIA_BNM_DIR");
+        h.run_steps(2);
+        wait_until(&mut h, "directories", |app| !app.test_browser_loading());
+        h.get_by_label("Directories").click();
+        h.run_steps(2);
+        wait_until(&mut h, "directories", |app| !app.test_browser_loading());
+        assert!(h.query_by_label("/tmp/pythia_bnm").is_some());
+        save(&mut h, "browser-directories");
+        h.get_by_label("pythia_bnm_dir").click_secondary();
+        h.run_steps(2);
+        assert!(h.query_by_label("Edit directory…").is_some());
+        h.get_by_label("Grants…").click();
+        h.run_steps(2);
+        wait_until(&mut h, "grants", |app| !app.test_focused_busy());
+        assert_eq!(
+            h.state().test_focused_title().as_deref(),
+            Some("pythia_bnm_dir grants")
+        );
+        assert!(
+            h.query_by_label("Grants on directory PYTHIA_BNM_DIR")
+                .is_some()
+        );
+        dba.execute("drop directory pythia_bnm_dir", &[]).unwrap();
+    }
+    // Users and roles are listed below the folders.
+    h.state_mut().test_browser().set_filter("PYTHIA");
+    h.run_steps(2);
+    h.get_by_label("Users").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("New user…").click();
+    h.run_steps(2);
+    wait_until(&mut h, "user form", |app| !app.test_focused_busy());
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("New user"));
+    h.get_by_label("Users").click();
+    h.run_steps(2);
+    wait_until(&mut h, "users", |app| !app.test_browser_loading());
+    h.get_by_label("pythia").click_secondary();
+    h.run_steps(2);
+    assert!(h.query_by_label("Edit user…").is_some());
+    assert!(h.query_by_label("Show schema").is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    // So are profiles; DEFAULT can't be dropped.
+    h.state_mut().test_browser().set_filter("DEFAULT");
+    h.run_steps(2);
+    h.get_by_label("Profiles").click();
+    h.run_steps(2);
+    wait_until(&mut h, "profiles", |app| !app.test_browser_loading());
+    h.get_by_label("default").click_secondary();
+    h.run_steps(2);
+    assert!(h.query_by_label("New profile…").is_some());
+    assert!(h.query_by_label("Drop…").is_none());
+    h.get_by_label("Edit profile…").click();
+    h.run_steps(2);
+    wait_until(&mut h, "profile form", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    assert_eq!(
+        h.state().test_focused_title().as_deref(),
+        Some("default (profile)")
+    );
+    save(&mut h, "edit-default-profile");
+
+    h.state_mut().test_browser().set_filter("PYTHIA_BNM");
+    h.run_steps(2);
+
+    h.get_by_label("Tables").click_secondary();
+    h.run_steps(2);
+    save(&mut h, "browser-new-folder-menu");
+    h.get_by_label("New table…").click();
+    h.run_steps(2);
+    wait_until(&mut h, "table builder", |app| !app.test_focused_busy());
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("New table"));
+
+    h.state_mut().test_expand_browser(&[ObjectType::Table]);
+    wait_until(&mut h, "tables", |app| !app.test_browser_loading());
+    h.get_by_label("pythia_bnm_t").click_secondary();
+    h.run_steps(2);
+    // Submenus carry their arrow in the label.
+    h.get_by_label("New ⏵").hover();
+    h.run_steps(2);
+    save(&mut h, "browser-new-submenu");
+    h.get_by_label("Index on this table…").click();
+    h.run_steps(2);
+    wait_until(&mut h, "index form", |app| !app.test_focused_busy());
+    let table = ObjectRef {
+        owner: "PYTHIA".into(),
+        name: "PYTHIA_BNM_T".into(),
+        object_type: ObjectType::Table,
+    };
+    assert_eq!(
+        h.state_mut().test_object_editor().target,
+        EditTarget::New {
+            owner: "PYTHIA".into(),
+            object_type: ObjectType::Index,
+            from: Some(table),
+        }
+    );
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "drop table pythia_bnm_t purge;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// The result grid's columns: dragging a header moves its column, the
+/// header menu freezes columns (which stay in step when scrolling), and
+/// copies follow the order shown.
+#[test]
+fn grid_columns() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "select level id, 'name ' || level name_col, level * 10 amount,
+       date '2026-01-01' + level created
+  from dual connect by level <= 40"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "query", |app| !app.test_focused_busy());
+    h.run_steps(3);
+    let order = |h: &Harness<'_, PythiaApp>| {
+        h.state().test_sql_window_ref().unwrap().state.results[0]
+            .grid
+            .visible_columns(4)
+    };
+    assert_eq!(order(&h), [0, 1, 2, 3]);
+
+    // Drag CREATED onto the left half of NAME_COL: it lands before it.
+    let from = h.get_by_label("CREATED").rect().center();
+    let to = h.get_by_label("NAME_COL").rect().left_center() + egui::vec2(3.0, 0.0);
+    h.hover_at(from);
+    h.run_steps(1);
+    h.drag_at(from);
+    h.run_steps(1);
+    for step in 1..=4 {
+        h.hover_at(from + (to - from) * (step as f32 / 4.0));
+        h.run_steps(1);
+    }
+    h.run_steps(1);
+    save(&mut h, "grid-column-drag");
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(2);
+    h.remove_cursor();
+    h.run_steps(2);
+    assert_eq!(order(&h), [0, 3, 1, 2]);
+
+    // Freeze up to CREATED (now second): ID and CREATED stay in place.
+    h.get_by_label("CREATED").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("Columns ⏵").hover();
+    h.run_steps(2);
+    save(&mut h, "grid-header-menu");
+    h.get_by_label("Freeze up to CREATED").click();
+    h.run_steps(3);
+    let grid = &h.state().test_sql_window_ref().unwrap().state.results[0].grid;
+    assert_eq!(grid.frozen_columns(4), 2);
+    // CREATED kept its width (fitted to the dates) through the move and
+    // into the frozen part. A label's rect is only what's shown, so measure
+    // the column against 19 monospace characters (from a 6-character value).
+    let date = h.get_by_label("2026-01-02 00:00:00").rect();
+    let column = h.get_by_label("name 1").rect().left() - date.left();
+    let needed = 19.0 * h.get_by_label("name 1").rect().width() / 6.0;
+    assert!(column > needed, "the date is cut off: {column} < {needed}");
+    save(&mut h, "grid-frozen");
+
+    // Scrolling the other part down takes the frozen part along: row 40
+    // shows in both (its number and ID left, its amount right).
+    let at = h.get_by_label("NAME_COL").rect().center() + egui::vec2(0.0, 60.0);
+    h.hover_at(at);
+    for _ in 0..6 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -20.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(2);
+    }
+    h.run_steps(10);
+    save(&mut h, "grid-frozen-scrolled");
+    assert!(h.query_by_label("400").is_some(), "the right part scrolled");
+    assert!(
+        h.query_all_by_label("40").count() >= 2,
+        "row number and ID of row 40 in the frozen part"
+    );
+
+    // Copies and exports go by the order shown.
+    let w = h.state().test_sql_window_ref().unwrap();
+    let r = &w.state.results[0];
+    let (columns, _) = pythia_ui::shown_data(&r.columns, &r.rows, &r.grid);
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["ID", "CREATED", "NAME_COL", "AMOUNT"]);
+}
+
+/// Closing a window with an uncommitted transaction asks first: Cancel
+/// keeps it, Roll back and close or Commit and close end it (#35).
+#[test]
+fn close_with_open_transaction() {
+    use crate::commands::Command;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let run = |h: &mut Harness<'_, PythiaApp>, text: &str| {
+        h.state_mut().test_open(OpenRequest::Sql {
+            connection: "pythia@FREEPDB1".into(),
+            text: text.into(),
+            run: true,
+        });
+        wait_until(h, text, |app| !app.test_focused_busy());
+    };
+    run(
+        &mut h,
+        "begin execute immediate 'drop table pythia_ctx_t purge';
+  exception when others then null; end;
+/
+create table pythia_ctx_t (id number);",
+    );
+    // What another session sees, once it's there.
+    let count = |h: &mut Harness<'_, PythiaApp>, expected: &str| {
+        let start = Instant::now();
+        loop {
+            run(h, "select count(*) from pythia_ctx_t");
+            let seen = h.state().test_sql_window_ref().unwrap().state.results[0].rows[0][0]
+                .clone()
+                .unwrap_or_default();
+            h.state_mut().test_command(Command::CloseTab);
+            h.run_steps(2);
+            if seen == expected || start.elapsed() > Duration::from_secs(10) {
+                return seen;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+
+    run(&mut h, "insert into pythia_ctx_t values (1)");
+    let window = h.state().test_focused();
+    assert!(h.state().test_pending_tx());
+    h.state_mut().test_command(Command::CloseTab);
+    h.run_steps(2);
+    assert!(h.query_by_label("Commit and close").is_some());
+    h.get_by_label_contains("has uncommitted changes");
+    save(&mut h, "close-open-transaction");
+
+    // Cancel: the window and its transaction stay.
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert_eq!(h.state().test_focused(), window);
+    assert!(h.state().test_pending_tx());
+
+    // Roll back and close.
+    h.state_mut().test_command(Command::CloseTab);
+    h.run_steps(2);
+    h.get_by_label("Roll back and close").click();
+    h.run_steps(2);
+    assert!(!h.state().test_pending_tx());
+    assert_ne!(h.state().test_focused(), window, "closed");
+    assert_eq!(count(&mut h, "0"), "0");
+
+    // Commit and close.
+    run(&mut h, "insert into pythia_ctx_t values (2)");
+    h.state_mut().test_command(Command::CloseTab);
+    h.run_steps(2);
+    h.get_by_label("Commit and close").click();
+    h.run_steps(2);
+    assert_eq!(count(&mut h, "1"), "1");
+
+    run(&mut h, "drop table pythia_ctx_t purge");
 }
 
 /// Favorites, recently opened objects and the invalid-only filter.
@@ -2336,8 +3172,17 @@ fn invalid_objects_indicator_and_recompile() {
         app.test_invalid_window()
             .is_some_and(|w| !w.is_busy() && !w.objects().is_empty())
     });
-    let listed = h.state().test_invalid_window().unwrap().objects().len();
-    assert_eq!(listed as u32, total);
+    // Other tests make objects invalid and valid again meanwhile: only
+    // this test's objects hold still.
+    let ours = h
+        .state()
+        .test_invalid_window()
+        .unwrap()
+        .objects()
+        .iter()
+        .filter(|o| o.id.name.starts_with("INV_"))
+        .count();
+    assert_eq!(ours as u32, invalid_now());
     let bad = h
         .state()
         .test_invalid_window()
@@ -2374,10 +3219,10 @@ fn invalid_objects_indicator_and_recompile() {
         .collect();
     assert!(left.contains(&"INV_BAD".to_owned()), "{left:?}");
     assert!(!left.contains(&"INV_P".to_owned()), "{left:?}");
-    // The status bar follows.
+    // The status bar follows (ours went from at least 4 to 1).
     wait_until(&mut h, "count refreshed", |app| {
         app.test_invalid_total("pythia@FREEPDB1")
-            .is_some_and(|n| n as usize == left.len())
+            .is_some_and(|n| n < total)
     });
     for sql in drops {
         conn.execute(sql, &[]).unwrap();
