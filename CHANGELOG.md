@@ -43,6 +43,9 @@ All notable changes to Pythia are documented here. The format follows
 - Trace analyzer: statements run again through a cached cursor are counted
   each time. Executions, fetches and rows after the first were dropped
   once the session cached the cursor (#79).
+- MySQL: the object browser's database picker no longer lists a `PUBLIC`
+  database; only Oracle has one, for public synonyms and database links
+  (#83).
 
 ## [0.4.1] - 2026-10-26
 
