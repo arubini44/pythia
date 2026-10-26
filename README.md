@@ -323,6 +323,14 @@ cargo build --release
 ./target/release/pythia
 ```
 
+To run an optimized build while working on Pythia, use the `fast` profile:
+a change rebuilds in 5–15 seconds, where a release build takes about two
+minutes for its link-time optimization.
+
+```sh
+cargo run --profile fast -p pythia-app
+```
+
 The database driver is our fork of
 [rust-oracledb](https://github.com/ortic/rust-oracledb) (branch `pythia`:
 upstream fixes that aren't released yet, and cancelling a running call),

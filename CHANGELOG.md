@@ -26,6 +26,12 @@ All notable changes to Pythia are documented here. The format follows
   life expectancy. Without `pg_read_all_stats` or `VIEW SERVER STATE` the
   dashboard shows what it can and says what's missing (#92).
 
+### Changed
+- Building: a `fast` profile (`cargo run --profile fast -p pythia-app`)
+  for running an optimized build locally; a change rebuilds in 5–15 s,
+  where the release profile takes about two minutes for its link-time
+  optimization (#99).
+
 ### Fixed
 - Editing another user no longer needs SELECT_CATALOG_ROLE: `ALTER USER`
   and `GRANT` don't need the DBA views, and the form failed with
