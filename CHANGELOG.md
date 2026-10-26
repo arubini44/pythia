@@ -6,6 +6,8 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-26
+
 ### Added
 - Instant Client packages: each release also has `pythia-instantclient_…`
   packages, built on the Oracle Instant Client, for servers that require
@@ -446,7 +448,8 @@ First release.
 - Scheduler jobs window: run, stop, enable, disable, drop, run history.
 - Saved user reports with parameters.
 
-[Unreleased]: https://github.com/ortic/pythia/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ortic/pythia/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/ortic/pythia/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ortic/pythia/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ortic/pythia/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ortic/pythia/releases/tag/v0.2.0
