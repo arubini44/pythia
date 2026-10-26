@@ -252,7 +252,10 @@ mod tests {
             if name == "screenshots.rs" || name == "test_db.rs" || name == "tests.rs" {
                 continue;
             }
-            let text = std::fs::read_to_string(&file).unwrap();
+            // CRLF where git checks out with it (Windows, #94).
+            let text = std::fs::read_to_string(&file)
+                .unwrap()
+                .replace("\r\n", "\n");
             let shown = text.split("\n#[cfg(test)]\nmod tests").next().unwrap();
             for (n, line) in shown.lines().enumerate() {
                 if line.trim_start().starts_with("//") {

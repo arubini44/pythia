@@ -921,8 +921,21 @@ fn management_pack_history() {
             }
         }
         assert!(!history.is_empty(), "the colored statement is in AWR");
-        let plan =
-            queries::awr_plan(&conn, &sql_id, history[0].plan_hash, history[0].dbid).unwrap();
+        // By time, though the root's and the PDB's snapshot ids differ
+        // (#93): the newest is this test's own snapshot.
+        assert!(
+            history.windows(2).all(|w| w[0].end <= w[1].end),
+            "{history:?}"
+        );
+        let newest = history.last().unwrap();
+        let plan = queries::awr_plan(&conn, &sql_id, newest.plan_hash, newest.dbid).unwrap();
+        assert!(plan.iter().any(|l| l.contains("CONNECT BY")), "{plan:?}");
+        // A row of the other repository (in a PDB) finds the plan too.
+        let (pdb, root): (i64, i64) = conn
+            .query_row_as("select con_dbid, dbid from v$database", &[])
+            .unwrap();
+        let other = if newest.dbid == pdb { root } else { pdb };
+        let plan = queries::awr_plan(&conn, &sql_id, newest.plan_hash, other).unwrap();
         assert!(plan.iter().any(|l| l.contains("CONNECT BY")), "{plan:?}");
         conn.execute(
             "begin dbms_workload_repository.remove_colored_sql(:1); end;",
