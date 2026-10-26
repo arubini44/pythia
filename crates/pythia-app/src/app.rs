@@ -2641,6 +2641,9 @@ impl PythiaApp {
                 w.state.running = None;
                 w.state.fetching = None;
                 w.state.queue.clear();
+                // Unbound, it runs on the connection the toolbar shows,
+                // instead of asking to connect again.
+                doc.connection = None;
             }
         }
     }

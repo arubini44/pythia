@@ -43,6 +43,10 @@ All notable changes to Pythia are documented here. The format follows
 - Trace analyzer: statements run again through a cached cursor are counted
   each time. Executions, fetches and rows after the first were dropped
   once the session cached the cursor (#79).
+- After disconnecting one of several connections, Execute in a SQL window
+  that was on it runs on the connection the toolbar shows instead of
+  opening the Connect dialog: its windows are no longer bound to the closed
+  connection (#84).
 
 ## [0.4.1] - 2026-10-26
 

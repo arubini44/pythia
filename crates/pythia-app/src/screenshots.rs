@@ -3774,6 +3774,58 @@ fn window_connection_switching() {
     assert!(h.query_by_label("Connection").is_none());
 }
 
+/// After disconnecting one of two connections, Execute in a window that
+/// was on it runs on the other one instead of opening the Connect dialog
+/// (#84).
+#[test]
+fn execute_after_disconnecting_its_connection() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let other = ConnectionProfile {
+        name: "other".into(),
+        color: None,
+        ..profile.clone()
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(other, password.clone());
+    wait_until(&mut h, "first connection", |app| {
+        app.test_connected_to("other")
+    });
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "second connection", |app| {
+        app.test_connected_to("pythia@FREEPDB1")
+    });
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "select 42 as answer from dual".into(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::Disconnect);
+    h.run_steps(2);
+    assert!(!h.state().test_connected_to("pythia@FREEPDB1"));
+    h.state_mut().test_execute_focused();
+    h.run_steps(2);
+    assert!(!h.state().test_connect_dialog_open(), "no Connect dialog");
+    assert_eq!(
+        h.state().test_focused_connection().as_deref(),
+        Some("other")
+    );
+    wait_until(&mut h, "the query", |app| !app.test_focused_busy());
+    let window = h.state_mut().test_sql_window();
+    let errors: Vec<&str> = window
+        .state
+        .messages
+        .iter()
+        .filter(|m| m.level == crate::sql_window::Level::Error)
+        .map(|m| m.text.as_str())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(window.state.results.len(), 1, "the query ran");
+}
+
 /// The toolbar's Debug button is enabled only with the cursor in an
 /// anonymous block of a connected SQL window.
 #[test]
