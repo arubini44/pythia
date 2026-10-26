@@ -4357,6 +4357,16 @@ impl PythiaApp {
         self.settings_dialog.open = false;
     }
 
+    /// Opens Settings on its `i`th page; false past the last.
+    pub fn test_settings_page(&mut self, i: usize) -> bool {
+        self.settings_dialog.open = true;
+        self.settings_dialog.show_page(i)
+    }
+
+    pub fn test_settings_open(&self) -> bool {
+        self.settings_dialog.open
+    }
+
     pub fn test_learning(&self) -> bool {
         self.learn_inflight.is_some()
     }
