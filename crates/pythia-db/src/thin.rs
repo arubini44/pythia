@@ -154,6 +154,25 @@ fn needs_client(why: &str) -> Error {
     )
 }
 
+/// A connect string that is neither Easy Connect nor in a tnsnames.ora.
+fn no_tnsnames(connect_string: &str, searched: &[std::path::PathBuf]) -> Error {
+    let searched = if searched.is_empty() {
+        "TNS_ADMIN and ORACLE_HOME aren't set and there is no Oracle client on the library path"
+            .to_owned()
+    } else {
+        let dirs: Vec<_> = searched.iter().map(|d| d.display().to_string()).collect();
+        format!("looked in {}", dirs.join(", "))
+    };
+    Error::new(
+        ErrorKind::Other,
+        format!(
+            "\"{connect_string}\" isn't an Easy Connect string (host:port/service), \
+             and there is no tnsnames.ora to look it up in ({searched}). \
+             Set TNS_ADMIN to the directory with your tnsnames.ora."
+        ),
+    )
+}
+
 // ----- connections -------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,13 +225,23 @@ impl Connector {
         let mut config = oracledb::Config::default().set_credentials(&self.user, &self.password);
         // Aliases from the tnsnames.ora the connect dialog offers them from
         // (the driver itself only looks at TNS_ADMIN and ORACLE_HOME).
-        if let Some(dir) = pythia_config::tns::admin_dirs()
-            .into_iter()
-            .find(|d| d.join("tnsnames.ora").exists())
-        {
+        let admin_dirs = pythia_config::tns::admin_dirs();
+        let tns_dir = admin_dirs.iter().find(|d| d.join("tnsnames.ora").exists());
+        if let Some(dir) = tns_dir {
             config = config.set_config_dir(&dir.to_string_lossy());
         }
-        let mut config = config.set_connect_string(&self.connect_string)?;
+        let mut config = match config.set_connect_string(&self.connect_string) {
+            Ok(config) => config,
+            // Not Easy Connect, and no tnsnames.ora to look it up in (or
+            // TNS_ADMIN names a directory without one).
+            Err(e)
+                if tns_dir.is_none()
+                    && matches!(e.kind(), ThinKind::NoConfigDir | ThinKind::StreamOperation) =>
+            {
+                return Err(no_tnsnames(&self.connect_string, &admin_dirs));
+            }
+            Err(e) => return Err(e.into()),
+        };
         if let Some(privilege) = self.privilege {
             config = config.set_auth_mode(match privilege {
                 Privilege::Sysdba => oracledb::AUTH_MODE_SYSDBA,
@@ -1666,6 +1695,22 @@ fn vector(v: &Vector) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alias_without_tnsnames() {
+        let dirs = pythia_config::tns::admin_dirs();
+        if dirs.iter().any(|d| d.join("tnsnames.ora").exists()) {
+            return; // this machine has one
+        }
+        let e = match Connection::connect("u", "p", "ERP-SBX.EXAMPLE.COM") {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("connected"),
+        };
+        assert!(
+            e.starts_with("\"ERP-SBX.EXAMPLE.COM\" isn't an Easy Connect string"),
+            "{e}"
+        );
+    }
 
     #[test]
     fn civil_dates_round_trip() {
