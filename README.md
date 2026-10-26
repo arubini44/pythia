@@ -109,7 +109,8 @@ for Linux, Windows and macOS.
 - MySQL: a dashboard of its own; its threads open their details
   (statement and plan, transaction, locks, the thread they wait for) and
   can be killed.
-- PostgreSQL: a dashboard of its own, from the statistics views.
+- PostgreSQL and SQL Server: a dashboard each, from their statistics
+  views and DMVs.
 
 ![Monitoring dashboard](docs/screenshots/monitor-dashboard.png)
 
@@ -232,6 +233,18 @@ for Linux, Windows and macOS.
   largest databases and tables, and top statements from
   `pg_stat_statements` (when it is loaded). Other users' statements need
   `pg_read_all_stats` (or `pg_monitor`).
+- SQL Server's monitoring dashboard: findings first (blocking and who
+  blocks, a sleeping session with an open transaction named as such, a
+  log nearly full, memory grants pending, low page life expectancy,
+  connections near the limit, deadlocks, buffer cache hit ratio, a high
+  share of compilations, long transactions and requests), then KPIs and
+  trends from the performance counters, running requests by wait class,
+  sessions by login, host, program and database, blocking, open
+  transactions with their log use, top waits since the refresh before,
+  database and table sizes, and top statements from the plan cache. Most
+  of it needs `VIEW SERVER STATE` (`VIEW SERVER PERFORMANCE STATE` on
+  2022); without it the dashboard shows the login's own sessions and says
+  so.
 - Scripts split the database's way: PostgreSQL's dollar-quoted routine
   bodies stay whole and `::` casts aren't bind variables; on SQL Server,
   `GO` on a line of its own ends a batch, routines and scripts with
