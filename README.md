@@ -352,6 +352,7 @@ PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 | `PYTHIA_TEST_SSH`, `PYTHIA_TEST_MYSQL_VIA_SSH` | SSH tunnel tests: `pythia:pythia@localhost:2222` and `pythia/pythia@mysql:3306/pythia` for `docker compose up -d mysql ssh` |
 | `PYTHIA_TEST_POSTGRES` | PostgreSQL tests (a superuser), e.g. `pythia/pythia@localhost:5432/pythia` for `docker compose up -d postgres`, which loads `pg_stat_statements` |
 | `PYTHIA_TEST_MSSQL` | SQL Server tests, e.g. `pythia/pythia@localhost:1433/pythia?trust` for `docker compose up -d mssql mssql-init` |
+| `PYTHIA_TEST_MSSQL_DBA` | SQL Server dashboard tests that need VIEW SERVER STATE, e.g. `sa/Pythia-2026@localhost:1433/pythia?trust` |
 | `PYTHIA_TEST_DB_DBA` | monitor, compare and debugger tests (`system/oracle@…`) |
 | `PYTHIA_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local Podman container; with Docker on Linux, the compose network's gateway from `docker network inspect pythia_default`) |
 | `PYTHIA_SCREENSHOT_DIR` | renders the real UI offscreen into PNGs (`cargo test -p pythia-app screenshots`) |

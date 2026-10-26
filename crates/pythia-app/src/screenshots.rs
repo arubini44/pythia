@@ -4887,3 +4887,59 @@ select id, customer, total, @limit as limit from app_orders where total < @limit
     });
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }
+
+/// The SQL Server dashboard (`PYTHIA_TEST_MSSQL_DBA`, a login with VIEW
+/// SERVER STATE): server KPIs, trends, waits and storage on the
+/// connection's own session.
+#[test]
+fn sqlserver_dashboard() {
+    use crate::commands::Command;
+    let Some(spec) = std::env::var("PYTHIA_TEST_MSSQL_DBA").ok() else {
+        return;
+    };
+    let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+    let (username, password) = credentials.split_once('/').unwrap();
+    let profile = ConnectionProfile {
+        name: "warehouse".into(),
+        kind: pythia_config::DbKind::SqlServer,
+        username: username.into(),
+        connect_string: connect_string.into(),
+        color: Some([0xe1, 0x1d, 0x48]),
+        ..Default::default()
+    };
+    // Tall enough for all of it.
+    let mut h = sized_harness(egui::vec2(1440.0, 2200.0));
+    h.state_mut().test_connect(profile, password.into());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_command(Command::MonitorDashboard);
+
+    let start = Instant::now();
+    while h.query_by_label("Page life expectancy").is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "timed out waiting for the dashboard"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    // Refreshing now until the charts have two samples.
+    let start = Instant::now();
+    while h.query_all_by_label("Collecting samples…").next().is_some() {
+        assert!(start.elapsed() < Duration::from_secs(60), "no charts");
+        std::thread::sleep(Duration::from_millis(600));
+        h.get_by_label("⟳").click();
+        h.run_steps(3);
+    }
+    for label in [
+        "Connections",
+        "Batch requests / s",
+        "Buffer cache hit ratio",
+        "Top waits (since the refresh before)",
+        "Largest databases",
+        "Running requests, longest first",
+    ] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("Dashboard"));
+    save(&mut h, "sqlserver-dashboard");
+}
