@@ -173,7 +173,7 @@ enum Pending {
     /// to debug or not.
     Test {
         object: ObjectRef,
-        member: Option<String>,
+        member: Option<Subprogram>,
         debug: bool,
     },
     TestLink(ObjectRef),
@@ -537,7 +537,7 @@ impl Browser {
         &self,
         answer: crate::catalog::Answer,
         object: &ObjectRef,
-        member: Option<&str>,
+        member: Option<&Subprogram>,
         debug: bool,
         effects: &mut Effects,
         log: &mut Vec<String>,
@@ -545,16 +545,24 @@ impl Browser {
         let crate::catalog::Answer::Members(_, _, members) = answer else {
             return;
         };
-        let wanted = member.unwrap_or(&object.name);
-        let Some(found) = members.iter().find(|m| m.name.eq_ignore_ascii_case(wanted)) else {
+        let wanted = member.map_or(object.name.as_str(), |m| m.name.as_str());
+        let named = |m: &&pythia_lsp_core::CatalogMember| m.name.eq_ignore_ascii_case(wanted);
+        // That overload, else the first of the name.
+        let overload = member.and_then(|m| m.overload);
+        let found = members
+            .iter()
+            .filter(named)
+            .find(|m| overload.is_none() || m.overload == overload)
+            .or_else(|| members.iter().find(named));
+        let Some(found) = found else {
             log.push(format!("No parameters found for {wanted}"));
             return;
         };
         let qualified = match member {
-            Some(name) => format!(
+            Some(m) => format!(
                 "{}.{}",
                 object.qualified(),
-                crate::documents::quote_ident(name)
+                crate::documents::quote_ident(&m.name)
             ),
             None => object.qualified(),
         };
@@ -615,14 +623,9 @@ impl Browser {
             }) = self.pending.remove(&id)
             {
                 match result.map(|any| any.downcast::<crate::catalog::Answer>()) {
-                    Ok(Ok(answer)) => self.open_test(
-                        *answer,
-                        &object,
-                        member.as_deref(),
-                        debug,
-                        &mut effects,
-                        log,
-                    ),
+                    Ok(Ok(answer)) => {
+                        self.open_test(*answer, &object, member.as_ref(), debug, &mut effects, log)
+                    }
                     Ok(Err(_)) => {}
                     Err(e) => log.push(format!("Test script: {e}")),
                 }
@@ -1336,13 +1339,16 @@ impl Browser {
                     );
                     ui.weak(&m.signature);
                     label.context_menu(|ui| {
+                        let subprogram = || Subprogram {
+                            name: m.name.clone(),
+                            overload: m.overload.as_deref().and_then(|o| o.parse().ok()),
+                        };
                         if ui.button("Test…").clicked() {
-                            actions.push(ObjectAction::Test(package.clone(), Some(m.name.clone())));
+                            actions.push(ObjectAction::Test(package.clone(), Some(subprogram())));
                             ui.close();
                         }
                         if ui.button("Debug…").clicked() {
-                            actions
-                                .push(ObjectAction::Debug(package.clone(), Some(m.name.clone())));
+                            actions.push(ObjectAction::Debug(package.clone(), Some(subprogram())));
                             ui.close();
                         }
                         if ui.button("Edit package body").clicked() {
@@ -1673,7 +1679,7 @@ impl Browser {
     fn request_test(
         &mut self,
         object: ObjectRef,
-        member: Option<String>,
+        member: Option<Subprogram>,
         debug: bool,
         effects: &mut Effects,
     ) {
@@ -1958,17 +1964,16 @@ pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Op
     let testable = matches!(t, ObjectType::Procedure | ObjectType::Function)
         || (t == ObjectType::Package && options.member.is_some());
     if testable && plsql {
-        item(
-            ui,
-            "Test…",
-            ObjectAction::Test(object.clone(), options.member.clone()),
-        );
+        // A reference doesn't say which overload: the first.
+        let member = || {
+            options.member.clone().map(|name| Subprogram {
+                name,
+                overload: None,
+            })
+        };
+        item(ui, "Test…", ObjectAction::Test(object.clone(), member()));
         if options.dialect.supports(Feature::Debugger) {
-            item(
-                ui,
-                "Debug…",
-                ObjectAction::Debug(object.clone(), options.member.clone()),
-            );
+            item(ui, "Debug…", ObjectAction::Debug(object.clone(), member()));
         }
     }
     item(ui, "Describe", ObjectAction::Describe(object.clone()));
@@ -2044,6 +2049,15 @@ pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Op
     chosen
 }
 
+/// A package's subprogram to test or debug: its name and, if it is
+/// overloaded and known, which overload (`ALL_PROCEDURES.OVERLOAD`, which
+/// numbers them in the order of the spec).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subprogram {
+    pub name: String,
+    pub overload: Option<u32>,
+}
+
 /// What can be done with a database object, from the browser or an editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectAction {
@@ -2056,10 +2070,10 @@ pub enum ObjectAction {
     CopyName(ObjectRef),
     CopyQualified(ObjectRef),
     Drop(ObjectRef),
-    Test(ObjectRef, Option<String>),
+    Test(ObjectRef, Option<Subprogram>),
     /// Test… in a SQL window that debugs right away, stopping on entry to
     /// the subprogram.
-    Debug(ObjectRef, Option<String>),
+    Debug(ObjectRef, Option<Subprogram>),
     /// Open the package at this subprogram.
     EditAt(ObjectRef, String),
     /// Show the object in the browser's tree.
@@ -2173,6 +2187,66 @@ fn object_ref(o: &DbObject) -> ObjectRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test… and Debug… on an overload use that overload's parameters,
+    /// the first one when it isn't known (#85); Debug… stops in the body.
+    #[test]
+    fn test_block_for_an_overload() {
+        use pythia_lsp_core::{CatalogMember, CatalogParam, MemberKind, ParamMode};
+        let member = |overload, param: &str| CatalogMember {
+            name: "P".into(),
+            kind: MemberKind::Procedure,
+            params: vec![CatalogParam {
+                name: param.into(),
+                mode: ParamMode::In,
+                data_type: "NUMBER".into(),
+                has_default: false,
+            }],
+            return_type: None,
+            overload: Some(overload),
+        };
+        let browser = Browser {
+            connection: Some("hr@db".into()),
+            ..Browser::default()
+        };
+        let package = ObjectRef {
+            owner: "HR".into(),
+            name: "PKG".into(),
+            object_type: ObjectType::Package,
+        };
+        let open = |overload, debug| {
+            let answer = crate::catalog::Answer::Members(
+                "HR".into(),
+                "PKG".into(),
+                vec![member(1, "P_A"), member(2, "P_B")],
+            );
+            let p = Subprogram {
+                name: "P".into(),
+                overload,
+            };
+            let mut effects = Effects::default();
+            browser.open_test(
+                answer,
+                &package,
+                Some(&p),
+                debug,
+                &mut effects,
+                &mut Vec::new(),
+            );
+            match effects.open.pop() {
+                Some(OpenRequest::Sql { text, .. }) => (text, None),
+                Some(OpenRequest::Debug { text, entry, .. }) => (text, Some(entry)),
+                _ => panic!("no test window"),
+            }
+        };
+        assert!(open(Some(2), false).0.contains("p_b => :p_b"));
+        assert!(open(Some(1), false).0.contains("p_a => :p_a"));
+        assert!(open(None, false).0.contains("p_a => :p_a"), "the first");
+        let (text, entry) = open(Some(2), true);
+        assert!(text.contains("p_b => :p_b"), "{text}");
+        let body = pythia_debugger::Unit::new("HR", "PKG", pythia_debugger::UnitType::PackageBody);
+        assert_eq!(entry, Some((body, "P".to_owned())));
+    }
 
     #[test]
     fn drops_public_objects_and_links() {

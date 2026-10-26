@@ -1011,14 +1011,16 @@ fn find_word(text: &str, word: &str) -> Option<usize> {
 /// The subprogram whose name is at `offset` in a part, for Test… and
 /// Debug…: the standalone procedure or function, or a subprogram of a
 /// package that its spec declares (`spec`; a block can't call private
-/// ones). Gives the object and, for a package, the member.
+/// ones). Gives the object and, for a package, the member with its
+/// overload: Oracle numbers overloads in the order of the spec, and an
+/// implementation in the body is the declaration with its parameters.
 fn subprogram_at(
     object: &ObjectRef,
     part_type: ObjectType,
     outline: &[pythia_lsp_core::OutlineItem],
     spec: &[pythia_lsp_core::OutlineItem],
     offset: usize,
-) -> Option<(ObjectRef, Option<String>)> {
+) -> Option<(ObjectRef, Option<crate::browser::Subprogram>)> {
     use pythia_lsp_core::{OutlineItem, OutlineKind as K};
     let subprogram = |item: &&OutlineItem| matches!(item.kind, K::Procedure | K::Function);
     let named = |item: &&OutlineItem| {
@@ -1037,16 +1039,38 @@ fn subprogram_at(
         }
         ObjectType::Package | ObjectType::PackageBody => {
             let item = members(outline).find(named)?;
-            members(spec)
-                .filter(subprogram)
-                .any(|d| d.name.eq_ignore_ascii_case(&item.name))
-                .then(|| {
-                    let package = ObjectRef {
-                        object_type: ObjectType::Package,
-                        ..object.clone()
-                    };
-                    (package, Some(item.name.to_uppercase()))
-                })
+            let same = |i: &&OutlineItem| subprogram(i) && i.name.eq_ignore_ascii_case(&item.name);
+            let declared: Vec<&OutlineItem> = members(spec).filter(same).collect();
+            let index = if part_type == ObjectType::Package {
+                declared.iter().position(|d| std::ptr::eq(*d, item))
+            } else {
+                // The same parameters, else the same position.
+                let params = |i: &OutlineItem| {
+                    i.detail
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_lowercase()
+                };
+                declared
+                    .iter()
+                    .position(|d| params(d) == params(item))
+                    .or_else(|| {
+                        members(outline)
+                            .filter(same)
+                            .position(|i| std::ptr::eq(i, item))
+                    })
+            }
+            .filter(|i| *i < declared.len())?;
+            let package = ObjectRef {
+                object_type: ObjectType::Package,
+                ..object.clone()
+            };
+            let member = crate::browser::Subprogram {
+                name: item.name.to_uppercase(),
+                overload: (declared.len() > 1).then_some(index as u32 + 1),
+            };
+            Some((package, Some(member)))
         }
         _ => None,
     }
@@ -1145,6 +1169,7 @@ fn markers(errors: &[CompileError]) -> Vec<Marker> {
 #[cfg(test)]
 mod tests {
     use super::{enclosing_subprograms, member_span, subprogram_at, subprograms};
+    use crate::browser::Subprogram;
     use crate::documents::ObjectRef;
     use pythia_db::ObjectType;
 
@@ -1167,7 +1192,13 @@ mod tests {
             object_type: ObjectType::Package,
         };
         let at = |text: &str, word: &str| text.find(word).unwrap() + 2;
-        let member = Some((package.clone(), Some("RAISE_SALARY".to_owned())));
+        let member = Some((
+            package.clone(),
+            Some(Subprogram {
+                name: "RAISE_SALARY".into(),
+                overload: None,
+            }),
+        ));
         let spec_at = |offset| {
             subprogram_at(
                 &package,
@@ -1205,6 +1236,57 @@ mod tests {
                 at(body, "raise_salary")
             ),
             None
+        );
+
+        // Overloads: numbered in the spec's order; in the body by their
+        // parameters, whatever the order there.
+        let spec = "create or replace package hr.emp_pkg as\n  procedure p(p_b varchar2);\n  \
+                    procedure q;\n  procedure p(p_a number, p_c date);\nend;";
+        let body = "create or replace package body hr.emp_pkg as\n  \
+                    procedure p(P_A  NUMBER, p_c date) is begin null; end;\n  \
+                    procedure q is begin null; end;\n  \
+                    procedure p(p_b varchar2) is begin null; end;\nend;";
+        let (spec_outline, body_outline) = (
+            pythia_lsp_core::outline(spec),
+            pythia_lsp_core::outline(body),
+        );
+        let overload = |part, outline, text: &str, from: &str| {
+            let offset = text.find(from).unwrap() + "procedure ".len();
+            subprogram_at(&package, part, outline, &spec_outline, offset)
+                .and_then(|(_, m)| m)
+                .map(|m| (m.name, m.overload))
+        };
+        let p = |n| Some(("P".to_owned(), Some(n)));
+        assert_eq!(
+            overload(ObjectType::Package, &spec_outline, spec, "procedure p(p_b"),
+            p(1)
+        );
+        assert_eq!(
+            overload(ObjectType::Package, &spec_outline, spec, "procedure p(p_a"),
+            p(2)
+        );
+        assert_eq!(
+            overload(ObjectType::Package, &spec_outline, spec, "procedure q"),
+            Some(("Q".to_owned(), None)),
+            "not overloaded"
+        );
+        assert_eq!(
+            overload(
+                ObjectType::PackageBody,
+                &body_outline,
+                body,
+                "procedure p(P_A"
+            ),
+            p(2)
+        );
+        assert_eq!(
+            overload(
+                ObjectType::PackageBody,
+                &body_outline,
+                body,
+                "procedure p(p_b"
+            ),
+            p(1)
         );
 
         let function = ObjectRef {

@@ -14,6 +14,12 @@ All notable changes to Pythia are documented here. The format follows
   right-clicking a subprogram's name in the spec, or a public one in the
   body, offers Test… and Debug… too (#71).
 
+### Fixed
+- Test… on an overloaded package subprogram tests that overload, not
+  always the first one: in the object browser, and in a program window,
+  where the overload is the declaration right-clicked in the spec, or the
+  one with the same parameters as the implementation in the body (#85).
+
 ## [0.4.1] - 2026-10-26
 
 ### Added

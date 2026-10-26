@@ -7,7 +7,7 @@ use pythia_db::Feature;
 use pythia_ui::icons::Icon;
 
 use crate::assist::{Assist, ContextTarget, Request};
-use crate::browser::{MenuOptions, ObjectAction, object_menu};
+use crate::browser::{MenuOptions, ObjectAction, Subprogram, object_menu};
 use crate::commands::{Command, Keymap};
 use crate::documents::{DocContext, Effects, ObjectRef};
 use crate::editor::Editor;
@@ -15,12 +15,12 @@ use crate::editor::Editor;
 /// Shows the context menu of an editor on right-click; call every frame
 /// after `Editor::ui` and `Assist::handle` with the editor's response.
 /// `subprogram` is the one whose declaration was right-clicked in a program
-/// window (object, and member of a package), to test or debug.
+/// window (object, and the member of a package), to test or debug.
 pub fn show(
     response: &egui::Response,
     editor: &mut Editor,
     assist: &mut Assist,
-    subprogram: Option<(ObjectRef, Option<String>)>,
+    subprogram: Option<(ObjectRef, Option<Subprogram>)>,
     cx: &DocContext,
 ) -> Effects {
     let mut effects = Effects::default();
