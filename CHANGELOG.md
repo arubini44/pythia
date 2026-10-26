@@ -25,6 +25,9 @@ All notable changes to Pythia are documented here. The format follows
   always the first one: in the object browser, and in a program window,
   where the overload is the declaration right-clicked in the spec, or the
   one with the same parameters as the implementation in the body (#85).
+- Clicking an entry in the completion list inserts it. The click closed the
+  list without inserting anything and left the editor without focus; only
+  the keyboard worked (#72).
 
 ## [0.4.1] - 2026-10-26
 
