@@ -261,6 +261,11 @@ which driver a build uses and the client version it found. Installing one
 flavor replaces the other; settings and connections stay. To build this
 flavor yourself: `cargo build --release --features pythia-db/thick`.
 
+**WSL:** under WSLg, Pythia opens its window through X11 (Xwayland), since
+WSLg's compositor crashes on Wayland windows like Pythia's
+([microsoft/wslg#1386](https://github.com/microsoft/wslg/issues/1386)).
+`PYTHIA_WAYLAND=1` keeps Wayland.
+
 ## Building from source
 
 Requirements: Rust (stable).

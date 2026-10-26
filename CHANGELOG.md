@@ -96,6 +96,12 @@ All notable changes to Pythia are documented here. The format follows
   browser asks to pick one (#81).
 
 ### Fixed
+- WSL: Pythia no longer takes down WSLg's compositor, which closed every
+  Linux GUI app's window, often soon after Pythia started (e.g. on opening
+  the MySQL dashboard). WSLg's Weston crashes when a Wayland app grows a
+  shared-memory pool it draws from, as Pythia did for each new mouse cursor
+  shape (microsoft/wslg#1386). Under WSLg Pythia now opens its window
+  through X11 (Xwayland); `PYTHIA_WAYLAND=1` keeps Wayland (#88).
 - Windows: `pythia.exe` carries Pythia's icon and version, so the taskbar,
   the Start menu and desktop shortcuts, Explorer, Installed apps and
   associated files show Pythia's icon rather than the default one, and Task

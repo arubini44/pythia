@@ -38,6 +38,10 @@ serde.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# Under WSLg the window opens through X11 (main.rs, #88); eframe's winit.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+
 [build-dependencies]
 # The icon and version resource of pythia.exe (build.rs).
 embed-resource = "3"

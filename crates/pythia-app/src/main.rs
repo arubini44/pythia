@@ -163,6 +163,7 @@ fn run(
             .with_min_inner_size([640.0, 400.0])
             .with_icon(window_icon()),
         persistence_path: paths.as_ref().map(|p| p.data_dir.join("workspace.ron")),
+        event_loop_builder: x11_on_wslg(),
         ..Default::default()
     };
     eframe::run_native(
@@ -173,6 +174,41 @@ fn run(
             Ok(Box::new(app::PythiaApp::new(cc, paths)))
         }),
     )
+}
+
+/// Under WSLg the window opens through X11 (Xwayland). WSLg's compositor,
+/// Weston 9, keeps a pointer into a client's shm pool and crashes in
+/// pixman when the client grows that pool, as winit's cursor theme does for
+/// each new cursor shape (microsoft/wslg#1386); Xwayland never grows one
+/// (#88). `PYTHIA_WAYLAND=1` keeps Wayland.
+#[cfg(target_os = "linux")]
+fn x11_on_wslg() -> Option<eframe::EventLoopBuilderHook> {
+    let kernel = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    if !use_x11(&kernel, |name| {
+        std::env::var_os(name).is_some_and(|v| !v.is_empty())
+    }) {
+        return None;
+    }
+    info!("WSLg: opening the window through X11 (PYTHIA_WAYLAND=1 keeps Wayland)");
+    Some(Box::new(|builder| {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        builder.with_x11();
+    }))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn x11_on_wslg() -> Option<eframe::EventLoopBuilderHook> {
+    None
+}
+
+/// On WSL (its kernel's release names Microsoft) with both Wayland and X11
+/// there, unless `PYTHIA_WAYLAND` is set.
+#[cfg(target_os = "linux")]
+fn use_x11(kernel: &str, set: impl Fn(&str) -> bool) -> bool {
+    kernel.to_ascii_lowercase().contains("microsoft")
+        && set("WAYLAND_DISPLAY")
+        && set("DISPLAY")
+        && !set("PYTHIA_WAYLAND")
 }
 
 /// The application icon, embedded at build time.
@@ -226,4 +262,27 @@ fn install_panic_hook(paths: Option<&Paths>) {
         }
         default_hook(panic);
     }));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::use_x11;
+
+    #[test]
+    fn x11_only_under_wslg() {
+        let wsl = "6.18.54.1-microsoft-standard-WSL2";
+        let env = |names: &'static [&'static str]| move |name: &str| names.contains(&name);
+        assert!(use_x11(wsl, env(&["WAYLAND_DISPLAY", "DISPLAY"])));
+        // Another Linux, or WSL without one of the two, or opted out.
+        assert!(!use_x11(
+            "6.8.0-45-generic",
+            env(&["WAYLAND_DISPLAY", "DISPLAY"])
+        ));
+        assert!(!use_x11(wsl, env(&["WAYLAND_DISPLAY"])));
+        assert!(!use_x11(wsl, env(&["DISPLAY"])));
+        assert!(!use_x11(
+            wsl,
+            env(&["WAYLAND_DISPLAY", "DISPLAY", "PYTHIA_WAYLAND"])
+        ));
+    }
 }
