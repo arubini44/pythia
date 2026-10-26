@@ -1021,12 +1021,7 @@ impl SqlWindow {
                 let pos = r.start + offset.min(r.sql.len());
                 Some(pos..pos + 1)
             });
-        let text = match error.code {
-            Some(code) if !error.message.starts_with("ORA-") => {
-                format!("ORA-{code:05}: {}", error.message)
-            }
-            _ => error.message.clone(),
-        };
+        let text = error.text();
         if let Some(jump) = &jump {
             self.editor.select(jump.clone());
         }

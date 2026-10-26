@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::documents::{
     DocContext, Effects, ObjectRef, OpenRequest, Target, quote_ident, request_id,
 };
-use crate::object_editor::{ApplyError, error_text, first_line, ident, names, picker};
+use crate::object_editor::{ApplyError, first_line, ident, names, picker};
 use crate::table_partitions::{self, Existing};
 
 #[derive(Serialize, Deserialize)]
@@ -310,11 +310,7 @@ impl TableEditor {
                     }
                     Err(e) => {
                         self.state.outcome = Some((
-                            format!(
-                                "{}\n\nin: {}",
-                                error_text(&e.error),
-                                first_line(&e.statement)
-                            ),
+                            format!("{}\n\nin: {}", e.error.text(), first_line(&e.statement)),
                             false,
                         ));
                     }
