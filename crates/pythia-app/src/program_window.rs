@@ -543,6 +543,7 @@ impl ProgramWindow {
             if self.parts.len() > 1
                 && ui
                     .add_enabled(!busy && cx.connected, egui::Button::new("Compile all"))
+                    .on_hover_text("Compile the specification, then the body; stops at the first error")
                     .clicked()
             {
                 if cx.settings.format_auto.on_save {

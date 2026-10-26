@@ -6,6 +6,10 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Program windows: *Compile all* has a tooltip saying that it compiles the
+  specification, then the body, and stops at the first error (#78).
+
 ## [0.4.1] - 2026-10-26
 
 ### Added
