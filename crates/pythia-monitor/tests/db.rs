@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pythia_db::oracle::Connection;
-use pythia_monitor::queries::{self, SessionFilter};
+use pythia_monitor::queries::{self, DetailTab, SessionFilter};
 use pythia_monitor::tkprof::{self, CallKind};
 
 fn connect(var: &str) -> Option<Connection> {
@@ -607,4 +607,98 @@ fn lock_names_of_other_schemas() {
     waiter.join().unwrap();
     dba.execute("drop table pythia_mon_names purge", &[])
         .unwrap();
+}
+
+/// Session details read the parts asked for (#74): the previous SQL with
+/// its captured binds and plan, the V$SESSION row, and the overview with
+/// the PL/SQL a session runs.
+#[test]
+fn session_detail_parts() {
+    let Some(conn) = dba() else { return };
+    let other = open_dba();
+    let (other_sid, other_serial) = (sid(&other), serial(&other));
+    // A statement of its own (hard parsed), so its bind is captured.
+    let marker = format!(
+        "pythia_binds_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let n: i64 = other
+        .query_row_as(
+            &format!("select /* {marker} */ count(*) from dual where dummy = :1"),
+            &[&"X"],
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+    let parts = [DetailTab::Sql, DetailTab::Plan, DetailTab::Columns];
+    let d = queries::session_details(&conn, other_sid, other_serial, &parts);
+    assert!(d.errors.is_empty(), "{:?}", d.errors);
+    assert_eq!(d.loaded, parts);
+    assert!(
+        d.prev_sql_text.as_deref().unwrap_or("").contains(&marker),
+        "{:?}",
+        d.prev_sql_text
+    );
+    assert!(
+        d.prev_binds.iter().any(|b| b.value.as_deref() == Some("X")),
+        "{:?}",
+        d.prev_binds
+    );
+    assert!(!d.plan.is_empty());
+    assert!(
+        d.columns
+            .iter()
+            .any(|(c, v)| c == "SID" && *v == other_sid.to_string()),
+        "{:?}",
+        d.columns
+    );
+    assert!(
+        d.overview.is_none() && d.stats.is_empty(),
+        "only the parts asked for"
+    );
+
+    // While it runs a package's procedure, the overview names it.
+    conn.execute(
+        "create or replace package pythia_mon_plsql as procedure wait_a_bit; end;",
+        &[],
+    )
+    .unwrap();
+    conn.execute(
+        "create or replace package body pythia_mon_plsql as \
+           procedure wait_a_bit is begin dbms_session.sleep(3); end; end;",
+        &[],
+    )
+    .unwrap();
+    let running = thread::spawn(move || {
+        other
+            .execute("begin pythia_mon_plsql.wait_a_bit; end;", &[])
+            .unwrap();
+    });
+    let mut overview = None;
+    wait_for("the PL/SQL it runs", || {
+        let d = queries::session_details(&conn, other_sid, other_serial, &[DetailTab::Overview]);
+        let o = d.overview.unwrap();
+        let found = o
+            .plsql
+            .iter()
+            .any(|u| u.name == "PYTHIA_MON_PLSQL" && u.subprogram.as_deref() == Some("WAIT_A_BIT"));
+        if found {
+            overview = Some(o);
+        }
+        found
+    });
+    let o = overview.unwrap();
+    eprintln!("{o:#?}");
+    assert!(
+        o.client.iter().any(|(n, _)| n == "Program"),
+        "{:?}",
+        o.client
+    );
+    assert!(o.process.is_some());
+    assert!(!o.time_model.is_empty());
+    assert!(o.connection.iter().any(|(n, _)| n == "Network encryption"));
+    running.join().unwrap();
+    conn.execute("drop package pythia_mon_plsql", &[]).unwrap();
 }

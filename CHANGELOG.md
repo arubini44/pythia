@@ -18,6 +18,16 @@ All notable changes to Pythia are documented here. The format follows
   after transaction*, and SQL trace on or off as it is now. *Blocked by*
   and the sessions it blocks are links, and the kill dialog says how much
   of an open transaction it rolls back (#74).
+- Monitor: session details open on a new *Overview*: OS user, machine,
+  client process and driver, service, network encryption, the open
+  transaction, PGA, temp space and active sorts, long operations, the
+  PL/SQL being run (a link opens it at the subprogram), where its time went
+  (time model) and its waits since logon. The SQL tab shows captured bind
+  values and opens a statement in a SQL window; the plan is the session's
+  own child cursor with peeked binds; statistics show the change since the
+  read before; open cursors group by SQL_ID; locked tables and the row a
+  session waits for open in the IDE; *All columns* lists the `V$SESSION`
+  row. Each tab is read when it is first shown (#74).
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
 - **Debug…** next to **Test…** on procedures, functions and package

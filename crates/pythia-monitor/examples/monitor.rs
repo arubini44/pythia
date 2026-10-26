@@ -56,8 +56,10 @@ impl eframe::App for App {
                         let _ = std::process::Command::new("xdg-open").arg(path).spawn();
                     }
                     MonitorAction::CopyText(text) => ui.ctx().copy_text(text),
-                    // No assistant here (analyzing isn't offered).
-                    MonitorAction::Analyze(_) => {}
+                    // No assistant and no IDE here.
+                    MonitorAction::Analyze(_)
+                    | MonitorAction::OpenObject { .. }
+                    | MonitorAction::OpenSql(_) => {}
                 }
             }
         });

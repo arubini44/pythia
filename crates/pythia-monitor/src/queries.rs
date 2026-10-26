@@ -63,6 +63,14 @@ fn with_objects<T>(sql: &str, mut f: impl FnMut(&str) -> Result<T>) -> Result<T>
     }
 }
 
+/// As [`with_objects`], for `{procedures}`.
+fn with_procedures<T>(sql: &str, mut f: impl FnMut(&str) -> Result<T>) -> Result<T> {
+    match f(&sql.replace("{procedures}", "dba_procedures")) {
+        Err(e) if is_privilege_error(&e) => f(&sql.replace("{procedures}", "all_procedures")),
+        r => r,
+    }
+}
+
 // ----- instance ----------------------------------------------------------
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -595,16 +603,28 @@ pub fn top_sql(conn: &Connection, limit: usize) -> Result<Vec<TopSql>> {
 }
 
 pub fn long_ops(conn: &Connection) -> Result<Vec<LongOp>> {
+    long_ops_of(conn, None)
+}
+
+/// Long operations in progress: of every session, or of one (its finished
+/// ones too).
+fn long_ops_of(conn: &Connection, session: Option<(i64, i64)>) -> Result<Vec<LongOp>> {
+    let (filter, params): (&str, Vec<&dyn ToSql>) = match &session {
+        Some((sid, serial)) => ("sid = :1 and serial# = :2", vec![sid, serial]),
+        None => ("sofar < totalwork", Vec::new()),
+    };
     query(
         conn,
         &compat::first_rows(
-            "select sid, serial#, opname, target, sofar, totalwork, units, elapsed_seconds, time_remaining, message \
-               from v$session_longops \
-              where sofar < totalwork \
-              order by start_time desc",
+            &format!(
+                "select sid, serial#, opname, target, sofar, totalwork, units, elapsed_seconds, time_remaining, message \
+                   from v$session_longops \
+                  where {filter} \
+                  order by start_time desc"
+            ),
             20,
         ),
-        &[],
+        &params,
         |r| {
             Ok(LongOp {
                 sid: get(r, 0)?,
@@ -660,6 +680,9 @@ pub struct SessionRow {
     pub sql_trace: bool,
     /// Serial# of the session it waits for, to open its details.
     pub blocking_serial: Option<i64>,
+    /// Child cursors of its current and previous SQL (plan, binds).
+    pub sql_child: Option<i64>,
+    pub prev_child: Option<i64>,
 }
 
 impl SessionRow {
@@ -706,7 +729,8 @@ select s.sid, s.serial#, s.username, s.status, s.osuser, s.machine, s.program, s
        (select substr(q.sql_text, 1, 300) from v$sql q where q.sql_id = s.sql_id and rownum = 1), \
        case when s.sid = sys_context('USERENV', 'SID') then 1 else 0 end, \
        case when s.sql_trace = 'ENABLED' then 1 else 0 end, \
-       (select b.serial# from v$session b where b.sid = s.blocking_session) \
+       (select b.serial# from v$session b where b.sid = s.blocking_session), \
+       s.sql_child_number, s.prev_child_number \
   from v$session s \
   left join {objects} o on o.object_id = s.row_wait_obj#";
 
@@ -738,6 +762,8 @@ fn session_row(r: &oracle::Row) -> Result<SessionRow> {
         is_self: get::<i64>(r, 23)? == 1,
         sql_trace: get::<i64>(r, 24)? == 1,
         blocking_serial: get(r, 25)?,
+        sql_child: get(r, 26)?,
+        prev_child: get(r, 27)?,
     })
 }
 
@@ -900,23 +926,215 @@ pub struct OpenCursor {
     pub cursor_type: Option<String>,
 }
 
+/// The parts of session details, each on a tab of its own and read when
+/// it is first shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum DetailTab {
+    #[default]
+    Overview,
+    Sql,
+    Plan,
+    Waits,
+    Stats,
+    Cursors,
+    Locks,
+    Columns,
+}
+
+impl DetailTab {
+    pub const ALL: [DetailTab; 8] = [
+        DetailTab::Overview,
+        DetailTab::Sql,
+        DetailTab::Plan,
+        DetailTab::Waits,
+        DetailTab::Stats,
+        DetailTab::Cursors,
+        DetailTab::Locks,
+        DetailTab::Columns,
+    ];
+
+    /// The sections (as errors name them) the part reads.
+    fn sections(self) -> &'static [&'static str] {
+        match self {
+            DetailTab::Overview => &[
+                "Client",
+                "Connection",
+                "Temp space",
+                "Process",
+                "Work areas",
+                "Long operations",
+                "PL/SQL",
+                "Time model",
+                "Waits by event",
+            ],
+            DetailTab::Sql => &["SQL", "Binds"],
+            DetailTab::Plan => &["Plan"],
+            DetailTab::Waits => &["Wait history"],
+            DetailTab::Stats => &["Statistics"],
+            DetailTab::Cursors => &["Open cursors"],
+            DetailTab::Locks => &["Locks"],
+            DetailTab::Columns => &["Columns"],
+        }
+    }
+}
+
+/// The sections of the header, read with every part.
+const HEADER_SECTIONS: [&str; 3] = ["Session", "Blocking", "Transaction"];
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionDetail {
     pub session: Option<SessionRow>,
+    /// Sessions waiting for this one: sid, serial#, user.
+    pub blocks: Vec<(i64, i64, Option<String>)>,
+    pub transaction: Option<Transaction>,
+    pub overview: Option<SessionOverview>,
     pub sql_text: Option<String>,
     pub prev_sql_text: Option<String>,
+    /// Captured bind values of the current and the previous SQL.
+    pub binds: Vec<Bind>,
+    pub prev_binds: Vec<Bind>,
     pub plan: Vec<String>,
     pub waits: Vec<WaitHistory>,
     pub stats: Vec<(String, f64)>,
     pub cursors: Vec<OpenCursor>,
     pub locks: Vec<LockRow>,
-    /// Sessions waiting for this one: sid, serial#, user.
-    pub blocks: Vec<(i64, i64, Option<String>)>,
-    pub transaction: Option<Transaction>,
+    /// The `V$SESSION` row: column, value.
+    pub columns: Vec<(String, String)>,
+    /// The parts read.
+    pub loaded: Vec<DetailTab>,
     pub errors: Vec<SectionError>,
 }
 
+impl SessionDetail {
+    /// Takes the header and the parts of a newer read, keeping the parts
+    /// it didn't read. Once the session is gone, nothing of it is kept.
+    pub fn merge(&mut self, mut newer: SessionDetail) {
+        if newer.session.is_none() {
+            *self = newer;
+            return;
+        }
+        let reread: Vec<&str> = HEADER_SECTIONS
+            .iter()
+            .chain(newer.loaded.iter().flat_map(|p| p.sections()))
+            .copied()
+            .collect();
+        self.errors.retain(|(name, _)| !reread.contains(name));
+        self.errors.append(&mut newer.errors);
+        self.session = newer.session;
+        self.blocks = newer.blocks;
+        self.transaction = newer.transaction;
+        for part in newer.loaded {
+            match part {
+                DetailTab::Overview => self.overview = newer.overview.take(),
+                DetailTab::Sql => {
+                    self.sql_text = newer.sql_text.take();
+                    self.prev_sql_text = newer.prev_sql_text.take();
+                    self.binds = std::mem::take(&mut newer.binds);
+                    self.prev_binds = std::mem::take(&mut newer.prev_binds);
+                }
+                DetailTab::Plan => self.plan = std::mem::take(&mut newer.plan),
+                DetailTab::Waits => self.waits = std::mem::take(&mut newer.waits),
+                DetailTab::Stats => self.stats = std::mem::take(&mut newer.stats),
+                DetailTab::Cursors => self.cursors = std::mem::take(&mut newer.cursors),
+                DetailTab::Locks => self.locks = std::mem::take(&mut newer.locks),
+                DetailTab::Columns => self.columns = std::mem::take(&mut newer.columns),
+            }
+            if !self.loaded.contains(&part) {
+                self.loaded.push(part);
+            }
+        }
+    }
+}
+
+/// What the Overview of session details shows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionOverview {
+    /// Who and where: name, value.
+    pub client: Vec<(String, String)>,
+    /// How it connected: name, value (`V$SESSION_CONNECT_INFO`).
+    pub connection: Vec<(String, String)>,
+    pub temp: Vec<TempUse>,
+    pub process: Option<ProcessMemory>,
+    /// Sorts, hash joins and the like running now.
+    pub workareas: Vec<Workarea>,
+    pub long_ops: Vec<LongOp>,
+    /// The PL/SQL it runs: its entry point and the current subprogram.
+    pub plsql: Vec<PlsqlUnit>,
+    /// DB time and its parts, in seconds, largest first.
+    pub time_model: Vec<(String, f64)>,
+    /// Non-idle waits since logon, longest first.
+    pub events: Vec<SessionEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempUse {
+    pub tablespace: String,
+    /// SORT, HASH, LOB_DATA, …
+    pub segment: String,
+    pub bytes: f64,
+}
+
+/// The session's server process and its PGA, in bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessMemory {
+    pub spid: String,
+    pub pga_used: f64,
+    pub pga_allocated: f64,
+    pub pga_max: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Workarea {
+    pub operation: String,
+    pub memory: f64,
+    pub temp: f64,
+    pub sql_id: Option<String>,
+}
+
+/// A PL/SQL unit a session runs, to open at its subprogram.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlsqlUnit {
+    /// "Entry point" or "Running".
+    pub role: &'static str,
+    pub owner: String,
+    pub name: String,
+    /// As in ALL_OBJECTS, e.g. `PACKAGE`.
+    pub object_type: String,
+    pub subprogram: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionEvent {
+    pub event: String,
+    pub wait_class: String,
+    pub waits: i64,
+    pub seconds: f64,
+    pub average_ms: f64,
+}
+
+/// A captured bind value (`V$SQL_BIND_CAPTURE`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bind {
+    pub name: Option<String>,
+    pub position: i64,
+    pub data_type: String,
+    pub value: Option<String>,
+    pub captured: Option<String>,
+}
+
+/// Everything about a session, e.g. for the assistant.
 pub fn session_detail(conn: &Connection, sid: i64, serial: i64) -> SessionDetail {
+    session_details(conn, sid, serial, &DetailTab::ALL)
+}
+
+/// A session's header (its row, the sessions it blocks, its transaction)
+/// and the `parts` asked for.
+pub fn session_details(
+    conn: &Connection,
+    sid: i64,
+    serial: i64,
+    parts: &[DetailTab],
+) -> SessionDetail {
     let mut d = SessionDetail::default();
     let mut errors = Vec::new();
     let mut section = |name: &'static str, r: Result<()>| {
@@ -936,104 +1154,10 @@ pub fn session_detail(conn: &Connection, sid: i64, serial: i64) -> SessionDetail
     );
     // The other views know sessions by SID alone: once the session has
     // ended, its SID may belong to another one.
-    if d.session.is_none() {
+    let Some(session) = d.session.clone() else {
         d.errors = errors;
         return d;
-    }
-    let sql_id = d.session.as_ref().and_then(|s| s.sql_id.clone());
-    let prev_sql_id = d.session.as_ref().and_then(|s| s.prev_sql_id.clone());
-    let full_text = |id: &str| -> Result<Option<String>> {
-        Ok(query(
-            conn,
-            "select sql_fulltext from v$sql where sql_id = :1 and rownum = 1",
-            &[&id],
-            |r| get::<Option<String>>(r, 0),
-        )?
-        .into_iter()
-        .next()
-        .flatten())
     };
-    section(
-        "SQL",
-        (|| {
-            if let Some(id) = &sql_id {
-                d.sql_text = full_text(id)?;
-            }
-            if let Some(id) = &prev_sql_id {
-                d.prev_sql_text = full_text(id)?;
-            }
-            Ok(())
-        })(),
-    );
-    if let Some(id) = sql_id.as_ref().or(prev_sql_id.as_ref()) {
-        section(
-            "Plan",
-            query(
-                conn,
-                "select plan_table_output from table(dbms_xplan.display_cursor(:1, null, 'TYPICAL'))",
-                &[id],
-                |r| Ok(get::<Option<String>>(r, 0)?.unwrap_or_default()),
-            )
-            .map(|p| d.plan = p),
-        );
-    }
-    section(
-        "Wait history",
-        query(
-            conn,
-            "select seq#, event, wait_time_micro / 1000, \
-                    p1text || '=' || p1 || ' ' || p2text || '=' || p2 || ' ' || p3text || '=' || p3 \
-               from v$session_wait_history where sid = :1 order by seq#",
-            &[&sid],
-            |r| {
-                Ok(WaitHistory {
-                    seq: get(r, 0)?,
-                    event: get::<Option<String>>(r, 1)?.unwrap_or_default(),
-                    wait_ms: get::<Option<f64>>(r, 2)?.unwrap_or(0.0),
-                    params: get::<Option<String>>(r, 3)?.unwrap_or_default(),
-                })
-            },
-        )
-        .map(|w| d.waits = w),
-    );
-    section(
-        "Statistics",
-        query(
-            conn,
-            "select n.name, s.value from v$sesstat s join v$statname n on n.statistic# = s.statistic# \
-              where s.sid = :1 and s.value <> 0 order by n.name",
-            &[&sid],
-            |r| Ok((get(r, 0)?, get(r, 1)?)),
-        )
-        .map(|s| d.stats = s),
-    );
-    section(
-        "Open cursors",
-        query(
-            conn,
-            // V$OPEN_CURSOR has the first 60 characters of the statement,
-            // V$SQL the first 1000 and, for longer ones, the whole text.
-            "select oc.sql_id, oc.cursor_type, nvl(q.sql_text, oc.sql_text), \
-                    case when dbms_lob.getlength(q.sql_fulltext) > length(q.sql_text) \
-                         then q.sql_fulltext end \
-               from v$open_cursor oc \
-               left join v$sql q on q.address = oc.address and q.child_address = oc.child_address \
-              where oc.sid = :1 \
-              order by 3",
-            &[&sid],
-            |r| {
-                let text: Option<String> = get(r, 2)?;
-                let full: Option<String> = get(r, 3)?;
-                Ok(OpenCursor {
-                    sql_id: get(r, 0)?,
-                    cursor_type: get(r, 1)?,
-                    text: full.or(text).unwrap_or_default(),
-                })
-            },
-        )
-        .map(|c| d.cursors = c),
-    );
-    section("Locks", locks(conn, sid).map(|l| d.locks = l));
     section(
         "Blocking",
         query(
@@ -1048,8 +1172,430 @@ pub fn session_detail(conn: &Connection, sid: i64, serial: i64) -> SessionDetail
         "Transaction",
         transaction(conn, sid, serial).map(|t| d.transaction = t),
     );
+    for &part in parts {
+        match part {
+            DetailTab::Overview => {
+                d.overview = Some(session_overview(conn, sid, serial, &mut section));
+            }
+            DetailTab::Sql => {
+                let full_text = |id: &str| -> Result<Option<String>> {
+                    Ok(query(
+                        conn,
+                        "select sql_fulltext from v$sql where sql_id = :1 and rownum = 1",
+                        &[&id],
+                        |r| get::<Option<String>>(r, 0),
+                    )?
+                    .into_iter()
+                    .next()
+                    .flatten())
+                };
+                section(
+                    "SQL",
+                    (|| {
+                        if let Some(id) = &session.sql_id {
+                            d.sql_text = full_text(id)?;
+                        }
+                        if let Some(id) = &session.prev_sql_id {
+                            d.prev_sql_text = full_text(id)?;
+                        }
+                        Ok(())
+                    })(),
+                );
+                section(
+                    "Binds",
+                    (|| {
+                        if let Some(id) = &session.sql_id {
+                            d.binds = binds(conn, id, session.sql_child)?;
+                        }
+                        if let Some(id) = &session.prev_sql_id {
+                            d.prev_binds = binds(conn, id, session.prev_child)?;
+                        }
+                        Ok(())
+                    })(),
+                );
+            }
+            DetailTab::Plan => {
+                // The session's own child cursor, with the binds it was
+                // optimized for.
+                let cursor = match &session.sql_id {
+                    Some(id) => Some((id, session.sql_child)),
+                    None => session.prev_sql_id.as_ref().map(|id| (id, session.prev_child)),
+                };
+                if let Some((id, child)) = cursor {
+                    section(
+                        "Plan",
+                        query(
+                            conn,
+                            "select plan_table_output \
+                               from table(dbms_xplan.display_cursor(:1, :2, 'TYPICAL +PEEKED_BINDS'))",
+                            &[id, &child],
+                            |r| Ok(get::<Option<String>>(r, 0)?.unwrap_or_default()),
+                        )
+                        .map(|p| d.plan = p),
+                    );
+                }
+            }
+            DetailTab::Waits => section(
+                "Wait history",
+                query(
+                    conn,
+                    "select seq#, event, wait_time_micro / 1000, \
+                            p1text || '=' || p1 || ' ' || p2text || '=' || p2 || ' ' || p3text || '=' || p3 \
+                       from v$session_wait_history where sid = :1 order by seq#",
+                    &[&sid],
+                    |r| {
+                        Ok(WaitHistory {
+                            seq: get(r, 0)?,
+                            event: get::<Option<String>>(r, 1)?.unwrap_or_default(),
+                            wait_ms: get::<Option<f64>>(r, 2)?.unwrap_or(0.0),
+                            params: get::<Option<String>>(r, 3)?.unwrap_or_default(),
+                        })
+                    },
+                )
+                .map(|w| d.waits = w),
+            ),
+            DetailTab::Stats => section(
+                "Statistics",
+                query(
+                    conn,
+                    "select n.name, s.value from v$sesstat s join v$statname n on n.statistic# = s.statistic# \
+                      where s.sid = :1 and s.value <> 0 order by n.name",
+                    &[&sid],
+                    |r| Ok((get(r, 0)?, get(r, 1)?)),
+                )
+                .map(|s| d.stats = s),
+            ),
+            DetailTab::Cursors => section(
+                "Open cursors",
+                query(
+                    conn,
+                    // V$OPEN_CURSOR has the first 60 characters of the
+                    // statement, V$SQL the first 1000 and, for longer ones,
+                    // the whole text.
+                    "select oc.sql_id, oc.cursor_type, nvl(q.sql_text, oc.sql_text), \
+                            case when dbms_lob.getlength(q.sql_fulltext) > length(q.sql_text) \
+                                 then q.sql_fulltext end \
+                       from v$open_cursor oc \
+                       left join v$sql q on q.address = oc.address and q.child_address = oc.child_address \
+                      where oc.sid = :1 \
+                      order by 3",
+                    &[&sid],
+                    |r| {
+                        let text: Option<String> = get(r, 2)?;
+                        let full: Option<String> = get(r, 3)?;
+                        Ok(OpenCursor {
+                            sql_id: get(r, 0)?,
+                            cursor_type: get(r, 1)?,
+                            text: full.or(text).unwrap_or_default(),
+                        })
+                    },
+                )
+                .map(|c| d.cursors = c),
+            ),
+            DetailTab::Locks => section("Locks", locks(conn, sid).map(|l| d.locks = l)),
+            DetailTab::Columns => section(
+                "Columns",
+                session_columns(conn, sid, serial).map(|c| d.columns = c),
+            ),
+        }
+    }
+    d.loaded = parts.to_vec();
     d.errors = errors;
     d
+}
+
+/// The captured binds of a cursor (any child if it isn't known).
+fn binds(conn: &Connection, sql_id: &str, child: Option<i64>) -> Result<Vec<Bind>> {
+    query(
+        conn,
+        "select name, position, datatype_string, value_string, \
+                to_char(last_captured, 'YYYY-MM-DD HH24:MI:SS') \
+           from v$sql_bind_capture \
+          where sql_id = :1 and child_number = nvl(:2, child_number) \
+          order by child_number, position",
+        &[&sql_id, &child],
+        |r| {
+            Ok(Bind {
+                name: get(r, 0)?,
+                position: get(r, 1)?,
+                data_type: get::<Option<String>>(r, 2)?.unwrap_or_default(),
+                value: get(r, 3)?,
+                captured: get(r, 4)?,
+            })
+        },
+    )
+}
+
+/// The `V$SESSION` row as column, value.
+fn session_columns(conn: &Connection, sid: i64, serial: i64) -> Result<Vec<(String, String)>> {
+    let rows = conn.query(
+        "select * from v$session where sid = :1 and serial# = :2",
+        &[&sid, &serial],
+    )?;
+    let names: Vec<String> = rows
+        .column_info()
+        .iter()
+        .map(|c| c.name().to_owned())
+        .collect();
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(Vec::new());
+    };
+    let row = row?;
+    let values = row.sql_values().iter().map(|v| {
+        if v.is_null().unwrap_or(true) {
+            String::new()
+        } else {
+            v.get::<String>().unwrap_or_else(|_| "…".into())
+        }
+    });
+    Ok(names.into_iter().zip(values).collect())
+}
+
+/// The Overview of session details; each of its sections may fail alone.
+fn session_overview(
+    conn: &Connection,
+    sid: i64,
+    serial: i64,
+    section: &mut impl FnMut(&'static str, Result<()>),
+) -> SessionOverview {
+    let mut o = SessionOverview::default();
+    let both: [&dyn ToSql; 2] = [&sid, &serial];
+    let mut plsql_ids: Vec<(&'static str, i64, i64)> = Vec::new();
+    section(
+        "Client",
+        (|| {
+            let rows = query(
+                conn,
+                "select osuser, machine, terminal, process, to_char(port), program, module, action, \
+                        client_identifier, client_info, service_name, server, schemaname, \
+                        to_char(sql_exec_start, 'YYYY-MM-DD HH24:MI:SS'), sql_trace, \
+                        plsql_entry_object_id, plsql_entry_subprogram_id, \
+                        plsql_object_id, plsql_subprogram_id \
+                   from v$session where sid = :1 and serial# = :2",
+                &both,
+                |r| {
+                    let mut text = Vec::new();
+                    for i in 0..15 {
+                        text.push(get::<Option<String>>(r, i)?);
+                    }
+                    let ids: Vec<Option<i64>> =
+                        (15..19).map(|i| get(r, i)).collect::<Result<_>>()?;
+                    Ok((text, ids))
+                },
+            )?;
+            let Some((text, ids)) = rows.into_iter().next() else {
+                return Ok(());
+            };
+            const NAMES: [&str; 15] = [
+                "OS user",
+                "Machine",
+                "Terminal",
+                "Client process",
+                "Client port",
+                "Program",
+                "Module",
+                "Action",
+                "Client identifier",
+                "Client info",
+                "Service",
+                "Server",
+                "Current schema",
+                "SQL running since",
+                "SQL trace",
+            ];
+            o.client = NAMES
+                .iter()
+                .zip(text)
+                .filter_map(|(name, value)| {
+                    value
+                        .filter(|v| !v.is_empty() && v != "0")
+                        .map(|v| ((*name).to_owned(), v))
+                })
+                .collect();
+            if let (Some(object), Some(sub)) = (ids[0], ids[1]) {
+                plsql_ids.push(("Entry point", object, sub));
+            }
+            if let (Some(object), Some(sub)) = (ids[2], ids[3]) {
+                plsql_ids.push(("Running", object, sub));
+            }
+            Ok(())
+        })(),
+    );
+    section(
+        "Connection",
+        (|| {
+            let rows = query(
+                conn,
+                "select authentication_type, client_driver, client_version, client_charset, \
+                        network_service_banner \
+                   from v$session_connect_info where sid = :1 and serial# = :2",
+                &both,
+                |r| {
+                    (0..5)
+                        .map(|i| get::<Option<String>>(r, i))
+                        .collect::<Result<Vec<_>>>()
+                },
+            )?;
+            let first = |i: usize| {
+                rows.iter()
+                    .find_map(|r| r[i].clone())
+                    .filter(|v| !v.is_empty())
+            };
+            for (i, name) in [
+                "Authentication",
+                "Client driver",
+                "Client version",
+                "Client character set",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if let Some(v) = first(i) {
+                    o.connection.push((name.to_owned(), v));
+                }
+            }
+            // An encryption or checksumming adapter in use names its
+            // algorithm.
+            let secure: Vec<String> = rows
+                .iter()
+                .filter_map(|r| r[4].clone())
+                .filter(|b| {
+                    let b = b.to_lowercase();
+                    (b.contains("encryption") || b.contains("crypto")) && b.contains("adapter")
+                })
+                .collect();
+            o.connection.push((
+                "Network encryption".to_owned(),
+                if secure.is_empty() {
+                    "none reported".to_owned()
+                } else {
+                    secure.join("; ")
+                },
+            ));
+            Ok(())
+        })(),
+    );
+    section(
+        "Temp space",
+        query(
+            conn,
+            "select u.tablespace, u.segtype, u.blocks * t.block_size \
+               from v$tempseg_usage u \
+               join v$session s on s.saddr = u.session_addr \
+               join dba_tablespaces t on t.tablespace_name = u.tablespace \
+              where s.sid = :1 and s.serial# = :2 \
+              order by 3 desc",
+            &both,
+            |r| {
+                Ok(TempUse {
+                    tablespace: get(r, 0)?,
+                    segment: get::<Option<String>>(r, 1)?.unwrap_or_default(),
+                    bytes: get::<Option<f64>>(r, 2)?.unwrap_or(0.0),
+                })
+            },
+        )
+        .map(|t| o.temp = t),
+    );
+    section(
+        "Process",
+        query(
+            conn,
+            "select p.spid, p.pga_used_mem, p.pga_alloc_mem, p.pga_max_mem \
+               from v$process p join v$session s on s.paddr = p.addr \
+              where s.sid = :1 and s.serial# = :2",
+            &both,
+            |r| {
+                Ok(ProcessMemory {
+                    spid: get::<Option<String>>(r, 0)?.unwrap_or_default(),
+                    pga_used: get::<Option<f64>>(r, 1)?.unwrap_or(0.0),
+                    pga_allocated: get::<Option<f64>>(r, 2)?.unwrap_or(0.0),
+                    pga_max: get::<Option<f64>>(r, 3)?.unwrap_or(0.0),
+                })
+            },
+        )
+        .map(|p| o.process = p.into_iter().next()),
+    );
+    section(
+        "Work areas",
+        query(
+            conn,
+            "select operation_type, actual_mem_used, nvl(tempseg_size, 0), sql_id \
+               from v$sql_workarea_active where sid = :1 order by actual_mem_used desc",
+            &[&sid],
+            |r| {
+                Ok(Workarea {
+                    operation: get::<Option<String>>(r, 0)?.unwrap_or_default(),
+                    memory: get::<Option<f64>>(r, 1)?.unwrap_or(0.0),
+                    temp: get::<Option<f64>>(r, 2)?.unwrap_or(0.0),
+                    sql_id: get(r, 3)?,
+                })
+            },
+        )
+        .map(|w| o.workareas = w),
+    );
+    section(
+        "Long operations",
+        long_ops_of(conn, Some((sid, serial))).map(|l| o.long_ops = l),
+    );
+    section(
+        "PL/SQL",
+        (|| {
+            for (role, object, subprogram) in plsql_ids {
+                let sql = "select owner, object_name, procedure_name, object_type \
+                             from {procedures} where object_id = :1 and subprogram_id = :2";
+                let unit = with_procedures(sql, |sql| {
+                    query(conn, sql, &[&object, &subprogram], |r| {
+                        Ok(PlsqlUnit {
+                            role,
+                            owner: get(r, 0)?,
+                            name: get(r, 1)?,
+                            subprogram: get(r, 2)?,
+                            object_type: get(r, 3)?,
+                        })
+                    })
+                })?;
+                o.plsql.extend(unit.into_iter().next());
+            }
+            Ok(())
+        })(),
+    );
+    section(
+        "Time model",
+        query(
+            conn,
+            "select stat_name, value / 1e6 from v$sess_time_model \
+              where sid = :1 and value > 0 order by value desc",
+            &[&sid],
+            |r| Ok((get(r, 0)?, get(r, 1)?)),
+        )
+        .map(|t| o.time_model = t),
+    );
+    section(
+        "Waits by event",
+        query(
+            conn,
+            &compat::first_rows(
+                "select event, wait_class, total_waits, time_waited_micro / 1e6, \
+                        time_waited_micro / 1000 / nullif(total_waits, 0) \
+                   from v$session_event \
+                  where sid = :1 and wait_class <> 'Idle' \
+                  order by time_waited_micro desc",
+                15,
+            ),
+            &[&sid],
+            |r| {
+                Ok(SessionEvent {
+                    event: get(r, 0)?,
+                    wait_class: get::<Option<String>>(r, 1)?.unwrap_or_default(),
+                    waits: get::<Option<i64>>(r, 2)?.unwrap_or(0),
+                    seconds: get::<Option<f64>>(r, 3)?.unwrap_or(0.0),
+                    average_ms: get::<Option<f64>>(r, 4)?.unwrap_or(0.0),
+                })
+            },
+        )
+        .map(|e| o.events = e),
+    );
+    o
 }
 
 fn lock_mode(m: i64) -> String {
@@ -1546,6 +2092,57 @@ pub fn capabilities(conn: &Connection) -> Result<Capabilities> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A newer read replaces the header and the parts it read, keeps the
+    /// others with their errors; once the session is gone, nothing is kept.
+    #[test]
+    fn detail_merge() {
+        let session = SessionRow {
+            sid: 1,
+            serial: 2,
+            ..SessionRow::default()
+        };
+        let mut d = SessionDetail {
+            session: Some(session.clone()),
+            overview: Some(SessionOverview::default()),
+            sql_text: Some("old".into()),
+            stats: vec![("x".into(), 1.0)],
+            loaded: vec![DetailTab::Overview, DetailTab::Sql, DetailTab::Stats],
+            errors: vec![
+                ("Client", "e1".into()),
+                ("Statistics", "e2".into()),
+                ("SQL", "e3".into()),
+                ("Blocking", "e4".into()),
+            ],
+            ..SessionDetail::default()
+        };
+        d.merge(SessionDetail {
+            session: Some(session),
+            sql_text: Some("new".into()),
+            loaded: vec![DetailTab::Sql, DetailTab::Columns],
+            errors: vec![("Binds", "e5".into())],
+            ..SessionDetail::default()
+        });
+        assert_eq!(d.sql_text.as_deref(), Some("new"));
+        assert!(d.overview.is_some());
+        assert_eq!(d.stats.len(), 1);
+        assert_eq!(
+            d.loaded,
+            [
+                DetailTab::Overview,
+                DetailTab::Sql,
+                DetailTab::Stats,
+                DetailTab::Columns
+            ]
+        );
+        let errors: Vec<&str> = d.errors.iter().map(|(n, _)| *n).collect();
+        assert_eq!(errors, ["Client", "Statistics", "Binds"]);
+        d.merge(SessionDetail {
+            loaded: vec![DetailTab::Sql],
+            ..SessionDetail::default()
+        });
+        assert!(d.session.is_none() && d.overview.is_none() && d.stats.is_empty());
+    }
 
     fn s(sid: i64, blocker: Option<i64>) -> SessionRow {
         SessionRow {

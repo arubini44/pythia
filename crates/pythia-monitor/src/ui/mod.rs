@@ -36,9 +36,10 @@ use pythia_db::{DbError, DbKind, Dialect, RunFn, TaskFn, TaskResult};
 
 use crate::queries::{self, Capabilities};
 
+pub use crate::queries::DetailTab;
 pub use awr::AwrView;
 pub use dashboard::{DashboardView, Refresh};
-pub use detail::{DetailTab, SessionDetailView};
+pub use detail::SessionDetailView;
 pub use mysql::MySqlDashboardView;
 pub use sessions::{FieldFilter, SessionsView};
 pub use trace::TraceView;
@@ -69,6 +70,17 @@ pub enum MonitorAction {
     CopyText(String),
     /// Have the host's AI assistant analyze slow SQL or a report.
     Analyze(Analysis),
+    /// Open a database object in the IDE: a program window (at
+    /// `subprogram`) for PL/SQL, else its object view. `object_type` as in
+    /// `ALL_OBJECTS`, e.g. `PACKAGE`.
+    OpenObject {
+        owner: String,
+        name: String,
+        object_type: String,
+        subprogram: Option<String>,
+    },
+    /// Open a SQL window with this text, on the monitor's connection.
+    OpenSql(String),
 }
 
 /// Slow SQL or a report to have analyzed, with what the monitor knows.
@@ -114,9 +126,11 @@ pub(crate) enum Want {
     Sessions {
         background: bool,
     },
+    /// The header of session details and the parts asked for.
     Detail {
         sid: i64,
         serial: i64,
+        parts: Vec<DetailTab>,
     },
     Kill {
         sid: i64,
@@ -179,6 +193,8 @@ pub(crate) enum Want {
     },
     /// Hand to the host's assistant (no task).
     Analyze(Analysis),
+    /// Something for the host to do (no task).
+    Act(MonitorAction),
 }
 
 /// Result routing for a token.
@@ -410,6 +426,10 @@ impl Monitor {
                 out.actions.push(MonitorAction::Analyze(analysis));
                 continue;
             }
+            if let Want::Act(action) = want {
+                out.actions.push(action);
+                continue;
+            }
             if let Want::ShowSessions(filter) = want {
                 self.tab = MonitorTab::Sessions;
                 self.sessions.show_table(filter);
@@ -487,9 +507,9 @@ impl Monitor {
                     ))
                 }),
             ),
-            Want::Detail { sid, serial } => (
+            Want::Detail { sid, serial, parts } => (
                 Job::Detail(sid, serial),
-                Box::new(move |c| boxed(Ok(queries::session_detail(c, sid, serial)))),
+                Box::new(move |c| boxed(Ok(queries::session_details(c, sid, serial, &parts)))),
             ),
             Want::Kill {
                 sid,
@@ -570,6 +590,7 @@ impl Monitor {
             | Want::ShowBlocking
             | Want::ShowSessions(_)
             | Want::Analyze(_)
+            | Want::Act(_)
             | Want::MySqlDashboard { .. } => return None,
         };
         Some(MonitorRequest {
