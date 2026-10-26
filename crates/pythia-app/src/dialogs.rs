@@ -637,16 +637,22 @@ impl ConnectDialog {
         submit
     }
 
+    /// SSH is ticked and offered for the type: the section is hidden for
+    /// a type without tunnels, and connecting ignores it (#95).
+    fn ssh_on(&self) -> bool {
+        self.form.ssh.enabled && Dialect::from(self.form.kind).supports(Feature::SshTunnel)
+    }
+
     fn valid(&self) -> bool {
         let ssh = &self.form.ssh;
         !self.form.connect_string.trim().is_empty()
-            && (!ssh.enabled || !(ssh.host.trim().is_empty() || ssh.username.trim().is_empty()))
+            && (!self.ssh_on() || !(ssh.host.trim().is_empty() || ssh.username.trim().is_empty()))
     }
 
     fn passwords(&self) -> Passwords {
         Passwords {
             database: self.password.clone(),
-            ssh: if self.form.ssh.enabled {
+            ssh: if self.ssh_on() {
                 self.ssh_password.clone()
             } else {
                 String::new()
@@ -1493,6 +1499,40 @@ mod tests {
         assert_eq!(opened, [download]);
         h.get_by_label_contains("DPI-1047");
         h.get_by_label("Restart Pythia and connect again.");
+    }
+
+    #[test]
+    fn ssh_only_where_offered() {
+        let profile = |kind| ConnectionProfile {
+            kind,
+            username: "app".into(),
+            connect_string: "localhost/app".into(),
+            ssh: pythia_config::SshTunnel {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let passwords = || Passwords {
+            database: "pw".into(),
+            ssh: "ssh-pw".into(),
+        };
+        let mut dialog = ConnectDialog::default();
+        // MySQL has tunnels: an SSH server is needed.
+        assert!(
+            dialog
+                .test_submit(profile(DbKind::MySql), passwords())
+                .is_none()
+        );
+        // Oracle's section is hidden: the ticked box from before doesn't
+        // hold up Connect, and the tunnel isn't used.
+        let Some(ConnectAction::Connect(request)) =
+            dialog.test_submit(profile(DbKind::Oracle), passwords())
+        else {
+            panic!("Connect is disabled");
+        };
+        assert!(!request.profile.ssh.enabled);
+        assert!(request.passwords.ssh.is_empty());
     }
 
     #[test]
