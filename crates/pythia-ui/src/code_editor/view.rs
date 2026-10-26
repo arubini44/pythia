@@ -241,6 +241,20 @@ impl CodeEditor {
                 );
                 let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
                 let response = ui.interact(rect, id, Sense::click_and_drag());
+                // egui takes focus from the editor when a click lands outside
+                // it (on release), before the completion list further down
+                // sees the click; without focus the list would close first.
+                // The list belongs to the editor, so the editor keeps focus.
+                if self.completion.is_some()
+                    && ui.memory(|m| m.had_focus_last_frame(id))
+                    && ui.input(|i| i.pointer.any_click())
+                    && ui
+                        .input(|i| i.pointer.interact_pos())
+                        .and_then(|pos| ui.ctx().layer_id_at(pos))
+                        == Some(completion_layer(ui))
+                {
+                    response.request_focus();
+                }
                 let mut layout = Layout {
                     origin: rect.min,
                     viewport,
@@ -981,8 +995,9 @@ impl CodeEditor {
             caret.max.y + POPUP_GAP
         };
         let mut accept = None;
-        let list = egui::Area::new(ui.id().with("completion-popup"))
-            .order(egui::Order::Foreground)
+        let layer = completion_layer(ui);
+        let list = egui::Area::new(layer.id)
+            .order(layer.order)
             .fixed_pos(pos2(x, y))
             .show(ui.ctx(), |ui| {
                 frame.show(ui, |ui| {
@@ -1934,6 +1949,11 @@ fn caret_on_pairable(rope: &ropey::Rope, pos: usize) -> bool {
         .any(|k| word.eq_ignore_ascii_case(k))
 }
 
+/// Layer of the completion list; `ui` is the editor's content ui.
+fn completion_layer(ui: &Ui) -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Foreground, ui.id().with("completion-popup"))
+}
+
 /// Where the completion list goes for `wanted` rows: below the caret line if
 /// they fit there, else on the side with more room. Returns whether it's
 /// above and how many rows fit (at least one). `chrome` is the frame height.
@@ -2249,6 +2269,47 @@ mod tests {
             }
             editor.hide_completions();
         }
+    }
+
+    fn pointer(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn clicking_a_completion_row_accepts_it() {
+        let ctx = egui::Context::default();
+        let mut editor = CodeEditor::new("select ");
+        editor.goto(1, 8);
+        editor.request_focus();
+        frames(&ctx, &mut editor, 2, vec![]);
+        editor.show_completions(7..7, ["alpha", "beta", "gamma"].map(entry).to_vec());
+        frames(&ctx, &mut editor, 3, vec![]);
+        // The list is the only foreground area (no details pane).
+        let list = ctx
+            .memory(|m| {
+                let layers = m.areas().visible_layer_ids();
+                layers
+                    .into_iter()
+                    .filter(|l| l.order == egui::Order::Foreground)
+                    .find_map(|l| m.area_rect(l.id))
+            })
+            .expect("list shown");
+        // Middle of the second row (the frame has a 3 px margin).
+        let row_h = (list.height() - 6.0) / 3.0;
+        let at = pos2(list.center().x, list.min.y + 3.0 + 1.5 * row_h);
+        frames(&ctx, &mut editor, 1, vec![Event::PointerMoved(at)]);
+        frames(&ctx, &mut editor, 1, vec![pointer(at, true)]);
+        frames(&ctx, &mut editor, 1, vec![pointer(at, false)]);
+        assert_eq!(editor.text(), "select beta");
+        assert!(!editor.is_completion_open());
+        // Typing goes on in the editor.
+        frames(&ctx, &mut editor, 2, vec![Event::Text(" ".into())]);
+        assert_eq!(editor.text(), "select beta ");
     }
 
     #[test]

@@ -6,6 +6,11 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Clicking an entry in the completion list inserts it. The click closed the
+  list without inserting anything and left the editor without focus; only
+  the keyboard worked (#72).
+
 ## [0.4.1] - 2026-10-26
 
 ### Added
