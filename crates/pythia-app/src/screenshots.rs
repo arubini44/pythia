@@ -3949,6 +3949,36 @@ fn mysql_through_ssh() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Nothing shows through behind the dock (#64): the light theme had black
+/// in the tabs' rounded corners and between the dock's areas. The test
+/// renderer clears to transparent, so such spots are transparent pixels.
+#[test]
+fn nothing_shows_through_behind_the_dock() {
+    // Needs a GPU adapter, like the screenshots.
+    if out_dir().is_none() {
+        return;
+    }
+    for dark in [false, true] {
+        // The start layout: browser and project on the left, a SQL window
+        // on the right.
+        let mut h = locked(dark, true);
+        h.run_steps(4);
+        let image = h.render().expect("render");
+        let holes: Vec<(u32, u32)> = image
+            .enumerate_pixels()
+            .filter(|(_, _, p)| p.0[3] < 255)
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        assert!(
+            holes.is_empty(),
+            "dark {dark}: {} transparent pixels, e.g. {:?}",
+            holes.len(),
+            &holes[..holes.len().min(5)]
+        );
+        save(&mut h, if dark { "dock-dark" } else { "dock-light" });
+    }
+}
+
 /// Every Settings page fits Pythia's default window: the close button stays
 /// on screen however tall the page is (#62), and closes the dialog.
 #[test]
