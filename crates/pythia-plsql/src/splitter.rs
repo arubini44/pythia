@@ -187,11 +187,19 @@ impl<'a> Splitter<'a> {
             return StatementKind::SqlPlus;
         }
         if self.word_eq(first, &["CREATE"]) {
-            for t in words {
+            // MySQL's `DEFINER = user@host` (quoted any way) may come first.
+            let mut definer = false;
+            for t in words.take(24) {
                 if self.word_eq(t, PLSQL_UNITS) {
                     return StatementKind::PlSql;
                 }
-                if !self.word_eq(t, CREATE_MODIFIERS) {
+                if definer {
+                    if self.word_eq(t, &["VIEW", "EVENT", "SQL"]) {
+                        break;
+                    }
+                } else if self.word_eq(t, &["DEFINER"]) {
+                    definer = true;
+                } else if !self.word_eq(t, CREATE_MODIFIERS) {
                     break;
                 }
             }
@@ -300,6 +308,35 @@ mod tests {
                 ),
                 (StatementKind::PlSql, "begin\n  p.x;\nend;"),
                 (StatementKind::PlSql, "declare v number; begin null; end;"),
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_definers() {
+        let src = "CREATE DEFINER=`app`@`%` PROCEDURE `p`()\nbegin\n  select 1;\nend\n/\n\
+                   create definer = current_user trigger t before insert on x for each row set new.a = 1;\n/\n\
+                   CREATE ALGORITHM=UNDEFINED DEFINER=`app`@`%` SQL SECURITY DEFINER VIEW `v` AS select type from t;\n\
+                   create definer=app@localhost view w as select 1 as procedure_count;";
+        assert_eq!(
+            split(src),
+            vec![
+                (
+                    StatementKind::PlSql,
+                    "CREATE DEFINER=`app`@`%` PROCEDURE `p`()\nbegin\n  select 1;\nend"
+                ),
+                (
+                    StatementKind::PlSql,
+                    "create definer = current_user trigger t before insert on x for each row set new.a = 1;"
+                ),
+                (
+                    StatementKind::Sql,
+                    "CREATE ALGORITHM=UNDEFINED DEFINER=`app`@`%` SQL SECURITY DEFINER VIEW `v` AS select type from t"
+                ),
+                (
+                    StatementKind::Sql,
+                    "create definer=app@localhost view w as select 1 as procedure_count"
+                ),
             ]
         );
     }

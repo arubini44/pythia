@@ -1,0 +1,961 @@
+//! MySQL sessions: the requests and events of an Oracle session, served by
+//! the pure Rust `mysql` driver.
+//!
+//! A MySQL connection can't do anything else while a result set is being
+//! read. So a query's rows are fetched while the worker waits for
+//! `FetchMore`s of that query; any other request closes the result first,
+//! stopping the server with `KILL QUERY` when rows are left.
+//!
+//! Transactions behave like Oracle's: queries always see what others have
+//! committed, and changes wait for Commit unless the session autocommits.
+//! The server's autocommit stays on (with it off, InnoDB would keep the
+//! first query's snapshot and its metadata locks until the next commit);
+//! a change opens a transaction of its own instead.
+
+use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
+
+use mysql::consts::{ColumnFlags, ColumnType};
+use mysql::prelude::{Protocol, Queryable};
+use mysql::{Conn, Opts, OptsBuilder, Params, QueryResult, SslOpts, Value};
+use tracing::{debug, info, warn};
+
+use crate::dialect::Dialect;
+use crate::meta::{MetaQuery, MetaResult};
+use crate::session::{CancelSlot, Canceller, Events};
+use crate::types::{
+    Cell, Client, Column, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
+};
+
+const DEFAULT_PORT: u16 = 3306;
+
+pub(crate) fn run(
+    params: ConnectParams,
+    requests: Receiver<DbRequest>,
+    events: Events,
+    shared: CancelSlot,
+) {
+    info!(?params, "connecting");
+    let connected = options(&params).and_then(|opts| {
+        let conn = Conn::new(opts.clone()).map_err(|e| params.explain(e.into()))?;
+        Ok((opts, conn))
+    });
+    let (opts, conn) = match connected {
+        Ok(connected) => connected,
+        Err(error) => {
+            warn!("connect failed: {error}");
+            events.send(DbEvent::ConnectFailed(error));
+            return;
+        }
+    };
+    let connection_id = conn.connection_id();
+    let kill: Canceller = Arc::new(move || kill_query(&opts, connection_id));
+    *shared.lock().expect("cancel mutex") = Some(kill.clone());
+
+    let mut worker = Worker {
+        conn,
+        events,
+        kill,
+        autocommit: false,
+        tx: Transaction::default(),
+    };
+    match worker.on_connect() {
+        Ok(server) => {
+            worker.events.send(DbEvent::Connected(server));
+            for sql in &params.init_sql {
+                if let Err(e) = worker.conn.query_drop(sql) {
+                    let e = DbError::from(e);
+                    worker.events.send(DbEvent::Notice(format!(
+                        "Login script: {e} ({})",
+                        sql.lines().next().unwrap_or_default()
+                    )));
+                }
+            }
+        }
+        Err(e) => {
+            *shared.lock().expect("cancel mutex") = None;
+            worker.events.send(DbEvent::ConnectFailed(e));
+            return;
+        }
+    }
+
+    // A request that ended an open result set, handled next.
+    let mut next = None;
+    loop {
+        let request = match next.take() {
+            Some(request) => request,
+            None => match requests.recv() {
+                Ok(request) => request,
+                Err(_) => break,
+            },
+        };
+        debug!(?request, "db request");
+        match request {
+            DbRequest::Execute {
+                id,
+                sql,
+                max_rows,
+                binds,
+            } => next = worker.execute(id, &sql, max_rows, &binds, &requests),
+            // Its result was closed by another request in between.
+            DbRequest::FetchMore { id, .. } => worker.events.send(DbEvent::Rows {
+                id,
+                rows: Vec::new(),
+                more: false,
+                elapsed: Duration::ZERO,
+            }),
+            DbRequest::Meta { id, query } => {
+                let started = Instant::now();
+                let result = crate::mysql_meta::run(&mut worker.conn, &query);
+                debug!(
+                    id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    ok = result.is_ok(),
+                    ?query,
+                    "metadata query done"
+                );
+                worker.events.send(DbEvent::Meta { id, result });
+            }
+            DbRequest::Commit => worker.end_transaction(true),
+            DbRequest::Rollback => worker.end_transaction(false),
+            DbRequest::SetAutocommit(on) => worker.autocommit = on,
+            DbRequest::Task { id, .. } => worker.events.send(DbEvent::TaskDone {
+                id,
+                result: Err(DbError::unsupported("This tool", Dialect::MYSQL)),
+            }),
+            DbRequest::Run { id, task } => {
+                let started = Instant::now();
+                let result = task(&mut MySqlClient(&mut worker.conn));
+                debug!(
+                    id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    ok = result.is_ok(),
+                    "task done"
+                );
+                worker.events.send(DbEvent::TaskDone { id, result });
+            }
+            DbRequest::Disconnect => break,
+        }
+    }
+
+    *shared.lock().expect("cancel mutex") = None;
+    // Dropping the connection rolls back what wasn't committed.
+    drop(worker.conn);
+    info!("disconnected");
+    worker.events.send(DbEvent::Disconnected);
+}
+
+struct Worker {
+    conn: Conn,
+    events: Events,
+    /// Stops the statement running on `conn`.
+    kill: Canceller,
+    autocommit: bool,
+    tx: Transaction,
+}
+
+/// How a statement ended: a query's rows were reported as they were
+/// fetched, anything else is summarized.
+enum Outcome {
+    Query,
+    Done { affected: u64, warnings: u16 },
+}
+
+impl Worker {
+    fn on_connect(&mut self) -> Result<ServerInfo, DbError> {
+        // Whatever the server's default: see `Transaction`.
+        self.conn.query_drop("set autocommit = 1")?;
+        let (version, comment, schema): (String, Option<String>, Option<String>) = self
+            .conn
+            .query_first("select version(), @@version_comment, database()")?
+            .ok_or_else(|| DbError::new("The server didn't report its version"))?;
+        Ok(ServerInfo {
+            dialect: Dialect::MYSQL,
+            release: release(&version),
+            banner: match comment {
+                Some(comment) => format!("{comment} {version}"),
+                None => version.clone(),
+            },
+            version,
+            current_schema: schema.unwrap_or_default(),
+        })
+    }
+
+    /// Runs a statement. A query's result stays open for `FetchMore`s;
+    /// returns the request that closed it, if any.
+    fn execute(
+        &mut self,
+        id: u64,
+        sql: &str,
+        max_rows: usize,
+        binds: &[(String, Option<String>)],
+        requests: &Receiver<DbRequest>,
+    ) -> Option<DbRequest> {
+        let started = Instant::now();
+        let mut next = None;
+        let effect = TxEffect::of(sql);
+        // Changes wait for Commit: they get a transaction of their own.
+        let opened = !self.autocommit && !self.tx.pending && effect.changes();
+        if opened {
+            if let Err(e) = self.conn.query_drop("start transaction") {
+                self.events.send(DbEvent::Failed {
+                    id,
+                    error: e.into(),
+                    elapsed: started.elapsed(),
+                });
+                return None;
+            }
+            self.tx.pending = true;
+        }
+        let ran = self.run_statement(id, sql, max_rows, binds, requests, started, &mut next);
+        match ran {
+            Ok(outcome) => {
+                self.tx.after(effect);
+                if let Outcome::Done { affected, warnings } = outcome {
+                    let kind = statement_kind(sql);
+                    let summary = ExecSummary {
+                        rows_affected: is_dml(&kind).then_some(affected),
+                        kind,
+                        compiled: None,
+                    };
+                    self.events.send(DbEvent::Executed {
+                        id,
+                        summary,
+                        elapsed: started.elapsed(),
+                    });
+                    if warnings > 0 {
+                        self.report_warnings();
+                    }
+                }
+            }
+            Err(e) => {
+                let mut error = DbError::from(e);
+                error.offset = error_offset(sql, &error.message);
+                // Nothing to commit from a failed change of its own; a
+                // deadlock rolls the whole transaction back anyway.
+                if opened || error.code == Some(1213) {
+                    let _ = self.conn.query_drop("rollback");
+                    self.tx.pending = false;
+                }
+                self.events.send(DbEvent::Failed {
+                    id,
+                    error,
+                    elapsed: started.elapsed(),
+                });
+            }
+        }
+        self.report_transaction();
+        next
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_statement(
+        &mut self,
+        id: u64,
+        sql: &str,
+        max_rows: usize,
+        binds: &[(String, Option<String>)],
+        requests: &Receiver<DbRequest>,
+        started: Instant,
+        next: &mut Option<DbRequest>,
+    ) -> Result<Outcome, mysql::Error> {
+        let fetch = Fetch {
+            id,
+            max_rows,
+            started,
+            events: &self.events,
+            requests,
+            kill: &self.kill,
+        };
+        if binds.is_empty() {
+            let result = self.conn.query_iter(sql)?;
+            fetch.stream(result, next)
+        } else {
+            let (sql, values) = positional(sql, binds);
+            let result = self.conn.exec_iter(sql, Params::Positional(values))?;
+            fetch.stream(result, next)
+        }
+    }
+
+    fn end_transaction(&mut self, commit: bool) {
+        let result = self
+            .conn
+            .query_drop(if commit { "commit" } else { "rollback" });
+        match result {
+            Ok(()) => {
+                self.tx.pending = false;
+                self.events.send(DbEvent::Notice(
+                    if commit { "Committed" } else { "Rolled back" }.into(),
+                ));
+            }
+            Err(e) => self.events.send(DbEvent::Error(e.into())),
+        }
+        self.report_transaction();
+    }
+
+    fn report_transaction(&self) {
+        self.events.send(DbEvent::Transaction {
+            pending: self.tx.pending,
+        });
+    }
+
+    /// The statement's warnings, as notices (MySQL's counterpart of
+    /// messages printed by the database).
+    fn report_warnings(&mut self) {
+        let warnings: Result<Vec<(String, u32, String)>, _> = self.conn.query("show warnings");
+        match warnings {
+            Ok(warnings) => {
+                for (level, code, message) in warnings {
+                    self.events
+                        .send(DbEvent::Notice(format!("{level} {code}: {message}")));
+                }
+            }
+            Err(e) => warn!("reading warnings: {e}"),
+        }
+    }
+}
+
+/// Reads a statement's result for [`Worker::run_statement`].
+struct Fetch<'a> {
+    id: u64,
+    max_rows: usize,
+    started: Instant,
+    events: &'a Events,
+    requests: &'a Receiver<DbRequest>,
+    kill: &'a Canceller,
+}
+
+impl Fetch<'_> {
+    fn stream<T: Protocol>(
+        self,
+        mut result: QueryResult<'_, '_, '_, T>,
+        next: &mut Option<DbRequest>,
+    ) -> Result<Outcome, mysql::Error> {
+        let set = result.columns();
+        let types: Vec<mysql::Column> = set.as_ref().to_vec();
+        if types.is_empty() {
+            return Ok(Outcome::Done {
+                affected: result.affected_rows(),
+                warnings: result.warnings(),
+            });
+        }
+        let id = self.id;
+        let columns = types.iter().map(column).collect();
+        self.events.send(DbEvent::QueryStarted { id, columns });
+        let mut max_rows = self.max_rows;
+        let mut started = self.started;
+        loop {
+            let mut rows = Vec::with_capacity(max_rows.min(10_000));
+            let mut more = true;
+            while rows.len() < max_rows {
+                match result.next() {
+                    Some(Ok(row)) => rows.push(
+                        row.unwrap()
+                            .iter()
+                            .zip(&types)
+                            .map(|(value, ty)| cell(value, ty))
+                            .collect(),
+                    ),
+                    Some(Err(e)) => {
+                        let mut error = DbError::from(e);
+                        if error.code == Some(1317) {
+                            error.message = "Cancelled while fetching".into();
+                        }
+                        self.events.send(DbEvent::Failed {
+                            id,
+                            error,
+                            elapsed: started.elapsed(),
+                        });
+                        return Ok(Outcome::Query);
+                    }
+                    None => {
+                        more = false;
+                        break;
+                    }
+                }
+            }
+            self.events.send(DbEvent::Rows {
+                id,
+                rows,
+                more,
+                elapsed: started.elapsed(),
+            });
+            if !more {
+                return Ok(Outcome::Query);
+            }
+            match self.requests.recv() {
+                Ok(DbRequest::FetchMore {
+                    id: wanted,
+                    max_rows: n,
+                }) if wanted == id => {
+                    max_rows = n;
+                    started = Instant::now();
+                }
+                other => {
+                    // Rows are left: stop the server instead of reading them
+                    // all when the result is dropped on return.
+                    (self.kill)();
+                    *next = Some(other.unwrap_or(DbRequest::Disconnect));
+                    return Ok(Outcome::Query);
+                }
+            }
+        }
+    }
+}
+
+/// A MySQL connection as a [`Client`].
+struct MySqlClient<'a>(&'a mut Conn);
+
+impl Client for MySqlClient<'_> {
+    fn dialect(&self) -> Dialect {
+        Dialect::MYSQL
+    }
+
+    fn query(&mut self, sql: &str, params: &[&str]) -> Result<Vec<Vec<Cell>>, DbError> {
+        if params.is_empty() {
+            Ok(all_rows(self.0.query_iter(sql)?)?)
+        } else {
+            let params = params.iter().map(|p| Value::from(*p)).collect();
+            Ok(all_rows(
+                self.0.exec_iter(sql, Params::Positional(params))?,
+            )?)
+        }
+    }
+
+    fn meta(&mut self, query: &MetaQuery) -> Result<MetaResult, DbError> {
+        crate::mysql_meta::run(self.0, query)
+    }
+}
+
+/// The rows of a result's first set as text.
+pub(crate) fn all_rows<T: Protocol>(
+    mut result: QueryResult<'_, '_, '_, T>,
+) -> Result<Vec<Vec<Cell>>, mysql::Error> {
+    let types: Vec<mysql::Column> = result.columns().as_ref().to_vec();
+    let mut rows = Vec::new();
+    for row in result.by_ref() {
+        let values = row?.unwrap();
+        rows.push(values.iter().zip(&types).map(|(v, c)| cell(v, c)).collect());
+    }
+    Ok(rows)
+}
+
+/// Connection options from `host[:port][/database][?tls[=skip-verify]]`
+/// (a `mysql://` prefix is allowed). Through SSH, the host is as the SSH
+/// server sees it.
+pub(crate) fn options(params: &ConnectParams) -> Result<Opts, DbError> {
+    let target = parse_target(&params.connect_string)?;
+    let (host, port) = match &params.ssh {
+        Some(tunnel) => {
+            let local = tunnel.forward(&target.host, target.port)?;
+            (local.ip().to_string(), local.port())
+        }
+        None => (target.host, target.port),
+    };
+    let mut builder = OptsBuilder::new()
+        .ip_or_hostname(Some(host))
+        .tcp_port(port)
+        .user(Some(&params.username))
+        .pass(Some(&params.password))
+        .db_name(target.database)
+        .prefer_socket(false)
+        .tcp_connect_timeout(Some(Duration::from_secs(15)));
+    match target.tls {
+        Tls::Off => {}
+        // Through SSH the driver connects to 127.0.0.1: the certificate is
+        // still checked, its host name can't be.
+        Tls::Verify => {
+            builder = builder.ssl_opts(
+                SslOpts::default().with_danger_skip_domain_validation(params.ssh.is_some()),
+            )
+        }
+        Tls::SkipVerify => {
+            builder = builder.ssl_opts(
+                SslOpts::default()
+                    .with_danger_accept_invalid_certs(true)
+                    .with_danger_skip_domain_validation(true),
+            )
+        }
+    }
+    Ok(builder.into())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Tls {
+    Off,
+    Verify,
+    SkipVerify,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Target {
+    host: String,
+    port: u16,
+    database: Option<String>,
+    tls: Tls,
+}
+
+fn parse_target(text: &str) -> Result<Target, DbError> {
+    let text = text.trim();
+    let text = text.strip_prefix("mysql://").unwrap_or(text);
+    let (address, query) = text.split_once('?').unwrap_or((text, ""));
+    let (host_port, database) = match address.split_once('/') {
+        Some((host_port, db)) => (host_port, Some(db.trim()).filter(|d| !d.is_empty())),
+        None => (address, None),
+    };
+    // `[::1]:3306`, `host:3306` or just the host.
+    let (host, port) = if let Some(rest) = host_port.strip_prefix('[') {
+        let (host, rest) = rest
+            .split_once(']')
+            .ok_or_else(|| DbError::new(format!("Missing ']' in {host_port}")))?;
+        (host, rest.strip_prefix(':'))
+    } else {
+        match host_port.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host_port, None),
+        }
+    };
+    let port = match port {
+        Some(port) => port
+            .parse()
+            .map_err(|_| DbError::new(format!("Not a port number: {port}")))?,
+        None => DEFAULT_PORT,
+    };
+    let host = if host.is_empty() { "localhost" } else { host };
+    let mut tls = Tls::Off;
+    for option in query.split('&').filter(|o| !o.is_empty()) {
+        tls = match option.to_ascii_lowercase().as_str() {
+            "tls" | "ssl" | "tls=verify" | "ssl=verify" => Tls::Verify,
+            "tls=skip-verify" | "ssl=skip-verify" => Tls::SkipVerify,
+            "tls=off" | "ssl=off" => Tls::Off,
+            _ => {
+                return Err(DbError::new(format!(
+                    "Unknown option {option} (use tls, tls=skip-verify)"
+                )));
+            }
+        };
+    }
+    Ok(Target {
+        host: host.to_owned(),
+        port,
+        database: database.map(str::to_owned),
+        tls,
+    })
+}
+
+/// Stops the statement running on connection `id` from a connection of its
+/// own (MySQL's way to break into a session).
+fn kill_query(opts: &Opts, id: u32) {
+    let killed =
+        Conn::new(opts.clone()).and_then(|mut conn| conn.query_drop(format!("kill query {id}")));
+    if let Err(e) = killed {
+        warn!("cancel failed: {e}");
+    }
+}
+
+/// `9.4.0` → `(9, 4)`, `10.11.6-MariaDB` → `(10, 11)`.
+fn release(version: &str) -> crate::compat::Release {
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .map(|p| p.parse().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+}
+
+/// Replaces `:name` binds by `?` with their values in order. Names match
+/// without case, as Oracle's do.
+fn positional(sql: &str, binds: &[(String, Option<String>)]) -> (String, Vec<Value>) {
+    let mut out = String::with_capacity(sql.len());
+    let mut values = Vec::new();
+    let mut last = 0;
+    for token in pythia_plsql::tokenize(sql) {
+        if token.kind != pythia_plsql::TokenKind::BindVar {
+            continue;
+        }
+        let name = &sql[token.span.start + 1..token.span.end];
+        let Some((_, value)) = binds.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) else {
+            continue;
+        };
+        out.push_str(&sql[last..token.span.start]);
+        out.push('?');
+        last = token.span.end;
+        values.push(match value {
+            Some(v) => Value::Bytes(v.clone().into_bytes()),
+            None => Value::NULL,
+        });
+    }
+    out.push_str(&sql[last..]);
+    (out, values)
+}
+
+pub(crate) fn column(c: &mysql::Column) -> Column {
+    use ColumnType::*;
+    let numeric = matches!(
+        c.column_type(),
+        MYSQL_TYPE_DECIMAL
+            | MYSQL_TYPE_NEWDECIMAL
+            | MYSQL_TYPE_TINY
+            | MYSQL_TYPE_SHORT
+            | MYSQL_TYPE_INT24
+            | MYSQL_TYPE_LONG
+            | MYSQL_TYPE_LONGLONG
+            | MYSQL_TYPE_FLOAT
+            | MYSQL_TYPE_DOUBLE
+    );
+    Column {
+        name: c.name_str().into_owned(),
+        type_name: type_name(c),
+        numeric,
+    }
+}
+
+/// The column's type the way MySQL names it in DDL.
+fn type_name(c: &mysql::Column) -> String {
+    use ColumnType::*;
+    let binary = is_binary(c);
+    let flags = c.flags();
+    let name = if flags.contains(ColumnFlags::ENUM_FLAG) {
+        "ENUM"
+    } else if flags.contains(ColumnFlags::SET_FLAG) {
+        "SET"
+    } else {
+        match c.column_type() {
+            MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => "DECIMAL",
+            MYSQL_TYPE_TINY => "TINYINT",
+            MYSQL_TYPE_SHORT => "SMALLINT",
+            MYSQL_TYPE_INT24 => "MEDIUMINT",
+            MYSQL_TYPE_LONG => "INT",
+            MYSQL_TYPE_LONGLONG => "BIGINT",
+            MYSQL_TYPE_FLOAT => "FLOAT",
+            MYSQL_TYPE_DOUBLE => "DOUBLE",
+            MYSQL_TYPE_NULL => "NULL",
+            MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => "TIMESTAMP",
+            MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => "DATE",
+            MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => "TIME",
+            MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => "DATETIME",
+            MYSQL_TYPE_YEAR => "YEAR",
+            MYSQL_TYPE_BIT => "BIT",
+            MYSQL_TYPE_JSON => "JSON",
+            MYSQL_TYPE_VECTOR => "VECTOR",
+            MYSQL_TYPE_GEOMETRY => "GEOMETRY",
+            MYSQL_TYPE_TINY_BLOB
+            | MYSQL_TYPE_MEDIUM_BLOB
+            | MYSQL_TYPE_LONG_BLOB
+            | MYSQL_TYPE_BLOB => {
+                if binary {
+                    "BLOB"
+                } else {
+                    "TEXT"
+                }
+            }
+            MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => {
+                if binary {
+                    "VARBINARY"
+                } else {
+                    "VARCHAR"
+                }
+            }
+            MYSQL_TYPE_STRING => {
+                if binary {
+                    "BINARY"
+                } else {
+                    "CHAR"
+                }
+            }
+            _ => "UNKNOWN",
+        }
+    };
+    if flags.contains(ColumnFlags::UNSIGNED_FLAG) && !matches!(name, "BIT" | "YEAR") {
+        format!("{name} UNSIGNED")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// Byte strings without a character set: shown as hex, like Oracle's RAW.
+fn is_binary(c: &mysql::Column) -> bool {
+    use ColumnType::*;
+    const BINARY_CHARSET: u16 = 63;
+    c.character_set() == BINARY_CHARSET
+        && matches!(
+            c.column_type(),
+            MYSQL_TYPE_STRING
+                | MYSQL_TYPE_VAR_STRING
+                | MYSQL_TYPE_VARCHAR
+                | MYSQL_TYPE_TINY_BLOB
+                | MYSQL_TYPE_MEDIUM_BLOB
+                | MYSQL_TYPE_LONG_BLOB
+                | MYSQL_TYPE_BLOB
+                | MYSQL_TYPE_BIT
+                | MYSQL_TYPE_GEOMETRY
+        )
+}
+
+pub(crate) fn cell(value: &Value, column: &mysql::Column) -> Cell {
+    Some(match value {
+        Value::NULL => return None,
+        Value::Bytes(bytes) if is_binary(column) => hex(bytes),
+        Value::Bytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Value::Int(v) => v.to_string(),
+        Value::UInt(v) => v.to_string(),
+        Value::Float(v) => v.to_string(),
+        Value::Double(v) => v.to_string(),
+        Value::Date(y, m, d, h, mi, s, us) => {
+            let date = format!("{y:04}-{m:02}-{d:02}");
+            if matches!(
+                column.column_type(),
+                ColumnType::MYSQL_TYPE_DATE | ColumnType::MYSQL_TYPE_NEWDATE
+            ) {
+                date
+            } else if *us > 0 {
+                format!("{date} {h:02}:{mi:02}:{s:02}.{us:06}")
+            } else {
+                format!("{date} {h:02}:{mi:02}:{s:02}")
+            }
+        }
+        Value::Time(negative, days, h, mi, s, us) => {
+            let sign = if *negative { "-" } else { "" };
+            let hours = days * 24 + u32::from(*h);
+            if *us > 0 {
+                format!("{sign}{hours:02}:{mi:02}:{s:02}.{us:06}")
+            } else {
+                format!("{sign}{hours:02}:{mi:02}:{s:02}")
+            }
+        }
+    })
+}
+
+/// Uppercase hex, at most 4000 bytes of it like a RAW column.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    const MAX: usize = 4000;
+    let mut out = String::with_capacity(bytes.len().min(MAX) * 2);
+    for b in bytes.iter().take(MAX) {
+        let _ = write!(out, "{b:02X}");
+    }
+    if bytes.len() > MAX {
+        let _ = write!(out, "… ({} bytes)", bytes.len());
+    }
+    out
+}
+
+/// The first one or two words of a statement, uppercase, comments skipped.
+fn leading_words(sql: &str) -> Vec<String> {
+    pythia_plsql::tokenize(sql)
+        .into_iter()
+        .filter(|t| !t.kind.is_trivia())
+        .take(2)
+        .map(|t| sql[t.span].to_ascii_uppercase())
+        .collect()
+}
+
+fn statement_kind(sql: &str) -> String {
+    leading_words(sql)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "Statement".into())
+}
+
+fn is_dml(kind: &str) -> bool {
+    matches!(kind, "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "LOAD")
+}
+
+/// What a statement does to the session's transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxEffect {
+    /// `START TRANSACTION`, `BEGIN`.
+    Begins,
+    /// Changes or locks rows.
+    Changes,
+    /// `COMMIT`, `ROLLBACK`, or DDL (which commits implicitly).
+    Ends,
+    None,
+}
+
+impl TxEffect {
+    fn of(sql: &str) -> Self {
+        let words = leading_words(sql);
+        let first = words.first().map(String::as_str).unwrap_or_default();
+        let second = words.get(1).map(String::as_str).unwrap_or_default();
+        match first {
+            "COMMIT" => TxEffect::Ends,
+            "ROLLBACK" if second != "TO" => TxEffect::Ends,
+            "START" | "BEGIN" => TxEffect::Begins,
+            "CREATE" if second == "TEMPORARY" => TxEffect::None,
+            "CREATE" | "ALTER" | "DROP" | "RENAME" | "TRUNCATE" | "GRANT" | "REVOKE" | "LOCK"
+            | "UNLOCK" | "ANALYZE" | "OPTIMIZE" | "REPAIR" => TxEffect::Ends,
+            "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "LOAD" | "CALL" => TxEffect::Changes,
+            "SELECT" | "WITH" => {
+                let upper = sql.to_ascii_uppercase();
+                if upper.contains("FOR UPDATE")
+                    || upper.contains("FOR SHARE")
+                    || upper.contains("LOCK IN SHARE MODE")
+                {
+                    TxEffect::Changes
+                } else {
+                    TxEffect::None
+                }
+            }
+            _ => TxEffect::None,
+        }
+    }
+
+    fn changes(self) -> bool {
+        self == TxEffect::Changes
+    }
+}
+
+/// Whether the session has a transaction to commit. MySQL doesn't say
+/// without extra privileges, so it follows the statements. The server's
+/// autocommit stays on, so queries see what others committed and hold no
+/// locks; without the session's autocommit, a change opens a transaction
+/// first (see [`Worker::execute`]).
+#[derive(Debug, Default)]
+struct Transaction {
+    pending: bool,
+}
+
+impl Transaction {
+    /// Notes a statement that succeeded.
+    fn after(&mut self, effect: TxEffect) {
+        match effect {
+            TxEffect::Begins => self.pending = true,
+            TxEffect::Ends => self.pending = false,
+            // In autocommit mode a change outside a transaction is committed.
+            TxEffect::Changes | TxEffect::None => {}
+        }
+    }
+}
+
+/// Where a syntax error is: MySQL quotes the statement from there on
+/// (`... near 'frm emp' at line 1`).
+fn error_offset(sql: &str, message: &str) -> Option<u32> {
+    let start = message.find("near '")? + "near '".len();
+    let end = message.rfind("' at line ")?;
+    let near = message.get(start..end)?;
+    let line: usize = message[end + "' at line ".len()..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    let line_start = sql
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1))
+        .map(str::len)
+        .sum::<usize>();
+    if near.is_empty() {
+        return u32::try_from(sql.trim_end().len()).ok();
+    }
+    let head = near.lines().next().unwrap_or(near);
+    let found = sql.get(line_start..)?.find(head)?;
+    u32::try_from(line_start + found).ok()
+}
+
+impl From<mysql::Error> for DbError {
+    fn from(e: mysql::Error) -> Self {
+        match e {
+            mysql::Error::MySqlError(e) => Self {
+                code: Some(i32::from(e.code)),
+                // Killed connection, shutdown, idle timeout.
+                lost: matches!(e.code, 1053 | 1927 | 4031),
+                ..Self::new(format!("ERROR {} ({}): {}", e.code, e.state, e.message))
+            },
+            mysql::Error::IoError(e) => Self {
+                lost: true,
+                ..Self::new(format!("Lost connection to the MySQL server: {e}"))
+            },
+            mysql::Error::CodecError(e) => Self {
+                lost: true,
+                ..Self::new(format!("Lost connection to the MySQL server: {e}"))
+            },
+            e => Self::new(e.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn targets() {
+        let t = parse_target("localhost").unwrap();
+        assert_eq!(
+            (t.host.as_str(), t.port, t.database),
+            ("localhost", 3306, None)
+        );
+        let t = parse_target("db.example.com:3307/shop").unwrap();
+        assert_eq!(
+            (t.host.as_str(), t.port, t.database.as_deref()),
+            ("db.example.com", 3307, Some("shop"))
+        );
+        let t = parse_target("mysql://[::1]:3310/x?tls=skip-verify").unwrap();
+        assert_eq!(
+            (t.host.as_str(), t.port, t.tls),
+            ("::1", 3310, Tls::SkipVerify)
+        );
+        assert_eq!(parse_target("h/db?tls").unwrap().tls, Tls::Verify);
+        assert!(parse_target("h:port").is_err());
+        assert!(parse_target("h?compress").is_err());
+    }
+
+    #[test]
+    fn binds_become_positional() {
+        let binds = vec![
+            ("id".to_owned(), Some("7".to_owned())),
+            ("n".to_owned(), None),
+        ];
+        let (sql, values) = positional(
+            "select * from t where id = :ID or :n is null and x = ':id'",
+            &binds,
+        );
+        assert_eq!(
+            sql,
+            "select * from t where id = ? or ? is null and x = ':id'"
+        );
+        assert_eq!(values, vec![Value::Bytes(b"7".to_vec()), Value::NULL]);
+    }
+
+    #[test]
+    fn transaction_effects() {
+        let cases = [
+            ("select 1", TxEffect::None),
+            ("/* x */ update t set a = 1", TxEffect::Changes),
+            ("select * from t for update", TxEffect::Changes),
+            ("call p()", TxEffect::Changes),
+            ("savepoint a", TxEffect::None),
+            ("rollback to savepoint a", TxEffect::None),
+            ("rollback", TxEffect::Ends),
+            ("create table x (a int)", TxEffect::Ends),
+            ("create temporary table x (a int)", TxEffect::None),
+            ("start transaction", TxEffect::Begins),
+            ("commit work", TxEffect::Ends),
+        ];
+        for (sql, effect) in cases {
+            assert_eq!(TxEffect::of(sql), effect, "{sql}");
+        }
+        let mut tx = Transaction::default();
+        tx.after(TxEffect::Begins);
+        tx.after(TxEffect::Changes);
+        assert!(tx.pending);
+        tx.after(TxEffect::Ends);
+        assert!(!tx.pending);
+    }
+
+    #[test]
+    fn syntax_error_offsets() {
+        let message = "ERROR 1064 (42000): You have an error in your SQL syntax; check the manual \
+                       that corresponds to your MySQL server version for the right syntax to use \
+                       near 'frm emp' at line 2";
+        let sql = "select *\n  frm emp";
+        assert_eq!(error_offset(sql, message), Some(11));
+        let at_end = "... to use near '' at line 1";
+        assert_eq!(error_offset("select * from", at_end), Some(13));
+    }
+
+    #[test]
+    fn releases() {
+        assert_eq!(release("9.4.0"), (9, 4));
+        assert_eq!(release("10.11.6-MariaDB-0+deb12u1"), (10, 11));
+    }
+}

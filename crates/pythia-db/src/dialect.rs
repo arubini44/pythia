@@ -1,0 +1,226 @@
+//! What differs between the databases Pythia talks to.
+//!
+//! Every connection has a [`Dialect`]. Sessions speak the same
+//! [`DbRequest`](crate::DbRequest)s and [`DbEvent`](crate::DbEvent)s for every
+//! database; what a database can't do is a [`Feature`] it lacks, and the UI
+//! asks [`Dialect::supports`] before offering it, so unsupported tools are
+//! hidden instead of failing.
+
+pub use pythia_config::DbKind;
+
+use crate::meta::{Detail, ObjectType};
+
+/// Something Pythia offers that not every database has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Feature {
+    /// PL/SQL: program windows, compiling, test scripts, `exec`.
+    PlSql,
+    /// `DBMS_OUTPUT` lines after each statement.
+    ServerOutput,
+    ExplainPlan,
+    /// Running a statement with its actual plan and session statistics.
+    Statistics,
+    Profiler,
+    Debugger,
+    /// The monitoring dashboard: KPIs, trends, findings, top SQL.
+    Dashboard,
+    /// Sessions, blocking, AWR and trace analysis.
+    Monitor,
+    SchedulerJobs,
+    InvalidObjects,
+    /// Searching the stored source of the database.
+    SourceSearch,
+    /// Searching values in the tables of a schema.
+    DataSearch,
+    /// Editing query results in place.
+    EditResults,
+    /// Opening parent and child rows of a result row.
+    FollowKeys,
+    /// Streaming a query's rows into a file.
+    ExecuteToFile,
+    Import,
+    ExportTables,
+    /// Schema and data compare.
+    Compare,
+    /// Form editors (sequences, views, synonyms, indexes, grants) and the
+    /// table editor.
+    ObjectEditors,
+    /// The built-in reports.
+    Reports,
+    /// Completion and navigation with dictionary data.
+    Completion,
+    /// Indexes, constraints and triggers below a table in the object browser.
+    TableParts,
+    /// Users, roles, profiles and directories in the object browser.
+    Accounts,
+    /// Dictionary lookups for the AI assistant.
+    AiLookups,
+    /// Comparing project files with the stored objects, and exporting a
+    /// schema into files.
+    ObjectFiles,
+    /// Connecting through an SSH server ([`crate::ssh`]).
+    SshTunnel,
+}
+
+/// The database of a connection and what it supports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Dialect(pub DbKind);
+
+impl From<DbKind> for Dialect {
+    fn from(kind: DbKind) -> Self {
+        Self(kind)
+    }
+}
+
+impl Dialect {
+    pub const ORACLE: Dialect = Dialect(DbKind::Oracle);
+    pub const MYSQL: Dialect = Dialect(DbKind::MySql);
+
+    pub fn kind(self) -> DbKind {
+        self.0
+    }
+
+    /// The product name, e.g. for "Connected to … (MySQL 9.4.0)".
+    pub fn name(self) -> &'static str {
+        self.0.label()
+    }
+
+    /// Whether the UI should offer `feature` on this database. Everything
+    /// was built for Oracle; other databases list what they have so far.
+    pub fn supports(self, feature: Feature) -> bool {
+        match self.0 {
+            // Its connect strings (TNS aliases, descriptors) aren't pointed
+            // at a tunnel yet.
+            DbKind::Oracle => feature != Feature::SshTunnel,
+            DbKind::MySql => matches!(
+                feature,
+                Feature::ExplainPlan
+                    | Feature::Completion
+                    | Feature::SshTunnel
+                    | Feature::Dashboard
+            ),
+        }
+    }
+
+    /// Folders of a schema in the object browser, in display order.
+    pub fn browser_types(self) -> &'static [ObjectType] {
+        match self.0 {
+            DbKind::Oracle => ObjectType::BROWSER,
+            DbKind::MySql => &[
+                ObjectType::Table,
+                ObjectType::View,
+                ObjectType::Procedure,
+                ObjectType::Function,
+                ObjectType::Trigger,
+            ],
+        }
+    }
+
+    /// Tabs of an object view besides columns and source.
+    pub fn details(self, object_type: ObjectType) -> &'static [Detail] {
+        match (self.0, object_type) {
+            (_, ObjectType::DatabaseLink) => Detail::LINK,
+            (DbKind::Oracle, ObjectType::Table) => Detail::TABLE,
+            (DbKind::Oracle, _) => Detail::CODE,
+            (DbKind::MySql, ObjectType::Table) => &[
+                Detail::Indexes,
+                Detail::Constraints,
+                Detail::Triggers,
+                Detail::Grants,
+                Detail::UsedBy,
+            ],
+            (DbKind::MySql, ObjectType::View) => &[Detail::Uses],
+            (DbKind::MySql, _) => &[],
+        }
+    }
+
+    /// Quotes an identifier only if the database would need it. Oracle folds
+    /// unquoted names to uppercase; MySQL keeps their case.
+    pub fn quote_ident(self, name: &str) -> String {
+        match self.0 {
+            DbKind::Oracle => {
+                let plain = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || "_$#".contains(c))
+                    && !pythia_plsql::is_keyword(name);
+                if plain {
+                    name.to_owned()
+                } else {
+                    format!("\"{}\"", name.replace('"', "\"\""))
+                }
+            }
+            DbKind::MySql => {
+                let plain = name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "_$".contains(c))
+                    && !pythia_plsql::is_keyword(name);
+                if plain {
+                    name.to_owned()
+                } else {
+                    format!("`{}`", name.replace('`', "``"))
+                }
+            }
+        }
+    }
+
+    /// `owner.name`, quoted where needed.
+    pub fn qualified(self, owner: &str, name: &str) -> String {
+        format!("{}.{}", self.quote_ident(owner), self.quote_ident(name))
+    }
+
+    /// How the dictionary stores an unquoted name the user typed: Oracle
+    /// folds it to uppercase, MySQL keeps it (and compares names without
+    /// case where it matters).
+    pub fn dictionary_name(self, name: &str) -> String {
+        match self.0 {
+            DbKind::Oracle => name.to_uppercase(),
+            DbKind::MySql => name.to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oracle_has_everything_but_ssh() {
+        for feature in [
+            Feature::PlSql,
+            Feature::Debugger,
+            Feature::Dashboard,
+            Feature::Monitor,
+        ] {
+            assert!(Dialect::ORACLE.supports(feature));
+        }
+        assert!(!Dialect::ORACLE.supports(Feature::SshTunnel));
+        for feature in [Feature::ExplainPlan, Feature::Dashboard, Feature::SshTunnel] {
+            assert!(Dialect::MYSQL.supports(feature));
+        }
+        assert!(!Dialect::MYSQL.supports(Feature::Debugger));
+        assert!(!Dialect::MYSQL.supports(Feature::ServerOutput));
+        assert!(!Dialect::MYSQL.supports(Feature::Monitor));
+        assert_eq!(Dialect::default(), Dialect::ORACLE);
+    }
+
+    #[test]
+    fn quoting() {
+        let oracle = Dialect::ORACLE;
+        assert_eq!(oracle.quote_ident("EMP"), "EMP");
+        assert_eq!(oracle.quote_ident("emp"), "\"emp\"");
+        assert_eq!(oracle.quote_ident("ORDER"), "\"ORDER\"");
+        let mysql = Dialect::MYSQL;
+        assert_eq!(mysql.quote_ident("emp"), "emp");
+        assert_eq!(mysql.quote_ident("Emp_2"), "Emp_2");
+        assert_eq!(mysql.quote_ident("order"), "`order`");
+        assert_eq!(mysql.quote_ident("my table"), "`my table`");
+        assert_eq!(mysql.quote_ident("a`b"), "`a``b`");
+        assert_eq!(mysql.quote_ident("2fa"), "`2fa`");
+        assert_eq!(mysql.qualified("pythia", "emp"), "pythia.emp");
+    }
+}

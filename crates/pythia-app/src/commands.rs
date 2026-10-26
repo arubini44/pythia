@@ -6,6 +6,7 @@
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 use pythia_config::KeymapPreset;
+use pythia_db::{Dialect, Feature};
 
 macro_rules! commands {
     ($($variant:ident => $label:literal,)*) => {
@@ -165,6 +166,43 @@ impl Command {
     pub fn short_label(self) -> &'static str {
         let label = self.label();
         label.split_once(": ").map_or(label, |(_, rest)| rest)
+    }
+
+    /// What the connection's database must support for the command to be
+    /// offered (see [`Dialect::supports`]).
+    pub fn feature(self) -> Option<Feature> {
+        use Command::*;
+        Some(match self {
+            ExplainPlan => Feature::ExplainPlan,
+            ExecuteWithStatistics => Feature::Statistics,
+            ExecuteToFile => Feature::ExecuteToFile,
+            Profile => Feature::Profiler,
+            SaveAsReport => Feature::Reports,
+            FindInSource => Feature::SourceSearch,
+            SearchData => Feature::DataSearch,
+            SchedulerJobs => Feature::SchedulerJobs,
+            InvalidObjects => Feature::InvalidObjects,
+            ImportData => Feature::Import,
+            ExportTables => Feature::ExportTables,
+            CompareSchemas | CompareData => Feature::Compare,
+            SwitchSpecBody => Feature::PlSql,
+            DebugStart | ToggleBreakpoint | DebugContinue | DebugStepOver | DebugStepInto
+            | DebugStepOut | DebugStop | ShowDebugger => Feature::Debugger,
+            NewTable | NewView | NewMaterializedView | NewSequence | NewSynonym | NewIndex
+            | NewTrigger | NewProcedure | NewFunction | NewPackage | NewType | NewJob
+            | NewDatabaseLink | NewUser | NewRole | NewProfile | NewDirectory => {
+                Feature::ObjectEditors
+            }
+            MonitorDashboard => Feature::Dashboard,
+            MonitorSessions | MonitorBlocking | MonitorAwr | MonitorTrace => Feature::Monitor,
+            AiAnalyzePlan => Feature::ExplainPlan,
+            _ => return None,
+        })
+    }
+
+    /// Whether the command is offered for a connection of `dialect`.
+    pub fn available(self, dialect: Dialect) -> bool {
+        self.feature().is_none_or(|f| dialect.supports(f))
     }
 }
 

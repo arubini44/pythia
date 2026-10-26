@@ -46,6 +46,7 @@ pub fn show(
                         ui.label(RichText::new(name).monospace().weak());
                     });
                     let options = MenuOptions {
+                        dialect: cx.dialect,
                         favorite: cx.marks.is_some_and(|m| m.is_favorite(connection, &object)),
                         drop: false,
                         reveal: true,
@@ -83,12 +84,14 @@ pub fn show(
         };
         let keymap = Keymap::with_overrides(cx.settings.keymap, &cx.settings.keybindings);
         let mut command = |ui: &mut egui::Ui, command: Command| {
-            if item(
-                ui,
-                command.short_label(),
-                keymap.shortcut_text(ui.ctx(), command),
-                true,
-            ) {
+            if command.available(cx.dialect)
+                && item(
+                    ui,
+                    command.short_label(),
+                    keymap.shortcut_text(ui.ctx(), command),
+                    true,
+                )
+            {
                 effects.commands.push(command);
                 ui.close();
             }

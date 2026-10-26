@@ -14,11 +14,13 @@ fn params() -> Option<ConnectParams> {
     let (cred, db) = spec.rsplit_once('@')?;
     let (user, pw) = cred.split_once('/')?;
     Some(ConnectParams {
+        kind: Default::default(),
         username: user.into(),
         password: pw.into(),
         connect_string: db.into(),
         privilege: Default::default(),
         init_sql: Vec::new(),
+        ssh: None,
     })
 }
 

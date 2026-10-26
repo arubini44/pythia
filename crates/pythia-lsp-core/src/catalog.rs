@@ -83,9 +83,26 @@ pub enum CatalogRequest {
 
 /// Read access to cached dictionary data. All names are as stored in the
 /// dictionary (unquoted names uppercase).
+/// How a database writes the names in its dictionary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NameStyle {
+    /// Oracle: unquoted names are stored in uppercase; any other name is
+    /// written in double quotes.
+    #[default]
+    Upper,
+    /// MySQL: names are stored as written and compared without case;
+    /// backticks quote names that need it.
+    AsStored,
+}
+
 pub trait Catalog {
     /// Schema unqualified names are looked up in.
     fn current_schema(&self) -> &str;
+
+    /// How names are written; Oracle's way unless the database differs.
+    fn names(&self) -> NameStyle {
+        NameStyle::Upper
+    }
 
     fn schemas(&self) -> Lookup<Vec<String>>;
 
@@ -136,6 +153,7 @@ impl Catalog for EmptyCatalog {
 #[derive(Debug, Default, Clone)]
 pub struct CatalogCache {
     current_schema: String,
+    names: NameStyle,
     schemas: Option<Vec<String>>,
     objects: HashMap<String, Vec<CatalogObject>>,
     resolved: HashMap<(Option<String>, String), Option<CatalogObject>>,
@@ -149,6 +167,12 @@ impl CatalogCache {
             current_schema: current_schema.into(),
             ..Self::default()
         }
+    }
+
+    /// For a database that writes names differently than Oracle.
+    pub fn with_names(mut self, names: NameStyle) -> Self {
+        self.names = names;
+        self
     }
 
     pub fn set_current_schema(&mut self, schema: impl Into<String>) {
@@ -187,7 +211,7 @@ impl CatalogCache {
 
     /// Drops everything (e.g. after DDL), keeping the current schema.
     pub fn clear(&mut self) {
-        *self = Self::new(std::mem::take(&mut self.current_schema));
+        *self = Self::new(std::mem::take(&mut self.current_schema)).with_names(self.names);
     }
 
     /// Forgets one object's details (after it was recompiled or altered).
@@ -201,6 +225,10 @@ impl CatalogCache {
 impl Catalog for CatalogCache {
     fn current_schema(&self) -> &str {
         &self.current_schema
+    }
+
+    fn names(&self) -> NameStyle {
+        self.names
     }
 
     fn schemas(&self) -> Lookup<Vec<String>> {
@@ -279,6 +307,10 @@ impl<'a> Tracker<'a> {
                 None
             }
         }
+    }
+
+    pub fn names(&self) -> NameStyle {
+        self.inner.names()
     }
 
     pub fn schemas(&self) -> Option<Vec<String>> {

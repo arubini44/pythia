@@ -156,6 +156,36 @@ for Linux, Windows and macOS.
   marked red and ask before commit; read-only connections; passwords live
   in the OS keychain.
 
+**MySQL (experimental)**
+- Connect to MySQL (tested with 9.4; MariaDB not yet) with *Type: MySQL* and `host:3306/database`
+  (`?tls` for TLS, `?tls=skip-verify` for self-signed certificates); no
+  client library needed.
+- *Connect through SSH* forwards the connection over an SSH server, like
+  `ssh -L` or HeidiSQL's SSH tunnel; the database address is then as the
+  SSH server sees it (often `localhost:3306/database`). Log in with a
+  password, a key file (OpenSSH or PuTTY `.ppk`) or the SSH agent (Pageant
+  or Windows' OpenSSH agent). Host keys come from `~/.ssh/known_hosts`; an
+  unknown one is shown with its fingerprint to trust once.
+- SQL windows with results, fetching on demand, Break, explain plan,
+  completion with columns and comments, and transactions that work as with
+  Oracle: queries see what others committed, changes wait for Commit.
+  Warnings show as messages.
+- The object browser lists tables, views, procedures, functions and
+  triggers; object views show columns, indexes, constraints, triggers,
+  grants, dependencies and the DDL. *Edit* opens a routine as a script that
+  drops and creates it again.
+- A monitoring dashboard of its own (Monitor → Dashboard): findings first
+  (lock waits and who blocks, metadata locks, connections near the limit,
+  buffer pool hit ratio, long transactions, replication), then KPIs and
+  trends from `SHOW GLOBAL STATUS`, running statements, open transactions,
+  storage and top statements from `performance_schema`. Other users'
+  threads, transactions and lock waits need the `PROCESS` privilege; top
+  statements and lock waits `SELECT` on `performance_schema`.
+- Everything built on Oracle's dictionary or PL/SQL — debugger, profiler,
+  the rest of the monitor, reports, scheduler jobs, compare, import/export,
+  editing results, the form editors — isn't offered on MySQL connections. As in SQL\*Plus,
+  end a routine with `/` on a line of its own (there is no `DELIMITER`).
+
 ## Installing
 
 Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
@@ -240,6 +270,9 @@ PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 | Variable | Used by |
 |---|---|
 | `PYTHIA_TEST_DB` | integration tests (app user) |
+| `PYTHIA_TEST_MYSQL` | MySQL tests, e.g. `pythia/pythia@localhost:3306/pythia` for `docker compose up -d mysql` |
+| `PYTHIA_TEST_MYSQL_DBA` | MySQL dashboard tests that need privileges, e.g. `root/mysql@localhost:3306/pythia` |
+| `PYTHIA_TEST_SSH`, `PYTHIA_TEST_MYSQL_VIA_SSH` | SSH tunnel tests: `pythia:pythia@localhost:2222` and `pythia/pythia@mysql:3306/pythia` for `docker compose up -d mysql ssh` |
 | `PYTHIA_TEST_DB_DBA` | monitor, compare and debugger tests (`system/oracle@…`) |
 | `PYTHIA_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local Podman container; with Docker on Linux, the compose network's gateway from `docker network inspect pythia_default`) |
 | `PYTHIA_SCREENSHOT_DIR` | renders the real UI offscreen into PNGs (`cargo test -p pythia-app screenshots`) |
@@ -261,7 +294,7 @@ fresh Oracle Free container.
 |---|---|
 | `pythia-app` | the application: documents, docking, commands, dialogs |
 | `pythia-ui` | code editor, data grid, icon set |
-| `pythia-db` | sessions on worker threads, dictionary queries |
+| `pythia-db` | sessions on worker threads (Oracle, MySQL), dictionary queries, what each database supports (`Dialect`, `Feature`), SSH tunnels |
 | `pythia-plsql` | lexer, statement splitter, error-tolerant parser |
 | `pythia-lsp-core` | completion, hover, navigation, outline, diagnostics |
 | `pythia-data` | export and import |

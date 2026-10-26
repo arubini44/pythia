@@ -20,7 +20,7 @@ use std::ops::Range;
 
 pub use catalog::{
     Catalog, CatalogCache, CatalogColumn, CatalogMember, CatalogObject, CatalogParam,
-    CatalogRequest, EmptyCatalog, Lookup, MemberKind, ParamMode,
+    CatalogRequest, EmptyCatalog, Lookup, MemberKind, NameStyle, ParamMode,
 };
 pub use complete::{CaseStyle, Completion, CompletionItem, CompletionKind, CompletionOptions};
 pub use navigate::{Definition, DefinitionResult, Hover, Signature, SignatureHelp};

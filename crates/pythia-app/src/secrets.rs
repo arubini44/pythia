@@ -1,5 +1,5 @@
-//! Connection passwords and AI API keys in the OS keychain (never in
-//! config files).
+//! Connection passwords, SSH passwords and AI API keys in the OS keychain
+//! (never in config files).
 
 use tracing::warn;
 
@@ -8,6 +8,8 @@ const SERVICE: &str = "pythia";
 const LEGACY_SERVICE: &str = "orui";
 /// API keys of AI backends, by backend id.
 const AI_SERVICE: &str = "pythia-ai";
+/// SSH passwords and key passphrases, by connection.
+const SSH_SERVICE: &str = "pythia-ssh";
 
 fn entry(service: &str, connection: &str) -> Option<keyring::Entry> {
     keyring::Entry::new(service, connection)
@@ -40,6 +42,28 @@ pub fn forget(connection: &str) {
         if let Some(entry) = entry(service, connection) {
             let _ = entry.delete_credential();
         }
+    }
+}
+
+pub fn load_ssh(connection: &str) -> Option<String> {
+    entry(SSH_SERVICE, connection)?.get_password().ok()
+}
+
+/// Stores the SSH password, or forgets it when it is empty.
+pub fn store_ssh(connection: &str, password: &str) {
+    let Some(entry) = entry(SSH_SERVICE, connection) else {
+        return;
+    };
+    if password.is_empty() {
+        let _ = entry.delete_credential();
+    } else if let Err(e) = entry.set_password(password) {
+        warn!("storing SSH password in keychain: {e}");
+    }
+}
+
+pub fn forget_ssh(connection: &str) {
+    if let Some(entry) = entry(SSH_SERVICE, connection) {
+        let _ = entry.delete_credential();
     }
 }
 

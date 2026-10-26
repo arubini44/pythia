@@ -1,5 +1,25 @@
 use serde::{Deserialize, Serialize};
 
+/// The kind of database a connection talks to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DbKind {
+    #[default]
+    Oracle,
+    MySql,
+}
+
+impl DbKind {
+    pub const ALL: [DbKind; 2] = [DbKind::Oracle, DbKind::MySql];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DbKind::Oracle => "Oracle",
+            DbKind::MySql => "MySQL",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Privilege {
@@ -28,6 +48,26 @@ impl Privilege {
     }
 }
 
+/// Reaching the database through an SSH server, like `ssh -L`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SshTunnel {
+    pub enabled: bool,
+    /// `host[:port]` of the SSH server.
+    pub host: String,
+    pub username: String,
+    /// A private key (OpenSSH or PuTTY `.ppk`). Without one: the SSH
+    /// password, or the SSH agent's keys when there is none either.
+    pub key_file: String,
+}
+
+impl SshTunnel {
+    /// Never set up: not written to `connections.toml`.
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// A saved connection. Never contains the password.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -35,8 +75,11 @@ pub struct ConnectionProfile {
     pub name: String,
     /// Slash separated folder path, e.g. `customer/prod`.
     pub folder: String,
+    /// Oracle unless the profile says otherwise.
+    pub kind: DbKind,
     pub username: String,
-    /// TNS alias, EZConnect (`host:port/service`) or a full descriptor.
+    /// Oracle: TNS alias, EZConnect (`host:port/service`) or a full
+    /// descriptor. MySQL: `host[:port][/database]`.
     pub connect_string: String,
     pub privilege: Privilege,
     /// Production connections get a red marker and extra confirmations.
@@ -50,6 +93,10 @@ pub struct ConnectionProfile {
     pub default_schema: String,
     /// SQL run on every new session, e.g. NLS settings.
     pub login_script: String,
+    /// Kept while switched off, so it can be switched on again. The SSH
+    /// password goes to the keychain too.
+    #[serde(skip_serializing_if = "SshTunnel::is_unset")]
+    pub ssh: SshTunnel,
 }
 
 impl ConnectionProfile {
@@ -78,5 +125,52 @@ impl Connections {
             Some(existing) => *existing = profile,
             None => self.profiles.push(profile),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profiles_without_a_kind_are_oracle() {
+        let saved: Connections = toml::from_str(
+            "[[connection]]\nusername = \"scott\"\nconnect_string = \"localhost/FREEPDB1\"\n",
+        )
+        .unwrap();
+        assert_eq!(saved.profiles[0].kind, DbKind::Oracle);
+
+        let mysql = ConnectionProfile {
+            kind: DbKind::MySql,
+            ..Default::default()
+        };
+        let text = toml::to_string(&mysql).unwrap();
+        assert!(text.contains("kind = \"mysql\""), "{text}");
+        let back: ConnectionProfile = toml::from_str(&text).unwrap();
+        assert_eq!(back.kind, DbKind::MySql);
+    }
+
+    #[test]
+    fn ssh_tunnel_is_saved_once_set_up() {
+        let plain = toml::to_string(&ConnectionProfile::default()).unwrap();
+        assert!(!plain.contains("ssh"), "{plain}");
+
+        let mut saved = Connections::default();
+        saved.upsert(ConnectionProfile {
+            kind: DbKind::MySql,
+            username: "app".into(),
+            connect_string: "localhost/shop".into(),
+            ssh: SshTunnel {
+                enabled: true,
+                host: "bastion.example.com:2222".into(),
+                username: "remo".into(),
+                key_file: "~/.ssh/id_ed25519".into(),
+            },
+            ..Default::default()
+        });
+        let text = toml::to_string_pretty(&saved).unwrap();
+        assert!(text.contains("[connection.ssh]"), "{text}");
+        let back: Connections = toml::from_str(&text).unwrap();
+        assert_eq!(back, saved);
     }
 }

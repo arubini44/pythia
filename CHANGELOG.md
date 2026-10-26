@@ -6,6 +6,27 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- MySQL connections (experimental): pick *Type: MySQL* when connecting.
+  SQL windows, explain plan, completion, the object browser and object views
+  work; tools that rely on Oracle's dictionary or PL/SQL are hidden on
+  MySQL connections. `pythia_db::Dialect` says what a connection's database
+  supports, and `DbRequest::Run` runs tool code on any database.
+- MySQL connections through SSH, as with HeidiSQL's SSH tunnel: *Connect
+  through SSH* in the connect dialog, with a password, a key file (OpenSSH
+  or PuTTY `.ppk`) or the SSH agent (Pageant on Windows). All sessions of a
+  connection share one SSH connection, which logs in again when it was
+  lost. A server's host key has to be in `~/.ssh/known_hosts` or trusted
+  once in the dialog; a changed key fails.
+- MySQL monitoring dashboard (Monitor → Dashboard): findings (lock waits
+  and their blocker, metadata lock waits, connections near
+  `max_connections`, buffer pool hit ratio, long transactions, replication
+  stopped or lagging), KPI tiles and trend charts from `SHOW GLOBAL
+  STATUS`, connections by user, host and database, running statements,
+  open transactions, the largest databases and tables, and the top
+  statements from `performance_schema` with *Analyze*. What needs the
+  `PROCESS` privilege or `SELECT` on `performance_schema` says so.
+
 ## [0.3.0] - 2026-10-23
 
 ### Added

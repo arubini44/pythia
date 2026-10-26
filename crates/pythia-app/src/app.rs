@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 
 use egui::{Color32, RichText, Ui};
 use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle, TabViewer};
@@ -6,13 +7,13 @@ use pythia_config::{
     ConnectionProfile, Connections as SavedConnections, Paths, Settings, ThemeChoice, load_toml,
     save_toml,
 };
-use pythia_db::{DbEvent, DbRequest, MetaQuery, MetaResult};
+use pythia_db::{DbEvent, DbRequest, Dialect, Feature, MetaQuery, MetaResult};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use crate::browser::Browser;
 use crate::commands::{Command, Keymap};
-use crate::connections::{Connection, Connections, Notify, SessionKey};
+use crate::connections::{Connection, Connections, Notify, Passwords, SessionKey};
 use crate::dialogs::{
     Answer, CommandPalette, Confirm, ConfirmAction, ConnectDialog, FinderAction, HistoryDialog,
     ObjectFinder, confirm_ui, opens_as_program,
@@ -82,6 +83,8 @@ pub struct PythiaApp {
     last_profile: Option<ConnectionProfile>,
     /// Connection the connect dialog is currently opening.
     connecting: Option<String>,
+    /// SSH host keys trusted in Pythia.
+    known_hosts: PathBuf,
 
     history: History,
     user_reports: crate::reports::UserReports,
@@ -155,6 +158,10 @@ impl PythiaApp {
             .unwrap_or_default();
         let workspace: Option<Workspace> =
             cc.storage.and_then(|s| eframe::get_value(s, WORKSPACE_KEY));
+        let known_hosts = paths.as_ref().map_or_else(
+            || std::env::temp_dir().join("pythia-known_hosts"),
+            Paths::known_hosts_file,
+        );
 
         let mut app = Self {
             paths,
@@ -173,6 +180,7 @@ impl PythiaApp {
             routes: HashMap::new(),
             last_profile: None,
             connecting: None,
+            known_hosts,
             history,
             user_reports,
             save_report: None,
@@ -409,6 +417,20 @@ impl PythiaApp {
             .or_else(|| self.conns.open.keys().next().cloned())
     }
 
+    /// The current connection's database (Oracle without a connection):
+    /// what menus, toolbar and palette offer.
+    fn dialect(&self) -> Dialect {
+        self.dialect_of(self.current_connection().as_deref())
+    }
+
+    /// The database of a connection by name.
+    fn dialect_of(&self, connection: Option<&str>) -> Dialect {
+        connection
+            .and_then(|c| self.conns.get(c))
+            .map(Connection::dialect)
+            .unwrap_or_default()
+    }
+
     fn doc_context(&self, id: DocId) -> DocContext<'_> {
         let connected = self
             .docs
@@ -428,6 +450,7 @@ impl PythiaApp {
             debug: Some(&self.debug),
             marks: None,
             privilege: None,
+            dialect: self.dialect_of(self.docs.get(&id).and_then(|d| d.connection.as_deref())),
         }
     }
 
@@ -455,6 +478,27 @@ impl PythiaApp {
     }
 
     fn open(&mut self, request: OpenRequest) {
+        // Without program windows and editors, objects open in an object view.
+        let request = match request {
+            OpenRequest::Program { connection, object }
+            | OpenRequest::ProgramAt {
+                connection, object, ..
+            }
+            | OpenRequest::ProgramMember {
+                connection, object, ..
+            } if !self.dialect_of(Some(&connection)).supports(Feature::PlSql) => {
+                OpenRequest::Object { connection, object }
+            }
+            OpenRequest::EditTable {
+                connection, object, ..
+            } if !self
+                .dialect_of(Some(&connection))
+                .supports(Feature::ObjectEditors) =>
+            {
+                OpenRequest::Object { connection, object }
+            }
+            request => request,
+        };
         if let OpenRequest::Program { connection, object }
         | OpenRequest::ProgramAt {
             connection, object, ..
@@ -540,9 +584,10 @@ impl PythiaApp {
             }
             OpenRequest::Object { connection, object } => {
                 if !self.focus_existing(&connection, &object, false) {
+                    let dialect = self.dialect_of(Some(&connection));
                     self.add_doc(
                         Some(connection),
-                        DocKind::Object(ObjectView::new(object, &self.notify.0)),
+                        DocKind::Object(ObjectView::new(object, dialect, &self.notify.0)),
                     );
                 }
             }
@@ -655,7 +700,8 @@ impl PythiaApp {
                     .get(&connection)
                     .map(|c| c.current_schema())
                     .unwrap_or_default();
-                let effects = self.browser.attach(connection.clone(), schema);
+                let dialect = self.dialect_of(Some(&connection));
+                let effects = self.browser.attach(connection.clone(), schema, dialect);
                 self.apply_browser(effects);
             }
         }
@@ -1047,7 +1093,11 @@ impl PythiaApp {
     /// Counts the connection's invalid objects in the background (on the main
     /// session: a cheap query), for the status bar.
     fn refresh_invalid(&mut self, connection: &str) {
-        let Some(conn) = self.conns.get(connection).filter(|c| c.is_connected()) else {
+        let Some(conn) = self
+            .conns
+            .get(connection)
+            .filter(|c| c.is_connected() && c.dialect().supports(Feature::InvalidObjects))
+        else {
             return;
         };
         if self.invalid_inflight.values().any(|c| c == connection) {
@@ -1222,6 +1272,8 @@ impl PythiaApp {
             .as_deref()
             .and_then(|c| self.conns.get(c))
             .filter(|c| c.is_connected());
+        // Without dictionary lookups the model answers from the request alone.
+        let lookups = conn.is_some_and(|c| c.dialect().supports(Feature::AiLookups));
         let mut parts = Vec::new();
         if let Some(server) = conn.and_then(|c| c.server()) {
             parts.push(crate::ai::context::connection_part(server));
@@ -1230,7 +1282,7 @@ impl PythiaApp {
         let entry = self
             .assistant
             .add(request.task, parts, origin, source, &backend);
-        match connection.filter(|_| conn.is_some()) {
+        match connection.filter(|_| lookups) {
             Some(name) if !request.lookup.is_empty() => {
                 let id = request_id();
                 self.assistant.look_up(entry, id);
@@ -1640,6 +1692,10 @@ impl PythiaApp {
 
     /// Fetches dictionary data for code assistance in the background.
     fn fetch_catalog(&mut self, connection: &str, requests: Vec<pythia_lsp_core::CatalogRequest>) {
+        let dialect = self.dialect_of(Some(connection));
+        if !dialect.supports(Feature::Completion) {
+            return;
+        }
         for request in requests {
             if !self
                 .catalog_requested
@@ -1649,13 +1705,8 @@ impl PythiaApp {
             }
             let id = request_id();
             self.catalog_inflight.insert(id, connection.to_owned());
-            self.conns.send_main(
-                connection,
-                DbRequest::Task {
-                    id,
-                    task: crate::catalog::task(request),
-                },
-            );
+            self.conns
+                .send_main(connection, crate::catalog::request(id, request, dialect));
         }
     }
 
@@ -1756,11 +1807,12 @@ impl PythiaApp {
 
     fn deliver(&mut self, id: DocId, event: DbEvent) {
         let cx = self.doc_context(id);
-        let (settings, connected, fetch_size, connection) = (
+        let (settings, connected, fetch_size, connection, dialect) = (
             cx.settings.clone(),
             cx.connected,
             cx.fetch_size,
             cx.connection.clone(),
+            cx.dialect,
         );
         let Some(doc) = self.docs.get_mut(&id) else {
             return;
@@ -1778,6 +1830,7 @@ impl PythiaApp {
             debug: Some(&self.debug),
             marks: None,
             privilege: None,
+            dialect,
         };
         let effects = doc.on_event(event, &cx);
         self.apply(Some(id), effects);
@@ -1826,6 +1879,16 @@ impl PythiaApp {
     }
 
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
+        // Shortcuts reach commands the menus don't offer.
+        let dialect = self.dialect();
+        if !command.available(dialect) {
+            self.log(format!(
+                "{} isn't available for {} connections",
+                command.short_label(),
+                dialect.name()
+            ));
+            return;
+        }
         match command {
             Command::NewTable
             | Command::NewView
@@ -2285,11 +2348,12 @@ impl PythiaApp {
 
     fn execute(&mut self, id: DocId, current_only: bool) {
         let cx = self.doc_context(id);
-        let (settings, connected, fetch_size, connection) = (
+        let (settings, connected, fetch_size, connection, dialect) = (
             cx.settings.clone(),
             cx.connected,
             cx.fetch_size,
             cx.connection.clone(),
+            cx.dialect,
         );
         if !connected {
             if self.docs.get(&id).is_some_and(|d| d.connection.is_none())
@@ -2352,6 +2416,7 @@ impl PythiaApp {
             debug: Some(&self.debug),
             marks: None,
             privilege: None,
+            dialect,
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
@@ -2509,7 +2574,7 @@ impl PythiaApp {
         }
     }
 
-    fn connect(&mut self, profile: ConnectionProfile, password: String, save_profile: bool) {
+    fn connect(&mut self, profile: ConnectionProfile, passwords: Passwords, save_profile: bool) {
         let name = profile.display_name();
         if self.conns.get(&name).is_some() {
             self.disconnect(&name);
@@ -2521,13 +2586,22 @@ impl PythiaApp {
             }
         }
         if profile.save_password {
-            secrets::store(&name, &password);
+            secrets::store(&name, &passwords.database);
+            secrets::store_ssh(&name, &passwords.ssh);
         } else {
             secrets::forget(&name);
+            secrets::forget_ssh(&name);
         }
-        self.log(format!("Connecting to {name}…"));
+        match &profile.ssh {
+            ssh if ssh.enabled => self.log(format!("Connecting to {name} through {}…", ssh.host)),
+            _ => self.log(format!("Connecting to {name}…")),
+        }
         self.last_profile = Some(profile.clone());
-        self.connecting = Some(self.conns.connect(profile, password, &self.notify));
+        self.connecting =
+            Some(
+                self.conns
+                    .connect(profile, passwords, &self.known_hosts, &self.notify),
+            );
     }
 
     fn disconnect(&mut self, name: &str) {
@@ -2626,13 +2700,19 @@ impl PythiaApp {
         match event {
             DbEvent::Connected(server) => {
                 let line = format!(
-                    "Connected to {name} (Oracle {}, schema {})",
-                    server.version, server.current_schema
+                    "Connected to {name} ({} {}, schema {})",
+                    server.dialect.name(),
+                    server.version,
+                    server.current_schema
                 );
                 let schema = server.current_schema.clone();
+                let names = match server.dialect.kind() {
+                    pythia_db::DbKind::Oracle => pythia_lsp_core::NameStyle::Upper,
+                    pythia_db::DbKind::MySql => pythia_lsp_core::NameStyle::AsStored,
+                };
                 self.catalogs.insert(
                     name.to_owned(),
-                    pythia_lsp_core::CatalogCache::new(schema.clone()),
+                    pythia_lsp_core::CatalogCache::new(schema.clone()).with_names(names),
                 );
                 self.catalog_requested.retain(|(c, _)| c != name);
                 if let Some(conn) = self.conns.get_mut(name) {
@@ -2643,7 +2723,8 @@ impl PythiaApp {
                 if self.connecting.as_deref() == Some(name) {
                     self.connecting = None;
                     self.connect_dialog.connected();
-                    let effects = self.browser.attach(name.to_owned(), schema);
+                    let dialect = self.dialect_of(Some(name));
+                    let effects = self.browser.attach(name.to_owned(), schema, dialect);
                     self.apply_browser(effects);
                     // Bind unbound windows to the first connection.
                     for doc in self.docs.values_mut().filter(|d| d.connection.is_none()) {
@@ -2669,7 +2750,10 @@ impl PythiaApp {
                 self.conns.close(name);
                 if self.connecting.as_deref() == Some(name) {
                     self.connecting = None;
-                    if e.is_missing_client() {
+                    if let Some(key) = &e.host_key {
+                        self.connect_dialog
+                            .failed_host_key(e.to_string(), (**key).clone());
+                    } else if e.is_missing_client() {
                         self.connect_dialog.failed_missing_client(e.to_string());
                     } else {
                         self.connect_dialog.failed(e.to_string());
@@ -2780,6 +2864,7 @@ impl PythiaApp {
         let mut delete = None;
         let ctx = ui.ctx().clone();
         let autocommit = self.settings.autocommit;
+        let dialect = self.dialect();
         let mut item = |ui: &mut Ui, command: Command| {
             let button = egui::Button::new(command.short_label())
                 .selected(command == Command::ToggleAutocommit && autocommit)
@@ -2788,166 +2873,233 @@ impl PythiaApp {
                 commands.push(command);
             }
         };
+        // Commands in groups between separators; what the connection's
+        // database can't do is left out.
+        let mut groups = |ui: &mut Ui, groups: &[&[Command]]| {
+            let mut first = true;
+            for group in groups {
+                let shown: Vec<Command> = group
+                    .iter()
+                    .copied()
+                    .filter(|c| c.available(dialect))
+                    .collect();
+                if shown.is_empty() {
+                    continue;
+                }
+                if !first {
+                    ui.separator();
+                }
+                first = false;
+                for command in shown {
+                    item(ui, command);
+                }
+            }
+        };
         egui::MenuBar::new().ui(ui, |ui| {
             bar_menu(ui, "File", |ui| {
-                item(ui, Command::NewSqlWindow);
-                ui.menu_button("New Object", |ui| {
-                    for (command, t) in Command::NEW_OBJECTS {
+                groups(ui, &[&[Command::NewSqlWindow]]);
+                if Command::NEW_OBJECTS
+                    .iter()
+                    .any(|(c, _)| c.available(dialect))
+                {
+                    ui.menu_button("New Object", |ui| {
                         // Tables and views, code and jobs, then links and
                         // accounts.
-                        if matches!(
-                            t,
-                            pythia_db::ObjectType::Trigger | pythia_db::ObjectType::DatabaseLink
-                        ) {
-                            ui.separator();
-                        }
-                        item(ui, *command);
-                    }
-                });
-                item(ui, Command::OpenFile);
-                item(ui, Command::SaveFile);
-                item(ui, Command::SaveFileAs);
-                ui.separator();
-                item(ui, Command::CloseTab);
-                item(ui, Command::CloseOtherTabs);
-                item(ui, Command::ReopenClosed);
-                ui.separator();
-                item(ui, Command::Settings);
-                ui.separator();
-                item(ui, Command::Quit);
-            });
-            bar_menu(ui, "Edit", |ui| {
-                item(ui, Command::Format);
-                item(ui, Command::RenameSymbol);
-                item(ui, Command::History);
-                ui.separator();
-                item(ui, Command::FoldAll);
-                item(ui, Command::UnfoldAll);
-            });
-            bar_menu(ui, "Session", |ui| {
-                item(ui, Command::Connect);
-                item(ui, Command::Disconnect);
-                ui.separator();
-                item(ui, Command::ExecuteAll);
-                item(ui, Command::ExecuteCurrent);
-                item(ui, Command::ExplainPlan);
-                item(ui, Command::ExecuteWithStatistics);
-                item(ui, Command::ExecuteToFile);
-                item(ui, Command::Profile);
-                item(ui, Command::Cancel);
-                ui.separator();
-                item(ui, Command::Commit);
-                item(ui, Command::Rollback);
-                item(ui, Command::ToggleAutocommit);
-            });
-            bar_menu(ui, "Tools", |ui| {
-                item(ui, Command::FindObject);
-                item(ui, Command::FindInSource);
-                item(ui, Command::SearchData);
-                ui.separator();
-                item(ui, Command::SchedulerJobs);
-                item(ui, Command::InvalidObjects);
-                ui.separator();
-                item(ui, Command::ImportData);
-                item(ui, Command::ExportTables);
-                ui.separator();
-                item(ui, Command::CompareSchemas);
-                item(ui, Command::CompareData);
-            });
-            bar_menu(ui, "AI", |ui| {
-                item(ui, Command::AiAsk);
-                item(ui, Command::AiGenerateSql);
-                ui.separator();
-                item(ui, Command::AiExplain);
-                item(ui, Command::AiFix);
-                item(ui, Command::AiRewrite);
-                item(ui, Command::AiAnalyzePlan);
-                item(ui, Command::AiFormat);
-                ui.separator();
-                item(ui, Command::ShowAssistant);
-            });
-            bar_menu(ui, "Debug", |ui| {
-                item(ui, Command::DebugStart);
-                item(ui, Command::ToggleBreakpoint);
-                ui.separator();
-                item(ui, Command::DebugContinue);
-                item(ui, Command::DebugStepOver);
-                item(ui, Command::DebugStepInto);
-                item(ui, Command::DebugStepOut);
-                item(ui, Command::DebugStop);
-                ui.separator();
-                item(ui, Command::ShowDebugger);
-            });
-            bar_menu(ui, "Reports", |ui| {
-                for category in crate::reports::categories() {
-                    ui.menu_button(category, |ui| {
-                        for report in crate::reports::REPORTS
-                            .iter()
-                            .filter(|r| r.category == category)
-                        {
-                            if ui.button(report.name).clicked() {
-                                *open_report = Some((report.name.into(), report.sql.into()));
-                                ui.close();
-                            }
-                        }
+                        let objects: Vec<Command> =
+                            Command::NEW_OBJECTS.iter().map(|(c, _)| *c).collect();
+                        let at = |t| {
+                            Command::NEW_OBJECTS
+                                .iter()
+                                .position(|(_, o)| *o == t)
+                                .unwrap_or(objects.len())
+                        };
+                        let code = at(pythia_db::ObjectType::Trigger);
+                        let links = at(pythia_db::ObjectType::DatabaseLink);
+                        groups(
+                            ui,
+                            &[&objects[..code], &objects[code..links], &objects[links..]],
+                        );
                     });
                 }
-                if !user_reports.reports.is_empty() {
-                    ui.separator();
-                    for category in user_reports.categories() {
-                        let label = if category.is_empty() {
-                            "My reports"
-                        } else {
-                            category
-                        };
-                        ui.menu_button(label, |ui| {
-                            for (i, report) in user_reports.reports.iter().enumerate() {
-                                if report.category != category {
-                                    continue;
-                                }
-                                let r = ui.button(&report.name);
-                                if r.clicked() {
-                                    *open_report = Some((report.name.clone(), report.sql.clone()));
+                groups(
+                    ui,
+                    &[
+                        &[Command::OpenFile, Command::SaveFile, Command::SaveFileAs],
+                        &[
+                            Command::CloseTab,
+                            Command::CloseOtherTabs,
+                            Command::ReopenClosed,
+                        ],
+                        &[Command::Settings],
+                        &[Command::Quit],
+                    ],
+                )
+            });
+            bar_menu(ui, "Edit", |ui| {
+                groups(
+                    ui,
+                    &[
+                        &[Command::Format, Command::RenameSymbol, Command::History],
+                        &[Command::FoldAll, Command::UnfoldAll],
+                    ],
+                )
+            });
+            bar_menu(ui, "Session", |ui| {
+                groups(
+                    ui,
+                    &[
+                        &[Command::Connect, Command::Disconnect],
+                        &[
+                            Command::ExecuteAll,
+                            Command::ExecuteCurrent,
+                            Command::ExplainPlan,
+                            Command::ExecuteWithStatistics,
+                            Command::ExecuteToFile,
+                            Command::Profile,
+                            Command::Cancel,
+                        ],
+                        &[
+                            Command::Commit,
+                            Command::Rollback,
+                            Command::ToggleAutocommit,
+                        ],
+                    ],
+                )
+            });
+            bar_menu(ui, "Tools", |ui| {
+                groups(
+                    ui,
+                    &[
+                        &[
+                            Command::FindObject,
+                            Command::FindInSource,
+                            Command::SearchData,
+                        ],
+                        &[Command::SchedulerJobs, Command::InvalidObjects],
+                        &[Command::ImportData, Command::ExportTables],
+                        &[Command::CompareSchemas, Command::CompareData],
+                    ],
+                )
+            });
+            bar_menu(ui, "AI", |ui| {
+                groups(
+                    ui,
+                    &[
+                        &[Command::AiAsk, Command::AiGenerateSql],
+                        &[
+                            Command::AiExplain,
+                            Command::AiFix,
+                            Command::AiRewrite,
+                            Command::AiAnalyzePlan,
+                            Command::AiFormat,
+                        ],
+                        &[Command::ShowAssistant],
+                    ],
+                )
+            });
+            if dialect.supports(Feature::Debugger) {
+                bar_menu(ui, "Debug", |ui| {
+                    groups(
+                        ui,
+                        &[
+                            &[Command::DebugStart, Command::ToggleBreakpoint],
+                            &[
+                                Command::DebugContinue,
+                                Command::DebugStepOver,
+                                Command::DebugStepInto,
+                                Command::DebugStepOut,
+                                Command::DebugStop,
+                            ],
+                            &[Command::ShowDebugger],
+                        ],
+                    )
+                });
+            }
+            let reports = dialect.supports(Feature::Reports);
+            if reports {
+                bar_menu(ui, "Reports", |ui| {
+                    for category in crate::reports::categories() {
+                        ui.menu_button(category, |ui| {
+                            for report in crate::reports::REPORTS
+                                .iter()
+                                .filter(|r| r.category == category)
+                            {
+                                if ui.button(report.name).clicked() {
+                                    *open_report = Some((report.name.into(), report.sql.into()));
                                     ui.close();
                                 }
-                                r.context_menu(|ui| {
-                                    if ui.button("Delete report").clicked() {
-                                        delete = Some(i);
-                                        ui.close();
-                                    }
-                                });
                             }
                         });
                     }
-                }
-                ui.separator();
-                item(ui, Command::SaveAsReport);
-            });
-            bar_menu(ui, "Monitor", |ui| {
-                item(ui, Command::MonitorDashboard);
-                item(ui, Command::MonitorSessions);
-                item(ui, Command::MonitorBlocking);
-                ui.separator();
-                item(ui, Command::MonitorAwr);
-                item(ui, Command::MonitorTrace);
-            });
+                    if !user_reports.reports.is_empty() {
+                        ui.separator();
+                        for category in user_reports.categories() {
+                            let label = if category.is_empty() {
+                                "My reports"
+                            } else {
+                                category
+                            };
+                            ui.menu_button(label, |ui| {
+                                for (i, report) in user_reports.reports.iter().enumerate() {
+                                    if report.category != category {
+                                        continue;
+                                    }
+                                    let r = ui.button(&report.name);
+                                    if r.clicked() {
+                                        *open_report =
+                                            Some((report.name.clone(), report.sql.clone()));
+                                        ui.close();
+                                    }
+                                    r.context_menu(|ui| {
+                                        if ui.button("Delete report").clicked() {
+                                            delete = Some(i);
+                                            ui.close();
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    }
+                    ui.separator();
+                    groups(ui, &[&[Command::SaveAsReport]]);
+                });
+            }
+            if dialect.supports(Feature::Dashboard) || dialect.supports(Feature::Monitor) {
+                bar_menu(ui, "Monitor", |ui| {
+                    groups(
+                        ui,
+                        &[
+                            &[
+                                Command::MonitorDashboard,
+                                Command::MonitorSessions,
+                                Command::MonitorBlocking,
+                            ],
+                            &[Command::MonitorAwr, Command::MonitorTrace],
+                        ],
+                    )
+                });
+            }
             bar_menu(ui, "View", |ui| {
-                item(ui, Command::ShowPalette);
-                item(ui, Command::ShowBrowser);
-                item(ui, Command::ShowLog);
-                item(ui, Command::ShowAssistant);
-                ui.separator();
-                item(ui, Command::ThemeSystem);
-                item(ui, Command::ThemeDark);
-                item(ui, Command::ThemeLight);
-                ui.separator();
-                item(ui, Command::ZoomIn);
-                item(ui, Command::ZoomOut);
-                item(ui, Command::ZoomReset);
-                ui.separator();
-                item(ui, Command::ResetLayout);
+                groups(
+                    ui,
+                    &[
+                        &[
+                            Command::ShowPalette,
+                            Command::ShowBrowser,
+                            Command::ShowLog,
+                            Command::ShowAssistant,
+                        ],
+                        &[
+                            Command::ThemeSystem,
+                            Command::ThemeDark,
+                            Command::ThemeLight,
+                        ],
+                        &[Command::ZoomIn, Command::ZoomOut, Command::ZoomReset],
+                        &[Command::ResetLayout],
+                    ],
+                )
             });
-            bar_menu(ui, "Help", |ui| item(ui, Command::About));
+            bar_menu(ui, "Help", |ui| groups(ui, &[&[Command::About]]));
         });
         if let Some(i) = delete {
             let report = self.user_reports.reports.remove(i);
@@ -2983,10 +3135,15 @@ impl PythiaApp {
             }
         };
         let mut rebind = None;
+        let dialect = self.dialect();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            // Commands the connection's database can't do get no button.
             let button =
                 |ui: &mut Ui, icon: Icon, text: &str, command: Command, state: Result<(), &str>| {
+                    if !command.available(dialect) {
+                        return None;
+                    }
                     tool_button(ui, icon, text, &tip(command), state, Emphasis::Normal)
                         .then_some(command)
                 };
@@ -3477,20 +3634,38 @@ impl PythiaApp {
     fn popups(&mut self, ctx: &egui::Context, commands: &mut Vec<Command>) {
         match self.connect_dialog.ui(ctx, &self.saved) {
             Some(crate::dialogs::ConnectAction::Connect(request)) => {
-                self.connect(request.profile, request.password, request.save_profile);
+                self.connect(request.profile, request.passwords, request.save_profile);
             }
+            Some(crate::dialogs::ConnectAction::Trust { key, then }) => match key.trust() {
+                Ok(()) => {
+                    self.log(format!(
+                        "Trusted the SSH host key of {} ({})",
+                        key.host, key.fingerprint
+                    ));
+                    self.connect(then.profile, then.passwords, then.save_profile);
+                }
+                Err(e) => self.connect_dialog.failed(e.to_string()),
+            },
             Some(crate::dialogs::ConnectAction::Save {
                 profile,
                 previous,
-                password,
+                passwords,
             }) => {
-                if let Some(previous) = previous.filter(|p| *p != profile.display_name()) {
+                let name = profile.display_name();
+                if let Some(previous) = previous.filter(|p| *p != name) {
                     self.saved.profiles.retain(|p| p.display_name() != previous);
                     secrets::forget(&previous);
+                    secrets::forget_ssh(&previous);
                 }
-                match &password {
-                    Some(pw) => secrets::store(&profile.display_name(), pw),
-                    None => secrets::forget(&profile.display_name()),
+                match &passwords {
+                    Some(passwords) => {
+                        secrets::store(&name, &passwords.database);
+                        secrets::store_ssh(&name, &passwords.ssh);
+                    }
+                    None => {
+                        secrets::forget(&name);
+                        secrets::forget_ssh(&name);
+                    }
                 }
                 self.saved.upsert(profile);
                 self.save_connections();
@@ -3498,6 +3673,7 @@ impl PythiaApp {
             Some(crate::dialogs::ConnectAction::Delete(name)) => {
                 self.saved.profiles.retain(|p| p.display_name() != name);
                 secrets::forget(&name);
+                secrets::forget_ssh(&name);
                 self.save_connections();
             }
             None => {}
@@ -3518,7 +3694,7 @@ impl PythiaApp {
             crate::settings_dialog::SettingsResult::Learn(from) => self.learn_format(from),
             crate::settings_dialog::SettingsResult::None => {}
         }
-        if let Some(command) = self.palette.ui(ctx, &self.keymap) {
+        if let Some(command) = self.palette.ui(ctx, &self.keymap, self.dialect()) {
             commands.push(command);
         }
         if let Some((part, range)) = self.symbol_picker.ui(ctx) {
@@ -3731,6 +3907,12 @@ impl eframe::App for PythiaApp {
             .iter()
             .map(|(n, c)| (n.clone(), c.profile.privilege))
             .collect();
+        let dialects: HashMap<String, Dialect> = self
+            .conns
+            .open
+            .iter()
+            .map(|(n, c)| (n.clone(), c.dialect()))
+            .collect();
         self.assistant.poll();
         self.poll_ai_format();
         let focused_title = self
@@ -3747,6 +3929,7 @@ impl eframe::App for PythiaApp {
             connections: &connections,
             colors: &colors,
             privileges: &privileges,
+            dialects: &dialects,
             connected: &connected,
             catalogs: &self.catalogs,
             catalog_revision: self.catalog_revision,
@@ -3832,7 +4015,28 @@ impl eframe::App for PythiaApp {
 #[cfg(test)]
 impl PythiaApp {
     pub fn test_connect(&mut self, profile: ConnectionProfile, password: String) {
-        self.connect(profile, password, false);
+        let passwords = Passwords {
+            database: password,
+            ssh: String::new(),
+        };
+        self.connect(profile, passwords, false);
+    }
+
+    /// Connects as the connect dialog does, which can ask to trust an SSH
+    /// host key first (kept in `known_hosts`).
+    pub fn test_connect_dialog(
+        &mut self,
+        profile: ConnectionProfile,
+        passwords: Passwords,
+        known_hosts: PathBuf,
+    ) {
+        self.known_hosts = known_hosts;
+        self.connect_dialog.show(None);
+        if let Some(crate::dialogs::ConnectAction::Connect(request)) =
+            self.connect_dialog.test_submit(profile, passwords)
+        {
+            self.connect(request.profile, request.passwords, false);
+        }
     }
 
     pub fn test_connected(&self) -> bool {
@@ -3979,6 +4183,7 @@ impl PythiaApp {
             debug: None,
             marks: None,
             privilege: None,
+            dialect: Dialect::ORACLE,
         };
         let Some(DocKind::DataSearch(s)) = self.docs.get_mut(&id).map(|d| &mut d.kind) else {
             panic!("not a data search");
@@ -4242,6 +4447,10 @@ impl PythiaApp {
         self.connect_dialog.open
     }
 
+    pub fn test_connect_dialog_error(&self) -> Option<&str> {
+        self.connect_dialog.test_error()
+    }
+
     pub fn test_settings_ai(&mut self) {
         self.settings_dialog.open = true;
         self.settings_dialog.show_ai();
@@ -4258,6 +4467,7 @@ struct Viewer<'a> {
     connections: &'a [String],
     colors: &'a HashMap<String, Color32>,
     privileges: &'a HashMap<String, pythia_config::Privilege>,
+    dialects: &'a HashMap<String, Dialect>,
     connected: &'a HashMap<String, bool>,
     catalogs: &'a HashMap<String, pythia_lsp_core::CatalogCache>,
     catalog_revision: u64,
@@ -4319,7 +4529,12 @@ impl TabViewer for Viewer<'_> {
                     .connection
                     .clone()
                     .filter(|c| self.connected.get(c).copied().unwrap_or(false));
-                let actions = self.project.ui(ui, connection.as_deref());
+                let dialect = connection
+                    .as_ref()
+                    .and_then(|c| self.dialects.get(c))
+                    .copied()
+                    .unwrap_or_default();
+                let actions = self.project.ui(ui, connection.as_deref(), dialect);
                 self.project_actions.extend(actions);
             }
             Tab::Debugger => {
@@ -4404,6 +4619,12 @@ impl TabViewer for Viewer<'_> {
                         .as_ref()
                         .and_then(|c| self.privileges.get(c))
                         .copied(),
+                    dialect: doc
+                        .connection
+                        .as_ref()
+                        .and_then(|c| self.dialects.get(c))
+                        .copied()
+                        .unwrap_or_default(),
                 };
                 let effects = doc.ui(ui, &cx);
                 self.effects.push((*id, effects));
@@ -4663,7 +4884,8 @@ fn request_key(request: &DbRequest) -> Option<u64> {
         DbRequest::Execute { id, .. }
         | DbRequest::FetchMore { id, .. }
         | DbRequest::Meta { id, .. }
-        | DbRequest::Task { id, .. } => Some(*id),
+        | DbRequest::Task { id, .. }
+        | DbRequest::Run { id, .. } => Some(*id),
         _ => None,
     }
 }

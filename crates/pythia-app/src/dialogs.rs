@@ -1,14 +1,18 @@
 //! Modal dialogs and popups: connect, command palette, object finder,
 //! statement history, confirmations.
 
+use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use egui::{Key, RichText, Sense, Ui};
-use pythia_config::{ConnectionProfile, Connections as SavedConnections, Privilege};
-use pythia_db::{DbObject, ObjectType};
+use pythia_config::{ConnectionProfile, Connections as SavedConnections, DbKind, Privilege};
+use pythia_db::ssh::HostKey;
+use pythia_db::{DbObject, Dialect, Feature, ObjectType};
 use pythia_ui::icons::Icon;
 
 use crate::commands::{Command, Keymap, fuzzy_score};
+use crate::connections::Passwords;
 use crate::documents::{DocId, ObjectRef};
 use crate::history::History;
 use crate::secrets;
@@ -23,6 +27,12 @@ pub struct ConnectDialog {
     missing_client: bool,
     form: ConnectionProfile,
     password: String,
+    /// The SSH password, or the key file's passphrase.
+    ssh_password: String,
+    /// The SSH server's host key isn't known: offered for trust.
+    host_key: Option<HostKey>,
+    /// The key file being chosen in a file dialog.
+    picking_key: Option<Receiver<Option<PathBuf>>>,
     /// Display name of the saved profile being edited, if any.
     editing: Option<String>,
     search: String,
@@ -34,17 +44,22 @@ pub struct ConnectDialog {
 
 pub struct ConnectRequest {
     pub profile: ConnectionProfile,
-    pub password: String,
+    pub passwords: Passwords,
     pub save_profile: bool,
 }
 
 pub enum ConnectAction {
     Connect(ConnectRequest),
+    /// Trust the SSH server's host key, then connect.
+    Trust {
+        key: Box<HostKey>,
+        then: ConnectRequest,
+    },
     /// Save the profile, replacing the one named `previous` (if renamed).
     Save {
         profile: ConnectionProfile,
         previous: Option<String>,
-        password: Option<String>,
+        passwords: Option<Passwords>,
     },
     Delete(String),
 }
@@ -67,6 +82,7 @@ impl ConnectDialog {
         self.tns_aliases = pythia_config::tns::aliases();
         self.error = None;
         self.missing_client = false;
+        self.host_key = None;
         self.focus_requested = false;
         self.confirm_delete = false;
         if let Some(last) = last {
@@ -75,10 +91,14 @@ impl ConnectDialog {
     }
 
     fn pick(&mut self, profile: ConnectionProfile) {
-        self.password = if profile.save_password {
-            secrets::load(&profile.display_name()).unwrap_or_default()
+        (self.password, self.ssh_password) = if profile.save_password {
+            let name = profile.display_name();
+            (
+                secrets::load(&name).unwrap_or_default(),
+                secrets::load_ssh(&name).unwrap_or_default(),
+            )
         } else {
-            String::new()
+            Default::default()
         };
         self.editing = Some(profile.display_name());
         self.form = profile;
@@ -89,6 +109,7 @@ impl ConnectDialog {
     fn new_profile(&mut self) {
         self.form = ConnectionProfile::default();
         self.password.clear();
+        self.ssh_password.clear();
         self.editing = None;
         self.confirm_delete = false;
         self.focus_requested = false;
@@ -195,7 +216,8 @@ impl ConnectDialog {
                             }
                             let r = ui.add(egui::Button::selectable(selected, text));
                             r.on_hover_text(format!(
-                                "{}@{}{}",
+                                "{} {}@{}{}",
+                                p.kind.label(),
                                 p.username,
                                 p.connect_string,
                                 if p.production { "\nProduction" } else { "" }
@@ -228,14 +250,29 @@ impl ConnectDialog {
         });
         ui.add_space(6.0);
         let mut submit = false;
+        let oracle = self.form.kind == DbKind::Oracle;
         egui::Grid::new("connect-form")
             .num_columns(2)
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
+                ui.label("Type");
+                egui::ComboBox::from_id_salt("db-kind")
+                    .selected_text(self.form.kind.label())
+                    .show_ui(ui, |ui| {
+                        for kind in DbKind::ALL {
+                            ui.selectable_value(&mut self.form.kind, kind, kind.label());
+                        }
+                    });
+                ui.end_row();
+
                 ui.label("Username");
                 let user = ui.add(
                     egui::TextEdit::singleline(&mut self.form.username)
-                        .hint_text("user, or proxy[target] for proxy authentication")
+                        .hint_text(if oracle {
+                            "user, or proxy[target] for proxy authentication"
+                        } else {
+                            "user"
+                        })
                         .desired_width(280.0),
                 );
                 if !self.focus_requested {
@@ -265,18 +302,21 @@ impl ConnectDialog {
 
                 ui.label("Database");
                 ui.horizontal(|ui| {
-                    let width = if self.tns_aliases.is_empty() {
-                        280.0
-                    } else {
-                        250.0
-                    };
+                    let aliases = oracle && !self.tns_aliases.is_empty();
+                    let width = if aliases { 250.0 } else { 280.0 };
                     let db = ui.add(
                         egui::TextEdit::singleline(&mut self.form.connect_string)
-                            .hint_text("TNS alias or host:1521/service")
+                            .hint_text(if oracle {
+                                "TNS alias or host:1521/service"
+                            } else if self.form.ssh.enabled {
+                                "localhost:3306/database, as the SSH server sees it"
+                            } else {
+                                "host:3306/database, ?tls for TLS"
+                            })
                             .desired_width(width),
                     );
                     submit |= db.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if !self.tns_aliases.is_empty() {
+                    if aliases {
                         ui.menu_button("▾", |ui| {
                             ui.set_max_height(320.0);
                             let typed = self.form.connect_string.to_lowercase();
@@ -304,15 +344,17 @@ impl ConnectDialog {
                 });
                 ui.end_row();
 
-                ui.label("Connect as");
-                egui::ComboBox::from_id_salt("privilege")
-                    .selected_text(self.form.privilege.label())
-                    .show_ui(ui, |ui| {
-                        for p in Privilege::ALL {
-                            ui.selectable_value(&mut self.form.privilege, p, p.label());
-                        }
-                    });
-                ui.end_row();
+                if oracle {
+                    ui.label("Connect as");
+                    egui::ComboBox::from_id_salt("privilege")
+                        .selected_text(self.form.privilege.label())
+                        .show_ui(ui, |ui| {
+                            for p in Privilege::ALL {
+                                ui.selectable_value(&mut self.form.privilege, p, p.label());
+                            }
+                        });
+                    ui.end_row();
+                }
 
                 ui.label("Name");
                 ui.add(
@@ -366,6 +408,9 @@ impl ConnectDialog {
             ui.checkbox(&mut self.form.save_password, "Save password")
                 .on_hover_text("Stored in the operating system's keychain");
         });
+        if Dialect::from(self.form.kind).supports(Feature::SshTunnel) {
+            submit |= self.ssh_ui(ui);
+        }
         egui::CollapsingHeader::new("Advanced")
             .id_salt("connect-advanced")
             .show(ui, |ui| {
@@ -376,7 +421,11 @@ impl ConnectDialog {
                         ui.label("Default schema");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.form.default_schema)
-                                .hint_text("work in another schema after connecting")
+                                .hint_text(if oracle {
+                                    "work in another schema after connecting"
+                                } else {
+                                    "database to use after connecting"
+                                })
                                 .desired_width(280.0),
                         );
                         ui.end_row();
@@ -384,9 +433,11 @@ impl ConnectDialog {
                         ui.add(
                             egui::TextEdit::multiline(&mut self.form.login_script)
                                 .code_editor()
-                                .hint_text(
-                                    "alter session set nls_date_format = 'YYYY-MM-DD HH24:MI:SS';",
-                                )
+                                .hint_text(if oracle {
+                                    "alter session set nls_date_format = 'YYYY-MM-DD HH24:MI:SS';"
+                                } else {
+                                    "set session time_zone = '+00:00';"
+                                })
                                 .desired_rows(3)
                                 .desired_width(280.0),
                         );
@@ -399,7 +450,8 @@ impl ConnectDialog {
                 );
             });
 
-        if let Some(error) = &self.error {
+        if let Some(error) = self.error.clone() {
+            let error = error.as_str();
             ui.add_space(8.0);
             egui::Frame::new()
                 .fill(ui.visuals().error_fg_color.gamma_multiply(0.12))
@@ -411,12 +463,24 @@ impl ConnectDialog {
                     } else {
                         ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
                     }
+                    if let Some(key) = &self.host_key
+                        && !self.connecting
+                        && ui
+                            .button("Trust and connect")
+                            .on_hover_text("Remember this host key for the server")
+                            .clicked()
+                    {
+                        let key = Box::new(key.clone());
+                        if let Some(ConnectAction::Connect(then)) = self.connect_request() {
+                            *action = Some(ConnectAction::Trust { key, then });
+                        }
+                    }
                 });
         }
 
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            let valid = !self.form.connect_string.trim().is_empty();
+            let valid = self.valid();
             if self.connecting {
                 ui.spinner();
                 ui.label("Connecting…");
@@ -450,11 +514,11 @@ impl ConnectDialog {
                 }
                 if ui.add_enabled(valid, egui::Button::new("Save")).clicked() {
                     let profile = self.cleaned();
-                    let password = profile.save_password.then(|| self.password.clone());
+                    let passwords = profile.save_password.then(|| self.passwords());
                     *action = Some(ConnectAction::Save {
                         previous: self.editing.clone(),
                         profile: profile.clone(),
-                        password,
+                        passwords,
                     });
                     self.editing = Some(profile.display_name());
                 }
@@ -466,27 +530,149 @@ impl ConnectDialog {
         });
     }
 
+    /// The SSH tunnel: whether to use one and how to log in to the server.
+    /// Returns whether Enter was pressed in the password field.
+    fn ssh_ui(&mut self, ui: &mut Ui) -> bool {
+        let mut submit = false;
+        ui.checkbox(&mut self.form.ssh.enabled, "Connect through SSH")
+            .on_hover_text("Reach the database through an SSH server (port forwarding)");
+        if let Some(picked) = self.picking_key.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.picking_key = None;
+            if let Some(path) = picked {
+                self.form.ssh.key_file = path.display().to_string();
+            }
+        }
+        if !self.form.ssh.enabled {
+            return false;
+        }
+        let ssh = &mut self.form.ssh;
+        egui::Grid::new("connect-ssh-grid")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("SSH server");
+                ui.add(
+                    egui::TextEdit::singleline(&mut ssh.host)
+                        .hint_text("host, or host:port")
+                        .desired_width(280.0),
+                );
+                ui.end_row();
+
+                ui.label("SSH user");
+                ui.add(egui::TextEdit::singleline(&mut ssh.username).desired_width(280.0));
+                ui.end_row();
+
+                ui.label("SSH password");
+                let pw = ui.add(
+                    egui::TextEdit::singleline(&mut self.ssh_password)
+                        .password(true)
+                        .hint_text(if ssh.key_file.trim().is_empty() {
+                            "empty: the SSH agent's keys"
+                        } else {
+                            "the key's passphrase, if it has one"
+                        })
+                        .desired_width(280.0),
+                );
+                submit |= pw.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                ui.end_row();
+
+                ui.label("Key file");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut ssh.key_file)
+                            .hint_text("optional: OpenSSH or PuTTY key")
+                            .desired_width(250.0),
+                    );
+                    let choose = ui
+                        .add_enabled(self.picking_key.is_none(), egui::Button::new("…"))
+                        .on_hover_text("Choose a key file");
+                    if choose.clicked() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(rfd::FileDialog::new().pick_file());
+                        });
+                        self.picking_key = Some(rx);
+                    }
+                });
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new("The database address is resolved on the SSH server.")
+                .small()
+                .weak(),
+        );
+        submit
+    }
+
+    fn valid(&self) -> bool {
+        let ssh = &self.form.ssh;
+        !self.form.connect_string.trim().is_empty()
+            && (!ssh.enabled || !(ssh.host.trim().is_empty() || ssh.username.trim().is_empty()))
+    }
+
+    fn passwords(&self) -> Passwords {
+        Passwords {
+            database: self.password.clone(),
+            ssh: if self.form.ssh.enabled {
+                self.ssh_password.clone()
+            } else {
+                String::new()
+            },
+        }
+    }
+
     fn cleaned(&self) -> ConnectionProfile {
         let mut profile = self.form.clone();
         profile.username = profile.username.trim().to_owned();
         profile.connect_string = profile.connect_string.trim().to_owned();
         profile.name = profile.name.trim().to_owned();
         profile.folder = profile.folder.trim().trim_matches('/').to_owned();
+        if profile.kind != DbKind::Oracle {
+            // Hidden for other databases: don't keep one chosen before.
+            profile.privilege = Privilege::Normal;
+        }
+        let ssh = &mut profile.ssh;
+        ssh.host = ssh.host.trim().to_owned();
+        ssh.username = ssh.username.trim().to_owned();
+        ssh.key_file = ssh.key_file.trim().to_owned();
+        if !Dialect::from(profile.kind).supports(Feature::SshTunnel) {
+            // Hidden for this database: connect directly, as the dialog shows.
+            ssh.enabled = false;
+        }
         profile
     }
 
     fn connect_request(&mut self) -> Option<ConnectAction> {
-        if self.form.connect_string.trim().is_empty() {
+        if !self.valid() {
             return None;
         }
         self.error = None;
         self.missing_client = false;
+        self.host_key = None;
         self.connecting = true;
         Some(ConnectAction::Connect(ConnectRequest {
             profile: self.cleaned(),
-            password: self.password.clone(),
+            passwords: self.passwords(),
             save_profile: true,
         }))
+    }
+
+    /// Fills the form and presses Connect.
+    #[cfg(test)]
+    pub fn test_submit(
+        &mut self,
+        profile: ConnectionProfile,
+        passwords: Passwords,
+    ) -> Option<ConnectAction> {
+        self.form = profile;
+        self.password = passwords.database;
+        self.ssh_password = passwords.ssh;
+        self.connect_request()
+    }
+
+    #[cfg(test)]
+    pub fn test_error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     /// Called once the connection is established.
@@ -494,6 +680,7 @@ impl ConnectDialog {
         self.open = false;
         self.connecting = false;
         self.password.clear();
+        self.ssh_password.clear();
     }
 
     pub fn failed(&mut self, error: String) {
@@ -501,6 +688,13 @@ impl ConnectDialog {
         self.connecting = false;
         self.error = Some(error);
         self.missing_client = false;
+        self.host_key = None;
+    }
+
+    /// The SSH server's host key isn't known yet: offers to trust it.
+    pub fn failed_host_key(&mut self, error: String, key: HostKey) {
+        self.failed(error);
+        self.host_key = Some(key);
     }
 
     /// The Oracle Instant Client couldn't be loaded (DPI-1047): shows how to
@@ -635,13 +829,19 @@ impl CommandPalette {
         self.selected = 0;
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, keymap: &Keymap) -> Option<Command> {
+    /// Lists the commands available for a connection of `dialect`.
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        keymap: &Keymap,
+        dialect: pythia_db::Dialect,
+    ) -> Option<Command> {
         if !self.open {
             return None;
         }
         let mut matches: Vec<(i32, Command)> = Command::ALL
             .iter()
-            .filter(|c| **c != Command::ShowPalette)
+            .filter(|c| **c != Command::ShowPalette && c.available(dialect))
             .filter_map(|c| fuzzy_score(&self.query, c.label()).map(|s| (s, *c)))
             .collect();
         matches.sort_by_key(|(score, _)| std::cmp::Reverse(*score));

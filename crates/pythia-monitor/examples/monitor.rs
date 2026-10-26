@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use pythia_config::Privilege;
 use pythia_db::{ConnectParams, DbEvent, DbRequest, Session};
-use pythia_monitor::{Monitor, MonitorAction, Token};
+use pythia_monitor::{Monitor, MonitorAction, MonitorTask, Token};
 
 struct App {
     session: Session,
@@ -45,7 +45,10 @@ impl eframe::App for App {
                 let id = self.next_id;
                 self.next_id += 1;
                 self.tasks.insert(id, req.token);
-                self.session.send(DbRequest::Task { id, task: req.task });
+                self.session.send(match req.task {
+                    MonitorTask::Oracle(task) => DbRequest::Task { id, task },
+                    MonitorTask::Client(task) => DbRequest::Run { id, task },
+                });
             }
             for action in out.actions {
                 match action {
@@ -67,11 +70,13 @@ fn main() -> eframe::Result {
     let (cred, db) = spec.rsplit_once('@').expect("user/password@connect_string");
     let (user, pass) = cred.split_once('/').expect("user/password@connect_string");
     let params = ConnectParams {
+        kind: Default::default(),
         username: user.into(),
         password: pass.into(),
         connect_string: db.into(),
         privilege: Privilege::Normal,
         init_sql: Vec::new(),
+        ssh: None,
     };
     eframe::run_native(
         "Pythia monitor",

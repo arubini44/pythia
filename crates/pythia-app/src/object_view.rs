@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use egui::{RichText, Ui};
 use egui_extras::{Column as TableColumn, TableBuilder};
 use pythia_db::{
-    DbEvent, DbRequest, Detail, MetaQuery, MetaResult, ObjectType, TableColumn as Col,
+    DbEvent, DbRequest, Detail, Dialect, Feature, MetaQuery, MetaResult, ObjectType,
+    TableColumn as Col,
 };
 use pythia_ui::ResultGrid;
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,10 @@ pub struct ObjectView {
     pub object: ObjectRef,
     #[serde(skip)]
     state: State,
+    /// The connection's database, which decides the tabs; follows the
+    /// connection while the view is shown.
+    #[serde(skip)]
+    dialect: Dialect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,10 +69,11 @@ struct State {
 
 impl ObjectView {
     /// Opens on the tab last chosen for this type of object.
-    pub fn new(object: ObjectRef, ctx: &egui::Context) -> Self {
+    pub fn new(object: ObjectRef, dialect: Dialect, ctx: &egui::Context) -> Self {
         let mut view = Self {
             object,
             state: State::default(),
+            dialect,
         };
         let label =
             ctx.data_mut(|d| d.get_persisted::<String>(remembered_tab(view.object.object_type)));
@@ -118,11 +124,7 @@ impl ObjectView {
         if self.has_columns() {
             tabs.push(Tab::Columns);
         }
-        let details = match self.object.object_type {
-            ObjectType::Table => Detail::TABLE,
-            ObjectType::DatabaseLink => Detail::LINK,
-            _ => Detail::CODE,
-        };
+        let details = self.dialect.details(self.object.object_type);
         tabs.extend(details.iter().map(|d| Tab::Detail(*d)));
         if self.is_table() {
             tabs.push(Tab::Ddl);
@@ -216,6 +218,11 @@ impl ObjectView {
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &DocContext, connection: Option<&str>) -> Effects {
         let mut effects = Effects::default();
+        if self.dialect != cx.dialect {
+            // Restored with the workspace before its connection said what it is.
+            self.dialect = cx.dialect;
+            self.state.tab = None;
+        }
         let tabs = self.tabs();
         let mut tab = self.state.tab.unwrap_or(tabs[0]);
 
@@ -234,11 +241,30 @@ impl ObjectView {
                 if ui.button("Refresh").clicked() {
                     effects.extend(self.load());
                 }
-                if self.object.object_type.has_source() && ui.button("Edit").clicked() {
-                    effects.open.push(OpenRequest::Program {
-                        connection: connection.to_owned(),
-                        object: self.object.clone(),
-                    });
+                if self.object.object_type.has_source() {
+                    if self.dialect.supports(Feature::PlSql) {
+                        if ui.button("Edit").clicked() {
+                            effects.open.push(OpenRequest::Program {
+                                connection: connection.to_owned(),
+                                object: self.object.clone(),
+                            });
+                        }
+                    } else if let Some(Loaded::Ready(ddl)) = &self.state.ddl
+                        && ui
+                            .button("Edit")
+                            .on_hover_text("Open a script that drops and creates it again")
+                            .clicked()
+                    {
+                        effects.open.push(OpenRequest::Sql {
+                            connection: connection.to_owned(),
+                            text: crate::browser::replace_script(
+                                self.dialect,
+                                &self.object,
+                                ddl.text(),
+                            ),
+                            run: false,
+                        });
+                    }
                 }
                 if self.object.object_type == ObjectType::DatabaseLink
                     && ui.button("Test link").clicked()
@@ -254,7 +280,11 @@ impl ObjectView {
                 if self.object.object_type.has_data() && ui.button("Query data").clicked() {
                     effects.open.push(OpenRequest::Sql {
                         connection: connection.to_owned(),
-                        text: format!("select * from {}", self.object.qualified()),
+                        text: format!(
+                            "select * from {}",
+                            self.dialect
+                                .qualified(&self.object.owner, &self.object.name)
+                        ),
                         run: true,
                     });
                 }
