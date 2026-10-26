@@ -58,7 +58,8 @@ comparing schemas and monitoring sessions. Connects to Oracle directly; no
 Oracle client libraries are needed."""
 homepage = "https://github.com/ortic/pythia"
 licenseFile = "../../LICENSE-MIT"
-beforePackagingCommand = "cargo build --release -p pythia-app"
+# `cargo build --release -p pythia-app`, as an alias in .cargo/config.toml.
+beforePackagingCommand = "cargo package-build"
 outDir = "../../target/packages"
 binariesDir = "../../target/release"
 icons = ["../../assets/icon/pythia-32.png", "../../assets/icon/pythia-128.png", "../../assets/icon/pythia-256.png", "../../assets/icon/pythia-512.png", "../../assets/icon/pythia.ico", "../../assets/icon/pythia.icns"]
