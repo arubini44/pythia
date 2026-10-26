@@ -702,3 +702,57 @@ fn session_detail_parts() {
     running.join().unwrap();
     conn.execute("drop package pythia_mon_plsql", &[]).unwrap();
 }
+
+/// SQL details (#74): text, totals, child cursors (a second one for a bind
+/// of another type, with the reason), the plan and captured binds of a
+/// child.
+#[test]
+fn sql_details_of_a_statement() {
+    let Some(conn) = dba() else { return };
+    let other = open_dba();
+    let marker = format!(
+        "pythia_sqldetail_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let sql = format!("select /* {marker} */ count(*) from dual where :1 is not null");
+    let n: i64 = other.query_row_as(&sql, &[&"X"]).unwrap();
+    assert_eq!(n, 1);
+    // A number this time: the cursor can't be shared (bind mismatch).
+    let n: i64 = other.query_row_as(&sql, &[&42_i64]).unwrap();
+    assert_eq!(n, 1);
+    let sql_id: String = conn
+        .query_row_as(
+            "select sql_id from v$sql where sql_text like '%' || :1 || '%' \
+               and sql_text not like '%v$sql%' and rownum = 1",
+            &[&marker],
+        )
+        .unwrap();
+
+    let d = queries::sql_detail(&conn, &sql_id, None);
+    assert!(d.errors.is_empty(), "{:?}", d.errors);
+    assert!(d.text.as_deref().unwrap_or("").contains(&marker));
+    assert!(d.stats.as_ref().unwrap().executions >= 2.0, "{:?}", d.stats);
+    assert!(d.children.len() >= 2, "{:?}", d.children);
+    assert!(!d.plan.is_empty());
+    assert!(d.child.is_some());
+
+    let first = d.children[0].child;
+    let d = queries::sql_detail(&conn, &sql_id, Some(first));
+    assert_eq!(d.child, Some(first));
+    assert!(
+        d.binds.iter().any(|b| b.value.as_deref() == Some("X")),
+        "{:?}",
+        d.binds
+    );
+    let second = d.children[1].child;
+    let d = queries::sql_detail(&conn, &sql_id, Some(second));
+    eprintln!("not shared: {:?}", d.not_shared);
+    assert!(!d.not_shared.is_empty(), "why child {second} isn't shared");
+
+    // A statement gone from the shared pool.
+    let d = queries::sql_detail(&conn, "0000000000000", None);
+    assert!(d.text.is_none() && d.children.is_empty() && d.errors.is_empty());
+}

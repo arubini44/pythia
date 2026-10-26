@@ -28,6 +28,14 @@ All notable changes to Pythia are documented here. The format follows
   read before; open cursors group by SQL_ID; locked tables and the row a
   session waits for open in the IDE; *All columns* lists the `V$SESSION`
   row. Each tab is read when it is first shown (#74).
+- Monitor: *SQL details*, a tab per statement like a session's: its text
+  (copy, open in a SQL window), totals and per execution since it was
+  loaded, its child cursors with plan hash, executions, bind awareness and
+  SQL profile / baseline / patch; for the child picked, its plan (with
+  actual rows when row source statistics were gathered), captured binds
+  and why it isn't shared with the others; and the sessions running it.
+  Top SQL, the session list (SQL_ID column and menu) and session details
+  open it (#74).
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
 - **Debug…** next to **Test…** on procedures, functions and package

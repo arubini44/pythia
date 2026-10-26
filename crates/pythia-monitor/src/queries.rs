@@ -1304,6 +1304,267 @@ pub fn session_details(
     d
 }
 
+/// A statement in the shared pool, for SQL details.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SqlDetail {
+    pub sql_id: String,
+    pub text: Option<String>,
+    pub stats: Option<SqlStats>,
+    pub children: Vec<ChildCursor>,
+    /// The child cursor the plan, binds and sharing are of.
+    pub child: Option<i64>,
+    pub plan: Vec<String>,
+    pub binds: Vec<Bind>,
+    /// Why the child isn't shared with the others (`V$SQL_SHARED_CURSOR`).
+    pub not_shared: Vec<String>,
+    /// Sessions running it now: sid, serial#, user, status.
+    pub sessions: Vec<(i64, i64, Option<String>, String)>,
+    pub errors: Vec<SectionError>,
+}
+
+/// Totals since the statement was loaded (`V$SQLSTATS`), times in seconds.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SqlStats {
+    pub executions: f64,
+    pub elapsed: f64,
+    pub cpu: f64,
+    pub buffer_gets: f64,
+    pub disk_reads: f64,
+    pub rows: f64,
+    pub parse_calls: f64,
+    pub fetches: f64,
+    pub sorts: f64,
+    pub application_wait: f64,
+    pub concurrency_wait: f64,
+    pub user_io_wait: f64,
+    pub plsql: f64,
+    pub last_active: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChildCursor {
+    pub child: i64,
+    pub plan_hash: i64,
+    pub executions: f64,
+    pub elapsed: f64,
+    pub buffer_gets: f64,
+    pub rows: f64,
+    pub parsing_schema: Option<String>,
+    pub bind_sensitive: bool,
+    pub bind_aware: bool,
+    pub profile: Option<String>,
+    pub baseline: Option<String>,
+    pub patch: Option<String>,
+    pub last_active: Option<String>,
+}
+
+/// Everything about a statement in the shared pool; `child` picks the
+/// child cursor whose plan, binds and sharing are shown (else the most
+/// executed).
+pub fn sql_detail(conn: &Connection, sql_id: &str, child: Option<i64>) -> SqlDetail {
+    let mut d = SqlDetail {
+        sql_id: sql_id.to_owned(),
+        ..SqlDetail::default()
+    };
+    let mut errors = Vec::new();
+    let mut section = |name: &'static str, r: Result<()>| {
+        if let Err(e) = r {
+            errors.push((name, explain_error(&e)));
+        }
+    };
+    let f = |r: &oracle::Row, i| -> Result<f64> { Ok(get::<Option<f64>>(r, i)?.unwrap_or(0.0)) };
+    section(
+        "Statistics",
+        query(
+            conn,
+            "select sql_fulltext, executions, elapsed_time / 1e6, cpu_time / 1e6, buffer_gets, \
+                    disk_reads, rows_processed, parse_calls, fetches, sorts, \
+                    application_wait_time / 1e6, concurrency_wait_time / 1e6, \
+                    user_io_wait_time / 1e6, plsql_exec_time / 1e6, \
+                    to_char(last_active_time, 'YYYY-MM-DD HH24:MI:SS') \
+               from v$sqlstats where sql_id = :1",
+            &[&sql_id],
+            |r| {
+                Ok((
+                    get::<Option<String>>(r, 0)?,
+                    SqlStats {
+                        executions: f(r, 1)?,
+                        elapsed: f(r, 2)?,
+                        cpu: f(r, 3)?,
+                        buffer_gets: f(r, 4)?,
+                        disk_reads: f(r, 5)?,
+                        rows: f(r, 6)?,
+                        parse_calls: f(r, 7)?,
+                        fetches: f(r, 8)?,
+                        sorts: f(r, 9)?,
+                        application_wait: f(r, 10)?,
+                        concurrency_wait: f(r, 11)?,
+                        user_io_wait: f(r, 12)?,
+                        plsql: f(r, 13)?,
+                        last_active: get(r, 14)?,
+                    },
+                ))
+            },
+        )
+        .map(|rows| {
+            if let Some((text, stats)) = rows.into_iter().next() {
+                d.text = text;
+                d.stats = Some(stats);
+            }
+        }),
+    );
+    section(
+        "Child cursors",
+        query(
+            conn,
+            "select child_number, plan_hash_value, executions, elapsed_time / 1e6, buffer_gets, \
+                    rows_processed, parsing_schema_name, is_bind_sensitive, is_bind_aware, \
+                    sql_profile, sql_plan_baseline, sql_patch, \
+                    to_char(last_active_time, 'YYYY-MM-DD HH24:MI:SS') \
+               from v$sql where sql_id = :1 order by child_number",
+            &[&sql_id],
+            |r| {
+                Ok(ChildCursor {
+                    child: get(r, 0)?,
+                    plan_hash: get::<Option<i64>>(r, 1)?.unwrap_or(0),
+                    executions: f(r, 2)?,
+                    elapsed: f(r, 3)?,
+                    buffer_gets: f(r, 4)?,
+                    rows: f(r, 5)?,
+                    parsing_schema: get(r, 6)?,
+                    bind_sensitive: get::<Option<String>>(r, 7)?.as_deref() == Some("Y"),
+                    bind_aware: get::<Option<String>>(r, 8)?.as_deref() == Some("Y"),
+                    profile: get(r, 9)?,
+                    baseline: get(r, 10)?,
+                    patch: get(r, 11)?,
+                    last_active: get(r, 12)?,
+                })
+            },
+        )
+        .map(|c| d.children = c),
+    );
+    if d.text.is_none() {
+        // Aged out of V$SQLSTATS but a child is still there, or the other
+        // way round: the text from V$SQL.
+        section(
+            "Statement",
+            query(
+                conn,
+                "select sql_fulltext from v$sql where sql_id = :1 and rownum = 1",
+                &[&sql_id],
+                |r| get::<Option<String>>(r, 0),
+            )
+            .map(|t| d.text = t.into_iter().next().flatten()),
+        );
+    }
+    d.child = child
+        .filter(|c| d.children.iter().any(|x| x.child == *c))
+        .or_else(|| {
+            d.children
+                .iter()
+                .max_by(|a, b| a.executions.total_cmp(&b.executions))
+                .map(|c| c.child)
+        });
+    if let Some(child) = d.child {
+        section(
+            "Plan",
+            (|| {
+                // Row source statistics (GATHER_PLAN_STATISTICS or
+                // STATISTICS_LEVEL=ALL): actual rows and times.
+                let measured: i64 = conn.query_row_as(
+                    "select count(*) from v$sql_plan_statistics \
+                      where sql_id = :1 and child_number = :2 and rownum = 1",
+                    &[&sql_id, &child],
+                )?;
+                let format = if measured > 0 {
+                    "ALLSTATS LAST +PEEKED_BINDS"
+                } else {
+                    "TYPICAL +PEEKED_BINDS"
+                };
+                d.plan = query(
+                    conn,
+                    "select plan_table_output from table(dbms_xplan.display_cursor(:1, :2, :3))",
+                    &[&sql_id, &child, &format],
+                    |r| Ok(get::<Option<String>>(r, 0)?.unwrap_or_default()),
+                )?;
+                Ok(())
+            })(),
+        );
+        section(
+            "Binds",
+            binds(conn, sql_id, Some(child)).map(|b| d.binds = b),
+        );
+        if d.children.len() > 1 {
+            section(
+                "Sharing",
+                not_shared(conn, sql_id, child).map(|n| d.not_shared = n),
+            );
+        }
+    }
+    section(
+        "Sessions",
+        query(
+            conn,
+            "select sid, serial#, username, status from v$session where sql_id = :1 order by sid",
+            &[&sql_id],
+            |r| Ok((get(r, 0)?, get(r, 1)?, get(r, 2)?, get(r, 3)?)),
+        )
+        .map(|s| d.sessions = s),
+    );
+    d.errors = errors;
+    d
+}
+
+/// Why a child cursor wasn't shared: the `V$SQL_SHARED_CURSOR` flags that
+/// are `Y`, and the reasons Oracle gives.
+fn not_shared(conn: &Connection, sql_id: &str, child: i64) -> Result<Vec<String>> {
+    let rows = conn.query(
+        "select * from v$sql_shared_cursor where sql_id = :1 and child_number = :2",
+        &[&sql_id, &child],
+    )?;
+    let names: Vec<String> = rows
+        .column_info()
+        .iter()
+        .map(|c| c.name().to_owned())
+        .collect();
+    let mut out = Vec::new();
+    for row in rows {
+        let row = row?;
+        for (name, value) in names.iter().zip(row.sql_values()) {
+            let value = if value.is_null().unwrap_or(true) {
+                continue;
+            } else {
+                value.get::<String>().unwrap_or_default()
+            };
+            if name == "REASON" {
+                // XML: <ChildNode>…<reason>Bind mismatch(…)</reason>…
+                let mut rest = value.as_str();
+                while let Some(start) = rest.find("<reason>") {
+                    let after = &rest[start + "<reason>".len()..];
+                    let Some(end) = after.find("</reason>") else {
+                        break;
+                    };
+                    let reason = after[..end].trim().to_owned();
+                    if !reason.is_empty() && !out.contains(&reason) {
+                        out.push(reason);
+                    }
+                    rest = &after[end..];
+                }
+            } else if value == "Y" {
+                out.push(name.to_lowercase().replace('_', " "));
+            }
+        }
+    }
+    // A flag that a reason says in more detail ("bind mismatch",
+    // "Bind mismatch(8)") once.
+    let detailed: Vec<String> = out.iter().map(|r| r.to_lowercase()).collect();
+    out.retain(|r| {
+        let flag = r.to_lowercase();
+        !detailed.iter().any(|d| *d != flag && d.starts_with(&flag))
+    });
+    Ok(out)
+}
+
 /// The captured binds of a cursor (any child if it isn't known).
 fn binds(conn: &Connection, sql_id: &str, child: Option<i64>) -> Result<Vec<Bind>> {
     query(

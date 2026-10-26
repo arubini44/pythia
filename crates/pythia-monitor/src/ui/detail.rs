@@ -370,9 +370,19 @@ impl SessionDetailView {
                             ),
                         ];
                         for (title, sql_id, text, binds) in statements {
-                            let title = format!("{title} {}", sql_id.unwrap_or_default());
+                            let title = format!("{title} {}", sql_id.as_deref().unwrap_or(""));
                             section(ui, &title, |ui| {
                                 code(ui, text.as_deref());
+                                if let Some(id) = sql_id
+                                    && ui
+                                        .small_button("SQL details")
+                                        .on_hover_text(
+                                            "Totals, child cursors, plans, sessions running it",
+                                        )
+                                        .clicked()
+                                {
+                                    wants.push(Want::OpenSqlDetail { sql_id: id });
+                                }
                                 if let Some(text) = text
                                     && ui
                                         .small_button("Open in SQL window")
@@ -507,8 +517,21 @@ impl SessionDetailView {
                     groups.len(),
                     |row, i| {
                         let (sql_id, n, text) = groups[i];
-                        row.col(|ui| {
-                            ui.label(RichText::new(sql_id.unwrap_or("")).monospace());
+                        row.col(|ui| match sql_id {
+                            Some(id) => {
+                                if ui
+                                    .link(RichText::new(id).monospace())
+                                    .on_hover_text("Show the statement")
+                                    .clicked()
+                                {
+                                    wants.push(Want::OpenSqlDetail {
+                                        sql_id: id.to_owned(),
+                                    });
+                                }
+                            }
+                            None => {
+                                ui.label("");
+                            }
                         });
                         row.col(|ui| {
                             ui.label(RichText::new(n.to_string()).monospace());
@@ -566,10 +589,14 @@ impl SessionDetailView {
                                     let c = &d.cursors[i];
                                     row.set_selected(self.cursor == Some(i));
                                     row.col(|ui| {
-                                        ui.label(
-                                            RichText::new(c.sql_id.as_deref().unwrap_or(""))
-                                                .monospace(),
-                                        );
+                                        if let Some(id) = &c.sql_id
+                                            && ui
+                                                .link(RichText::new(id).monospace())
+                                                .on_hover_text("Show the statement")
+                                                .clicked()
+                                        {
+                                            wants.push(Want::OpenSqlDetail { sql_id: id.clone() });
+                                        }
                                     });
                                     row.col(|ui| {
                                         ui.label(c.cursor_type.as_deref().unwrap_or(""));

@@ -25,6 +25,7 @@ mod dashboard;
 mod detail;
 mod mysql;
 mod sessions;
+mod sql_detail;
 pub mod style;
 mod trace;
 
@@ -42,6 +43,7 @@ pub use dashboard::{DashboardView, Refresh};
 pub use detail::SessionDetailView;
 pub use mysql::MySqlDashboardView;
 pub use sessions::{FieldFilter, SessionsView};
+pub use sql_detail::SqlDetailView;
 pub use trace::TraceView;
 
 /// Identifies a request inside one [`Monitor`].
@@ -151,6 +153,15 @@ pub(crate) enum Want {
         sid: i64,
         serial: i64,
     },
+    /// A statement in the shared pool, with one of its children.
+    SqlDetail {
+        sql_id: String,
+        child: Option<i64>,
+    },
+    /// Open a statement's details tab (handled by the driver, no task).
+    OpenSqlDetail {
+        sql_id: String,
+    },
     Trace {
         sid: i64,
         serial: i64,
@@ -197,6 +208,21 @@ pub(crate) enum Want {
     Act(MonitorAction),
 }
 
+/// An open details tab: of a session or of a statement.
+enum DetailView {
+    Session(Box<SessionDetailView>),
+    Sql(Box<SqlDetailView>),
+}
+
+impl DetailView {
+    fn title(&self) -> String {
+        match self {
+            DetailView::Session(d) => d.title(),
+            DetailView::Sql(d) => d.title(),
+        }
+    }
+}
+
 /// Result routing for a token.
 enum Job {
     Capabilities,
@@ -204,6 +230,7 @@ enum Job {
     MySqlDashboard,
     Sessions,
     Detail(i64, i64),
+    SqlDetail(String),
     Control(String),
     Transaction(i64, i64),
     AwrSnapshots,
@@ -240,7 +267,7 @@ pub struct Monitor {
     pub sessions: SessionsView,
     pub awr: AwrView,
     pub trace: TraceView,
-    details: Vec<SessionDetailView>,
+    details: Vec<DetailView>,
     jobs: HashMap<Token, Job>,
     next_token: Token,
     toast: Option<(String, bool, f64)>,
@@ -336,7 +363,7 @@ impl Monitor {
             MonitorTab::Sessions => "Sessions".into(),
             MonitorTab::Awr => "AWR / ASH".into(),
             MonitorTab::Trace => "Trace analyzer".into(),
-            MonitorTab::Detail(i) => self.details.get(i).map_or("Session".into(), |d| d.title()),
+            MonitorTab::Detail(i) => self.details.get(i).map_or("Details".into(), |d| d.title()),
         }
     }
 
@@ -411,7 +438,8 @@ impl Monitor {
             MonitorTab::Awr => self.awr.ui(ui, caps, self.caps_pending, &mut wants),
             MonitorTab::Trace => self.trace.ui(ui, caps, &mut wants),
             MonitorTab::Detail(i) => match self.details.get_mut(i) {
-                Some(d) => d.ui(ui, caps, &mut wants),
+                Some(DetailView::Session(d)) => d.ui(ui, caps, &mut wants),
+                Some(DetailView::Sql(d)) => d.ui(ui, &mut wants),
                 None => self.tab = MonitorTab::Sessions,
             },
         }
@@ -441,20 +469,30 @@ impl Monitor {
                 continue;
             }
             if let Want::OpenDetail { sid, serial, tab } = want {
-                let idx = match self
+                let found = self.details.iter().position(
+                    |d| matches!(d, DetailView::Session(s) if s.sid == sid && s.serial == serial),
+                );
+                let idx = found.unwrap_or_else(|| {
+                    let view = SessionDetailView::new(sid, serial);
+                    self.details.push(DetailView::Session(Box::new(view)));
+                    self.details.len() - 1
+                });
+                if let (Some(tab), DetailView::Session(d)) = (tab, &mut self.details[idx]) {
+                    d.show_tab(tab);
+                }
+                self.tab = MonitorTab::Detail(idx);
+                continue;
+            }
+            if let Want::OpenSqlDetail { sql_id } = want {
+                let found = self
                     .details
                     .iter()
-                    .position(|d| d.sid == sid && d.serial == serial)
-                {
-                    Some(i) => i,
-                    None => {
-                        self.details.push(SessionDetailView::new(sid, serial));
-                        self.details.len() - 1
-                    }
-                };
-                if let Some(tab) = tab {
-                    self.details[idx].show_tab(tab);
-                }
+                    .position(|d| matches!(d, DetailView::Sql(s) if s.sql_id == sql_id));
+                let idx = found.unwrap_or_else(|| {
+                    self.details
+                        .push(DetailView::Sql(Box::new(SqlDetailView::new(sql_id))));
+                    self.details.len() - 1
+                });
                 self.tab = MonitorTab::Detail(idx);
                 continue;
             }
@@ -463,6 +501,14 @@ impl Monitor {
             }
         }
         out.actions.append(&mut self.awr.actions);
+    }
+
+    /// The open session details.
+    fn session_details(&mut self) -> impl Iterator<Item = &mut SessionDetailView> {
+        self.details.iter_mut().filter_map(|d| match d {
+            DetailView::Session(s) => Some(&mut **s),
+            DetailView::Sql(_) => None,
+        })
     }
 
     fn token(&mut self, job: Job) -> Token {
@@ -533,6 +579,10 @@ impl Monitor {
                 Job::Transaction(sid, serial),
                 Box::new(move |c| boxed(queries::transaction(c, sid, serial))),
             ),
+            Want::SqlDetail { sql_id, child } => (
+                Job::SqlDetail(sql_id.clone()),
+                Box::new(move |c| boxed(Ok(queries::sql_detail(c, &sql_id, child)))),
+            ),
             Want::Trace { sid, serial, on } => (
                 Job::Control(format!(
                     "SQL trace {} for session {sid},{serial}",
@@ -587,6 +637,7 @@ impl Monitor {
                 Box::new(move |c| boxed(queries::session_trace_file(c, sid))),
             ),
             Want::OpenDetail { .. }
+            | Want::OpenSqlDetail { .. }
             | Want::ShowBlocking
             | Want::ShowSessions(_)
             | Want::Analyze(_)
@@ -626,10 +677,19 @@ impl Monitor {
             Job::Detail(sid, serial) => {
                 let result = take(result);
                 if let Some(d) = self
-                    .details
-                    .iter_mut()
+                    .session_details()
                     .find(|d| d.sid == sid && d.serial == serial)
                 {
+                    d.on_detail(result);
+                }
+            }
+            Job::SqlDetail(sql_id) => {
+                let result = take(result);
+                let found = self.details.iter_mut().find_map(|d| match d {
+                    DetailView::Sql(s) if s.sql_id == sql_id => Some(s),
+                    _ => None,
+                });
+                if let Some(d) = found {
                     d.on_detail(result);
                 }
             }
@@ -638,8 +698,7 @@ impl Monitor {
                     .map_err(|e| queries::explain_error(&e));
                 self.sessions.on_transaction(sid, serial, &result);
                 for d in self
-                    .details
-                    .iter_mut()
+                    .session_details()
                     .filter(|d| d.sid == sid && d.serial == serial)
                 {
                     d.on_transaction(&result);
@@ -649,7 +708,7 @@ impl Monitor {
                 Ok(()) => {
                     self.toast(message, false, now);
                     self.sessions.refresh_now();
-                    for d in &mut self.details {
+                    for d in self.session_details() {
                         d.refresh();
                     }
                 }

@@ -615,16 +615,20 @@ fn top_sql(ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
                 body.rows(h, snap.top_sql.len(), |mut row| {
                     let s = &snap.top_sql[row.index()];
                     row.col(|ui| {
-                        if ui
-                            .add(
-                                egui::Label::new(RichText::new(&s.sql_id).monospace())
-                                    .sense(egui::Sense::click()),
-                            )
-                            .on_hover_text("Click to copy")
-                            .clicked()
-                        {
-                            ui.ctx().copy_text(s.sql_id.clone());
+                        let link = ui
+                            .link(RichText::new(&s.sql_id).monospace())
+                            .on_hover_text("Show the statement (right-click to copy)");
+                        if link.clicked() {
+                            wants.push(Want::OpenSqlDetail {
+                                sql_id: s.sql_id.clone(),
+                            });
                         }
+                        link.context_menu(|ui| {
+                            if ui.button("Copy SQL_ID").clicked() {
+                                ui.ctx().copy_text(s.sql_id.clone());
+                                ui.close();
+                            }
+                        });
                     });
                     let right = |ui: &mut Ui, t: String| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -845,6 +849,16 @@ mod tests {
                 remaining_s: Some(180),
                 message: None,
             }],
+            top_sql: vec![crate::queries::TopSql {
+                sql_id: "7h35uxf5uhmm1".into(),
+                executions: 10,
+                elapsed_s: 2.0,
+                cpu_s: 1.0,
+                buffer_gets: 100,
+                disk_reads: 1,
+                rows: 10,
+                text: "select 1 from dual".into(),
+            }],
             ..DashboardSnapshot::default()
         }
     }
@@ -854,6 +868,7 @@ mod tests {
             Want::ShowSessions(f) => format!("sessions {f:?}"),
             Want::ShowBlocking => "blocking tree".into(),
             Want::OpenDetail { sid, serial, tab } => format!("details {sid},{serial} {tab:?}"),
+            Want::OpenSqlDetail { sql_id } => format!("sql {sql_id}"),
             _ => "other".into(),
         }
     }
@@ -900,5 +915,6 @@ mod tests {
         assert_eq!(click("120  sid 33"), ["details 33,9 Some(Cursors)"]);
         assert_eq!(click("sid 44 · Table Scan"), ["details 44,2 None"]);
         assert_eq!(click("Details"), ["details 21,4 None"]);
+        assert_eq!(click("7h35uxf5uhmm1"), ["sql 7h35uxf5uhmm1"]);
     }
 }

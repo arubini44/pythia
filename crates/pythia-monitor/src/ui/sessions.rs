@@ -443,9 +443,22 @@ impl SessionsView {
                                 s.logon_time
                             ));
                     });
+                    let open_sql = std::cell::Cell::new(false);
                     cell(&mut row, &|ui| {
-                        ui.label(RichText::new(s.sql_id.as_deref().unwrap_or("")).monospace());
+                        if let Some(id) = &s.sql_id
+                            && ui
+                                .link(RichText::new(id).monospace())
+                                .on_hover_text("Show the statement")
+                                .clicked()
+                        {
+                            open_sql.set(true);
+                        }
                     });
+                    if open_sql.get()
+                        && let Some(sql_id) = s.sql_id.clone()
+                    {
+                        actions.push(RowAction::Want(Want::OpenSqlDetail { sql_id }));
+                    }
                     cell(&mut row, &|ui| event_label(ui, s));
                     cell(&mut row, &|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -775,11 +788,15 @@ fn session_menu(
         ui.ctx().copy_text(s.handle());
         ui.close();
     }
-    if let Some(id) = &s.sql_id
-        && ui.button("Copy SQL_ID").clicked()
-    {
-        ui.ctx().copy_text(id.clone());
-        ui.close();
+    if let Some(id) = &s.sql_id {
+        if ui.button("SQL details").clicked() {
+            actions.push(RowAction::Want(Want::OpenSqlDetail { sql_id: id.clone() }));
+            ui.close();
+        }
+        if ui.button("Copy SQL_ID").clicked() {
+            ui.ctx().copy_text(id.clone());
+            ui.close();
+        }
     }
     ui.separator();
     session_actions(ui, s, caps, actions);
