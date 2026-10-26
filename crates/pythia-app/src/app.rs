@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use egui::{Color32, RichText, Ui};
-use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle, TabViewer};
+use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle, TabStyle, TabViewer};
 use pythia_config::{
     ConnectionProfile, Connections as SavedConnections, Paths, Settings, ThemeChoice, load_toml,
     save_toml,
@@ -4616,25 +4616,28 @@ impl TabViewer for Viewer<'_> {
                 {
                     let current = doc.connection.clone().unwrap_or_else(|| "(none)".into());
                     let pending = self.pending_tx.contains(id);
-                    ui.horizontal(|ui| {
-                        ui.weak("Connection");
-                        egui::ComboBox::from_id_salt(("doc-conn", *id))
-                            .selected_text(&current)
-                            .show_ui(ui, |ui| {
-                                for c in self.connections {
-                                    let item = ui
-                                        .add_enabled(
-                                            !pending || *c == current,
-                                            egui::Button::selectable(*c == current, c),
-                                        )
-                                        .on_disabled_hover_text(
-                                            "Commit or roll back this window's transaction first",
-                                        );
-                                    if item.clicked() && *c != current {
-                                        self.rebind.push((*id, c.clone()));
+                    // A panel: the tab has no margin (see `tab_style_override`).
+                    egui::Panel::top(egui::Id::new(("doc-conn-row", *id))).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.weak("Connection");
+                            egui::ComboBox::from_id_salt(("doc-conn", *id))
+                                .selected_text(&current)
+                                .show_ui(ui, |ui| {
+                                    for c in self.connections {
+                                        let item = ui
+                                            .add_enabled(
+                                                !pending || *c == current,
+                                                egui::Button::selectable(*c == current, c),
+                                            )
+                                            .on_disabled_hover_text(
+                                                "Commit or roll back this window's transaction first",
+                                            );
+                                        if item.clicked() && *c != current {
+                                            self.rebind.push((*id, c.clone()));
+                                        }
                                     }
-                                }
-                            });
+                                });
+                        });
                     });
                 }
                 let connected = doc
@@ -4686,6 +4689,20 @@ impl TabViewer for Viewer<'_> {
 
     fn scroll_bars(&self, _tab: &Tab) -> [bool; 2] {
         [false, false]
+    }
+
+    /// SQL and program windows fill their tab to the edges: the editor
+    /// needs no frame, and the panels around it bring their own margin.
+    fn tab_style_override(&self, tab: &Tab, global: &TabStyle) -> Option<TabStyle> {
+        let Tab::Doc(id) = tab else {
+            return None;
+        };
+        let doc = self.docs.get(id)?;
+        matches!(doc.kind, DocKind::Sql(_) | DocKind::Program(_)).then(|| {
+            let mut style = global.clone();
+            style.tab_body.inner_margin = egui::Margin::ZERO;
+            style
+        })
     }
 }
 

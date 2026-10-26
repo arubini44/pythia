@@ -16,6 +16,12 @@ All notable changes to Pythia are documented here. The format follows
   right-clicking a subprogram's name in the spec, or a public one in the
   body, offers Test… and Debug… too (#71).
 
+### Changed
+- SQL and program windows: the editor fills its tab to the edges instead
+  of sitting in a 22 px gray frame, which leaves more room for code. The
+  rows above it (connection picker, Compile…) have a strip of their own,
+  like the results below (#86).
+
 ### Fixed
 - Windows: `pythia.exe` carries Pythia's icon and version, so the taskbar,
   the Start menu and desktop shortcuts, Explorer, Installed apps and

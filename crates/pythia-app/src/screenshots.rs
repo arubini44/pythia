@@ -3747,6 +3747,7 @@ fn window_connection_switching() {
     h.state_mut().test_settings_mut().switch_window_connection = true;
     h.run_steps(2);
     assert!(h.query_by_label("Connection").is_some());
+    save(&mut h, "window-connection");
     h.state_mut().test_execute_focused();
     wait_until(&mut h, "pending transaction", |app| {
         app.test_transaction_state().is_ok()
