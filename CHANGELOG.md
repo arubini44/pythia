@@ -6,6 +6,14 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Instant Client packages: each release also has `pythia-instantclient_…`
+  packages, built on the Oracle Instant Client, for servers that require
+  Native Network Encryption, Oracle 11.2 and OS or wallet logins. They need
+  the Instant Client (or an Oracle Client) on the library path; see the
+  README. *Help → About Pythia* shows which driver a build uses, and the
+  pure-Rust build's error for such a server points to them (#66).
+
 ## [0.4.0] - 2026-10-26
 
 ### Added

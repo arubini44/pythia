@@ -190,7 +190,10 @@ for Linux, Windows and macOS.
 
 Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
 macOS (`.dmg`) are attached to each [GitHub
-release](https://github.com/ortic/pythia/releases).
+release](https://github.com/ortic/pythia/releases), in two flavors:
+`pythia_…` with the pure-Rust driver, and `pythia-instantclient_…` on the
+Oracle Instant Client (see below). Take the first unless you need the
+second.
 
 Pythia connects to Oracle directly, with a pure-Rust driver: **no Oracle
 client libraries are needed**. Easy Connect strings (`host:port/service`)
@@ -216,13 +219,23 @@ zone rules built into Pythia, which can differ from the server's time zone
 file for very old dates and for rule changes newer than that file.
 
 **When you need the Oracle Instant Client:** Oracle 11.2 databases (12.1 is
-untested), servers that *require* Native Network Encryption
-(`SQLNET.ENCRYPTION_SERVER = REQUIRED`; use TLS instead where you can), and
-OS or wallet logins (`/@alias`). Build Pythia with `cargo build --release --features
-pythia-db/thick` and install the [Instant
+untested), servers that *require* Native Network Encryption (connecting
+fails with *not implemented: Native Network Encryption and Data
+Integrity*; the server has `SQLNET.ENCRYPTION_SERVER = REQUIRED`, use TLS
+instead where you can), and OS or wallet logins (`/@alias`). For these,
+install a `pythia-instantclient_…` package and the [Instant
 Client](https://www.oracle.com/database/technologies/instant-client/downloads.html)
-(*Basic*; on Linux also `libaio`), on the library path (`LD_LIBRARY_PATH`,
-`PATH` on Windows).
+(*Basic* or *Basic Light*; on Linux also `libaio`), or use an Oracle Client
+that is already installed. Pythia loads it when connecting; it has to be on
+the library path: `PATH` on Windows, on Linux registered with `ldconfig`
+(the Instant Client RPMs do this) or in `LD_LIBRARY_PATH`, on macOS linked
+into `~/lib` (`ln -s ~/Downloads/instantclient_23_3/libclntsh.dylib ~/lib/`).
+Instant Client 23 connects to Oracle 19c and later; for 11.2 take Instant
+Client 19. The Oracle client resolves net service names itself (`TNS_ADMIN`,
+its `network/admin` directory, `sqlnet.ora`). *Help → About Pythia* shows
+which driver a build uses and the client version it found. Installing one
+flavor replaces the other; settings and connections stay. To build this
+flavor yourself: `cargo build --release --features pythia-db/thick`.
 
 ## Building from source
 

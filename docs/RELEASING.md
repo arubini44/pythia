@@ -15,8 +15,9 @@
    ```
 
 5. `.github/workflows/release.yml` builds on Linux (x86_64), Windows (x86_64)
-   and macOS (Apple Silicon and Intel), and creates a **draft** GitHub
-   release with all packages, plain archives and `SHA256SUMS.txt`. Review the
+   and macOS (Apple Silicon and Intel), each in both flavors (see below), and
+   creates a **draft** GitHub release with all packages, plain archives and
+   `SHA256SUMS.txt`. Review the
    notes and publish it.
 
 The workflow can also be started by hand (*Actions → Release → Run
@@ -33,11 +34,22 @@ workflow*); without a tag it only uploads the packages as workflow artifacts.
 Build locally with `cargo packager --release -p pythia-app [-f deb]`; output
 goes to `target/packages`.
 
-Pythia connects with a pure-Rust driver (our fork of
-[rust-oracledb](https://github.com/ortic/rust-oracledb), pinned in
-`Cargo.toml`), so the packages need no Oracle client libraries. A build
-against the Instant Client (`--features pythia-db/thick`) is possible but not
-released.
+Every package comes in two flavors:
+
+- `pythia_…`, `pythia-v…-<platform>.zip/.tar.gz`: the pure-Rust driver (our
+  fork of [rust-oracledb](https://github.com/ortic/rust-oracledb), pinned in
+  `Cargo.toml`); needs no Oracle client libraries.
+- `pythia-instantclient_…`, `pythia-v…-<platform>-instantclient.zip/.tar.gz`:
+  built with `--features pythia-db/thick` (ODPI-C), for servers the pure-Rust
+  driver can't reach (Native Network Encryption required, 11.2). It loads
+  the Oracle Instant Client at run time, so the runners need none.
+
+Both have the same identifier: installing one replaces the other. The
+workflow picks the flavor through `CARGO_ALIAS_PACKAGE_BUILD`, which
+overrides the `package-build` alias (`.cargo/config.toml`) that
+`beforePackagingCommand` runs; locally,
+`CARGO_ALIAS_PACKAGE_BUILD="build --release -p pythia-app --features pythia-db/thick" cargo packager --release -p pythia-app`
+packages the Instant Client flavor.
 
 ## Signing and notarization
 

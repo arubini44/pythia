@@ -3601,6 +3601,7 @@ impl PythiaApp {
         let modal = egui::Modal::new(egui::Id::new("about")).show(ctx, |ui| {
             ui.heading("Pythia");
             ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+            ui.weak(pythia_db::oracle_driver());
             ui.label("A fast, native Oracle PL/SQL IDE.");
             let mut problem = None;
             if let Some(paths) = &self.paths {
