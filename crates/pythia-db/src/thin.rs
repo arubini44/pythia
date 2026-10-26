@@ -142,6 +142,18 @@ fn unsupported(what: &str) -> Error {
     )
 }
 
+/// What the pure-Rust driver can't connect to, and the way out.
+fn needs_client(why: &str) -> Error {
+    Error::new(
+        ErrorKind::NotSupported,
+        format!(
+            "{why}, which the pure-Rust driver doesn't support. Pythia's Instant Client \
+             packages (pythia-instantclient_…) connect through the Oracle Client; see \
+             \"When you need the Oracle Instant Client\" in the README."
+        ),
+    )
+}
+
 // ----- connections -------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +220,15 @@ impl Connector {
                 Privilege::Sysbackup => oracledb::AUTH_MODE_SYSBKP,
             });
         }
-        let inner = oracledb::connect(config)?;
+        let inner = oracledb::connect(config).map_err(|e| match e.kind() {
+            ThinKind::NotImplemented(what) if what.starts_with("Native Network Encryption") => {
+                needs_client("The server requires Native Network Encryption")
+            }
+            ThinKind::ServerVersionNotSupported => {
+                needs_client("The server is older than Oracle 12.1")
+            }
+            _ => e.into(),
+        })?;
         // TIMESTAMP WITH LOCAL TIME ZONE values arrive in UTC; they are
         // shown in the session's time zone (its offset now).
         let ltz_offset = inner
