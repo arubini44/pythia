@@ -22,6 +22,8 @@ pub struct Insight {
     pub severity: Severity,
     pub text: String,
     pub target: Option<Target>,
+    /// The session it is about, for a "Details" link next to the target.
+    pub session: Option<(i64, i64)>,
 }
 
 fn secs(s: f64) -> String {
@@ -52,6 +54,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                 secs(b.max_wait)
             ),
             target: Some(Target::BlockingTree),
+            session: Some((b.sid, b.serial)),
         });
     }
     let cpus = snap.instance.as_ref().map_or(1, |i| i.cpus.max(1)) as f64;
@@ -64,6 +67,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                     r.aas
                 ),
                 target: Some(Target::Sessions),
+                session: None,
             });
         } else if r.aas >= cpus * 0.7 {
             out.push(Insight {
@@ -73,6 +77,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                     r.aas
                 ),
                 target: Some(Target::Sessions),
+                session: None,
             });
         }
         if let Some(cpu) = r.host_cpu_pct {
@@ -81,12 +86,14 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                     severity: Severity::Critical,
                     text: format!("Host CPU at {cpu:.0} %"),
                     target: None,
+                    session: None,
                 });
             } else if cpu >= 75.0 {
                 out.push(Insight {
                     severity: Severity::Warning,
                     text: format!("Host CPU at {cpu:.0} %"),
                     target: None,
+                    session: None,
                 });
             }
         }
@@ -103,6 +110,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
             severity,
             text: format!("Tablespace {} is {:.0} % full", t.name, t.used_pct),
             target: None,
+            session: None,
         });
     }
     if let Some(limit) = snap.open_cursors_limit.filter(|l| *l > 0) {
@@ -120,6 +128,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                         sid: c.sid,
                         serial: c.serial,
                     }),
+                    session: None,
                 });
             }
         }
@@ -133,6 +142,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                 if n == 1 { "" } else { "s" }
             ),
             target: None,
+            session: None,
         });
     }
     out.sort_by_key(|i| std::cmp::Reverse(i.severity));

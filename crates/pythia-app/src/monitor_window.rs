@@ -7,7 +7,7 @@ use pythia_db::{DbEvent, DbRequest};
 use pythia_monitor::{Monitor, MonitorAction, MonitorTab, MonitorTask, Token};
 use serde::{Deserialize, Serialize};
 
-use crate::documents::{DocContext, Effects, Target, request_id};
+use crate::documents::{DocContext, Effects, ObjectRef, OpenRequest, Target, request_id};
 
 /// Which view a monitor document opens with (persisted with the layout).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -108,10 +108,62 @@ impl MonitorWindow {
                 MonitorAction::OpenPath(path) => open_path(&path, &mut effects),
                 MonitorAction::CopyText(text) => ui.ctx().copy_text(text),
                 MonitorAction::Analyze(analysis) => effects.ai.push(ai_request(analysis)),
+                MonitorAction::OpenSql(text) => {
+                    if let Some(connection) = cx.connection.clone() {
+                        effects.open.push(OpenRequest::Sql {
+                            connection,
+                            text,
+                            run: false,
+                        });
+                    }
+                }
+                MonitorAction::OpenObject {
+                    owner,
+                    name,
+                    object_type,
+                    subprogram,
+                } => {
+                    if let Some(connection) = cx.connection.clone() {
+                        effects.open.extend(open_object(
+                            connection,
+                            owner,
+                            name,
+                            &object_type,
+                            subprogram,
+                        ));
+                    }
+                }
             }
         }
         effects
     }
+}
+
+/// What opens an object the monitor names: a program window (at the
+/// subprogram) for PL/SQL, else its object view.
+fn open_object(
+    connection: String,
+    owner: String,
+    name: String,
+    object_type: &str,
+    subprogram: Option<String>,
+) -> Option<OpenRequest> {
+    let object_type = pythia_db::ObjectType::from_dictionary(object_type)?;
+    let object = ObjectRef {
+        owner,
+        name,
+        object_type,
+    };
+    Some(match subprogram {
+        Some(member) if object_type.has_source() => OpenRequest::ProgramMember {
+            connection,
+            object,
+            member,
+            parameter: None,
+        },
+        _ if object_type.has_source() => OpenRequest::Program { connection, object },
+        _ => OpenRequest::Object { connection, object },
+    })
 }
 
 /// Opens a file with the system's default application.

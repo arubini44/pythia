@@ -81,6 +81,8 @@ pub struct Kpi {
     pub value: String,
     pub detail: Option<String>,
     pub color: Option<Color32>,
+    /// The tile opens something: this says what, on hover.
+    pub link: Option<String>,
 }
 
 impl Kpi {
@@ -90,7 +92,14 @@ impl Kpi {
             value: value.into(),
             detail: None,
             color: None,
+            link: None,
         }
+    }
+
+    /// Makes the tile a link; `hint` says where it leads.
+    pub fn link(mut self, hint: impl Into<String>) -> Self {
+        self.link = Some(hint.into());
+        self
     }
 
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
@@ -104,9 +113,10 @@ impl Kpi {
     }
 }
 
-/// Draws one tile with the given outer width.
-pub fn kpi(ui: &mut Ui, width: f32, tile: &Kpi) {
-    card(ui).show(ui, |ui| {
+/// Draws one tile with the given outer width; true if a linked tile was
+/// clicked.
+pub fn kpi(ui: &mut Ui, width: f32, tile: &Kpi) -> bool {
+    let card = card(ui).show(ui, |ui| {
         // Card margins (12 + 12) and stroke (1 + 1) are outside the content.
         ui.set_width((width - 26.0).max(20.0));
         ui.set_min_height(54.0);
@@ -136,10 +146,27 @@ pub fn kpi(ui: &mut Ui, width: f32, tile: &Kpi) {
             }
         });
     });
+    let Some(hint) = &tile.link else {
+        return false;
+    };
+    let response = card.response.interact(egui::Sense::click());
+    if response.hovered() {
+        ui.painter().rect_stroke(
+            response.rect,
+            8.0,
+            egui::Stroke::new(1.0, ui.visuals().hyperlink_color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(hint)
+        .clicked()
 }
 
-/// Lays out tiles in rows that fill the available width (at least `min_width` each).
-pub fn kpi_grid(ui: &mut Ui, tiles: &[Kpi], min_width: f32) {
+/// Lays out tiles in rows that fill the available width (at least
+/// `min_width` each). Returns the linked tile clicked, if any.
+pub fn kpi_grid(ui: &mut Ui, tiles: &[Kpi], min_width: f32) -> Option<usize> {
     let gap = 8.0;
     let avail = ui.available_width();
     let max_per_row =
@@ -148,24 +175,53 @@ pub fn kpi_grid(ui: &mut Ui, tiles: &[Kpi], min_width: f32) {
     let rows = tiles.len().div_ceil(max_per_row).max(1);
     let per_row = tiles.len().div_ceil(rows).max(1);
     let width = ((avail - gap * (per_row as f32 - 1.0)) / per_row as f32).floor();
-    for row in tiles.chunks(per_row) {
+    let mut clicked = None;
+    for (r, row) in tiles.chunks(per_row).enumerate() {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            for t in row {
-                kpi(ui, width, t);
+            for (i, t) in row.iter().enumerate() {
+                if kpi(ui, width, t) {
+                    clicked = Some(r * per_row + i);
+                }
             }
         });
         ui.add_space(gap);
     }
+    clicked
 }
 
 /// A horizontal usage bar with a label, e.g. tablespace usage.
 pub fn usage_bar(ui: &mut Ui, fraction: f32, color: Color32, text: String) {
+    bar(ui, fraction, color, text, egui::Sense::hover());
+}
+
+/// A usage bar that opens something (`hint` says what); true if clicked.
+pub fn link_bar(ui: &mut Ui, fraction: f32, color: Color32, text: String, hint: &str) -> bool {
+    let response = bar(ui, fraction, color, text, egui::Sense::click());
+    if response.hovered() {
+        ui.painter().rect_stroke(
+            response.rect,
+            4.0,
+            egui::Stroke::new(1.0, ui.visuals().hyperlink_color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(hint)
+        .clicked()
+}
+
+fn bar(
+    ui: &mut Ui,
+    fraction: f32,
+    color: Color32,
+    text: String,
+    sense: egui::Sense,
+) -> egui::Response {
     let height = 16.0;
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::hover(),
-    );
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), sense);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &text));
     let painter = ui.painter_at(rect);
     let bg = ui.visuals().extreme_bg_color;
     painter.rect_filled(rect, 4.0, bg);
@@ -179,17 +235,34 @@ pub fn usage_bar(ui: &mut Ui, fraction: f32, color: Color32, text: String) {
         egui::FontId::proportional(11.5),
         ui.visuals().strong_text_color(),
     );
-    let _ = response;
+    response
 }
 
 /// A stacked horizontal bar of (label, value, color) segments with a legend.
-pub fn stacked_bar(ui: &mut Ui, segments: &[(String, f64, Color32)]) {
+/// With a `hint`, segments and legend entries are links: returns the one
+/// clicked.
+pub fn stacked_bar(
+    ui: &mut Ui,
+    segments: &[(String, f64, Color32)],
+    hint: Option<&str>,
+) -> Option<usize> {
     let total: f64 = segments.iter().map(|s| s.1).sum();
     let height = 22.0;
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::hover(),
-    );
+    let sense = if hint.is_some() {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), sense);
+    let mut clicked = None;
+    // The segment under the pointer.
+    let at = |x: f32| -> Option<usize> {
+        let mut left = rect.left();
+        segments.iter().position(|(_, value, _)| {
+            left += rect.width() * (*value / total) as f32;
+            x < left
+        })
+    };
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 5.0, ui.visuals().extreme_bg_color);
     if total > 0.0 {
@@ -210,14 +283,37 @@ pub fn stacked_bar(ui: &mut Ui, segments: &[(String, f64, Color32)]) {
             x += w;
         }
     }
+    if let Some(hint) = hint
+        && total > 0.0
+    {
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            clicked = at(pos.x);
+        }
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(hint);
+    }
     ui.horizontal_wrapped(|ui| {
-        for (label, value, color) in segments {
+        for (i, (label, value, color)) in segments.iter().enumerate() {
             let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
             ui.painter().rect_filled(r, 2.0, *color);
-            ui.label(RichText::new(format!("{label} {value}")).small());
+            let text = RichText::new(format!("{label} {value}")).small();
+            match hint {
+                Some(hint) => {
+                    if ui.link(text).on_hover_text(hint).clicked() {
+                        clicked = Some(i);
+                    }
+                }
+                None => {
+                    ui.label(text);
+                }
+            }
             ui.add_space(6.0);
         }
     });
+    clicked
 }
 
 pub fn bytes(b: f64) -> String {

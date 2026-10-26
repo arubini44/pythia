@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pythia_db::oracle::Connection;
-use pythia_monitor::queries::{self, SessionFilter};
+use pythia_monitor::queries::{self, DetailTab, SessionFilter};
 use pythia_monitor::tkprof::{self, CallKind};
 
 fn connect(var: &str) -> Option<Connection> {
@@ -247,6 +247,25 @@ fn blocking_chain_cancel_and_kill() {
     // And the blocker holds the TM lock on the table.
     let a_locks = queries::locks(&conn, a_sid).unwrap();
     assert!(a_locks.iter().any(|l| l.blocking), "{a_locks:?}");
+    // The waiter knows its blocker's serial# (a link to its details); the
+    // blocker's details list both waiters and its transaction, which a
+    // kill would roll back.
+    let a_serial = root.session.serial;
+    assert_eq!(waiter.blocking_serial, Some(a_serial));
+    let a_detail = queries::session_detail(&conn, a_sid, a_serial);
+    let mut blocked: Vec<i64> = a_detail.blocks.iter().map(|b| b.0).collect();
+    blocked.sort_unstable();
+    assert_eq!(blocked, expected);
+    let tx = a_detail.transaction.expect("A's transaction");
+    assert!(tx.undo_records >= 1, "{tx:?}");
+    assert_eq!(
+        queries::transaction(&conn, a_sid, a_serial).unwrap(),
+        Some(tx)
+    );
+    assert_eq!(
+        queries::transaction(&conn, b_sid, waiter_serial(&conn, b_sid)).unwrap(),
+        None
+    );
 
     // Cancel C's statement: its update fails with ORA-01013.
     let c_serial = queries::sessions(&conn, SessionFilter::default())
@@ -295,6 +314,46 @@ fn blocking_chain_cancel_and_kill() {
         .unwrap();
 }
 
+fn waiter_serial(conn: &Connection, sid: i64) -> i64 {
+    queries::sessions(conn, SessionFilter::default())
+        .unwrap()
+        .into_iter()
+        .find(|s| s.sid == sid)
+        .unwrap()
+        .serial
+}
+
+/// Disconnect after transaction: the session stays until its transaction
+/// ends, then goes.
+#[test]
+fn disconnect_after_transaction() {
+    let Some(conn) = dba() else { return };
+    let e = open_dba();
+    let (e_sid, e_serial) = (sid(&e), serial(&e));
+    e.execute(
+        "create global temporary table pythia_mon_disc (n number) on commit delete rows",
+        &[],
+    )
+    .ok();
+    e.execute("insert into pythia_mon_disc values (1)", &[])
+        .unwrap();
+    queries::disconnect_session(&conn, e_sid, e_serial).unwrap();
+    // Still there with its transaction.
+    let n: i64 = e
+        .query_row_as("select count(*) from pythia_mon_disc", &[])
+        .unwrap();
+    assert_eq!(n, 1);
+    // Ending it ends the session (ORA-00028 on its next call).
+    e.rollback().unwrap();
+    assert!(e.query_row_as::<i64>("select 1 from dual", &[]).is_err());
+    wait_for("the session to go", || {
+        !queries::sessions(&conn, SessionFilter::default())
+            .unwrap()
+            .iter()
+            .any(|s| s.sid == e_sid && s.serial == e_serial)
+    });
+}
+
 #[test]
 fn trace_round_trip() {
     let Some(conn) = dba() else { return };
@@ -322,7 +381,17 @@ fn trace_round_trip() {
     traced
         .execute("begin null; /* orui_trace_plsql */ end;", &[])
         .unwrap();
+    let traced_now = |conn: &Connection| {
+        queries::sessions(conn, SessionFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|s| s.sid == traced_sid)
+            .unwrap()
+            .sql_trace
+    };
+    assert!(traced_now(&conn), "the session list says it's traced");
     queries::trace_self(&traced, false).unwrap();
+    assert!(!traced_now(&conn));
 
     let (dir, file) = queries::session_trace_file(&conn, traced_sid)
         .unwrap()
@@ -538,4 +607,311 @@ fn lock_names_of_other_schemas() {
     waiter.join().unwrap();
     dba.execute("drop table pythia_mon_names purge", &[])
         .unwrap();
+}
+
+/// Session details read the parts asked for (#74): the previous SQL with
+/// its captured binds and plan, the V$SESSION row, and the overview with
+/// the PL/SQL a session runs.
+#[test]
+fn session_detail_parts() {
+    let Some(conn) = dba() else { return };
+    let other = open_dba();
+    let (other_sid, other_serial) = (sid(&other), serial(&other));
+    // A statement of its own (hard parsed), so its bind is captured.
+    let marker = format!(
+        "pythia_binds_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let n: i64 = other
+        .query_row_as(
+            &format!("select /* {marker} */ count(*) from dual where dummy = :1"),
+            &[&"X"],
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+    let parts = [DetailTab::Sql, DetailTab::Plan, DetailTab::Columns];
+    let d = queries::session_details(&conn, other_sid, other_serial, &parts);
+    assert!(d.errors.is_empty(), "{:?}", d.errors);
+    assert_eq!(d.loaded, parts);
+    assert!(
+        d.prev_sql_text.as_deref().unwrap_or("").contains(&marker),
+        "{:?}",
+        d.prev_sql_text
+    );
+    assert!(
+        d.prev_binds.iter().any(|b| b.value.as_deref() == Some("X")),
+        "{:?}",
+        d.prev_binds
+    );
+    assert!(!d.plan.is_empty());
+    assert!(
+        d.columns
+            .iter()
+            .any(|(c, v)| c == "SID" && *v == other_sid.to_string()),
+        "{:?}",
+        d.columns
+    );
+    assert!(
+        d.overview.is_none() && d.stats.is_empty(),
+        "only the parts asked for"
+    );
+
+    // While it runs a package's procedure, the overview names it.
+    conn.execute(
+        "create or replace package pythia_mon_plsql as procedure wait_a_bit; end;",
+        &[],
+    )
+    .unwrap();
+    conn.execute(
+        "create or replace package body pythia_mon_plsql as \
+           procedure wait_a_bit is begin dbms_session.sleep(3); end; end;",
+        &[],
+    )
+    .unwrap();
+    let running = thread::spawn(move || {
+        other
+            .execute("begin pythia_mon_plsql.wait_a_bit; end;", &[])
+            .unwrap();
+    });
+    let mut overview = None;
+    wait_for("the PL/SQL it runs", || {
+        let d = queries::session_details(&conn, other_sid, other_serial, &[DetailTab::Overview]);
+        let o = d.overview.unwrap();
+        let found = o
+            .plsql
+            .iter()
+            .any(|u| u.name == "PYTHIA_MON_PLSQL" && u.subprogram.as_deref() == Some("WAIT_A_BIT"));
+        if found {
+            overview = Some(o);
+        }
+        found
+    });
+    let o = overview.unwrap();
+    eprintln!("{o:#?}");
+    assert!(
+        o.client.iter().any(|(n, _)| n == "Program"),
+        "{:?}",
+        o.client
+    );
+    assert!(o.process.is_some());
+    assert!(!o.time_model.is_empty());
+    assert!(o.connection.iter().any(|(n, _)| n == "Network encryption"));
+    running.join().unwrap();
+    conn.execute("drop package pythia_mon_plsql", &[]).unwrap();
+}
+
+/// SQL details (#74): text, totals, child cursors (a second one for a bind
+/// of another type, with the reason), the plan and captured binds of a
+/// child.
+#[test]
+fn sql_details_of_a_statement() {
+    let Some(conn) = dba() else { return };
+    let other = open_dba();
+    let marker = format!(
+        "pythia_sqldetail_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let sql = format!("select /* {marker} */ count(*) from dual where :1 is not null");
+    let n: i64 = other.query_row_as(&sql, &[&"X"]).unwrap();
+    assert_eq!(n, 1);
+    // A number this time: the cursor can't be shared (bind mismatch).
+    let n: i64 = other.query_row_as(&sql, &[&42_i64]).unwrap();
+    assert_eq!(n, 1);
+    let sql_id: String = conn
+        .query_row_as(
+            "select sql_id from v$sql where sql_text like '%' || :1 || '%' \
+               and sql_text not like '%v$sql%' and rownum = 1",
+            &[&marker],
+        )
+        .unwrap();
+
+    let d = queries::sql_detail(&conn, &sql_id, None);
+    assert!(d.errors.is_empty(), "{:?}", d.errors);
+    assert!(d.text.as_deref().unwrap_or("").contains(&marker));
+    assert!(d.stats.as_ref().unwrap().executions >= 2.0, "{:?}", d.stats);
+    assert!(d.children.len() >= 2, "{:?}", d.children);
+    assert!(!d.plan.is_empty());
+    assert!(d.child.is_some());
+
+    let first = d.children[0].child;
+    let d = queries::sql_detail(&conn, &sql_id, Some(first));
+    assert_eq!(d.child, Some(first));
+    assert!(
+        d.binds.iter().any(|b| b.value.as_deref() == Some("X")),
+        "{:?}",
+        d.binds
+    );
+    let second = d.children[1].child;
+    let d = queries::sql_detail(&conn, &sql_id, Some(second));
+    eprintln!("not shared: {:?}", d.not_shared);
+    assert!(!d.not_shared.is_empty(), "why child {second} isn't shared");
+
+    // A statement gone from the shared pool.
+    let d = queries::sql_detail(&conn, "0000000000000", None);
+    assert!(d.text.is_none() && d.children.is_empty() && d.errors.is_empty());
+}
+
+/// Wait events for the dashboard's rates and an event's histogram (#74).
+#[test]
+fn wait_events_and_histogram() {
+    let Some(conn) = dba() else { return };
+    let events = queries::system_events(&conn).unwrap();
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|e| e.wait_class != "Idle"));
+    let busiest = events
+        .iter()
+        .max_by(|a, b| a.waits.total_cmp(&b.waits))
+        .unwrap();
+    let buckets = queries::event_histogram(&conn, &busiest.event).unwrap();
+    assert!(!buckets.is_empty(), "{busiest:?}");
+    assert!(buckets.windows(2).all(|w| w[0].0 < w[1].0), "{buckets:?}");
+    let snap = queries::dashboard_snapshot(&conn);
+    assert!(!snap.events.is_empty(), "{:?}", snap.errors);
+}
+
+/// What the management packs keep about a session and a statement (#74):
+/// activity from ASH, a filtered ASH report, plan history from AWR and SQL
+/// Monitor's executions and report. Skips a pack that isn't enabled.
+#[test]
+fn management_pack_history() {
+    use queries::Scope;
+    let Some(conn) = dba() else { return };
+    let caps = queries::capabilities(&conn).unwrap();
+    let worker = open_dba();
+    let (worker_sid, worker_serial) = (sid(&worker), serial(&worker));
+    let marker = format!(
+        "pythia_history_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    // On CPU for about three seconds: ASH samples it.
+    worker
+        .execute(
+            "declare n number := 0; t pls_integer := dbms_utility.get_time; \
+             begin while dbms_utility.get_time - t < 300 loop n := n + 1; end loop; end;",
+            &[],
+        )
+        .unwrap();
+    // Hinted MONITOR: SQL Monitor watches it however short.
+    let sql = format!(
+        "select /*+ monitor */ /* {marker} */ count(*) from dual connect by level <= 10000"
+    );
+    let n: i64 = worker.query_row_as(&sql, &[]).unwrap();
+    assert_eq!(n, 10000);
+    let sql_id: String = conn
+        .query_row_as(
+            "select sql_id from v$sql where sql_text like '%' || :1 || '%' \
+               and sql_text not like '%v$sql%' and rownum = 1",
+            &[&marker],
+        )
+        .unwrap();
+    let session = Scope::Session {
+        sid: worker_sid,
+        serial: worker_serial,
+    };
+
+    if caps.ash().is_ok() {
+        let mut activity = None;
+        wait_for("ASH samples of the session", || {
+            let a = queries::ash_activity(&conn, &session, 10).unwrap();
+            let found = a.samples > 0;
+            activity = Some(a);
+            found
+        });
+        let a = activity.unwrap();
+        assert!(a.timeline.iter().any(|t| t.1 == "CPU"), "{a:?}");
+        assert!(a.events.iter().any(|e| e.0 == "ON CPU"), "{a:?}");
+        let report = queries::ash_report_for(&conn, Some(&session), 10, false).unwrap();
+        assert!(!report.trim().is_empty());
+    } else {
+        eprintln!("Diagnostics Pack not enabled, skipping ASH");
+    }
+
+    if caps.plan_history().is_ok() {
+        // Colored, AWR keeps it whatever it cost: run again after coloring,
+        // so the next snapshot (also another test's) has it.
+        conn.execute(
+            "begin dbms_workload_repository.add_colored_sql(:1); end;",
+            &[&sql_id],
+        )
+        .unwrap();
+        // Under load (the whole suite) the cursor may age out of the small
+        // shared pool before the snapshot: run and snapshot again.
+        let mut history = Vec::new();
+        for _ in 0..5 {
+            let _: i64 = worker.query_row_as(&sql, &[]).unwrap();
+            queries::awr_create_snapshot(&conn).unwrap();
+            history = queries::plan_history(&conn, &sql_id).unwrap();
+            if !history.is_empty() {
+                break;
+            }
+        }
+        assert!(!history.is_empty(), "the colored statement is in AWR");
+        let plan =
+            queries::awr_plan(&conn, &sql_id, history[0].plan_hash, history[0].dbid).unwrap();
+        assert!(plan.iter().any(|l| l.contains("CONNECT BY")), "{plan:?}");
+        conn.execute(
+            "begin dbms_workload_repository.remove_colored_sql(:1); end;",
+            &[&sql_id],
+        )
+        .unwrap();
+    } else {
+        eprintln!("Diagnostics Pack not enabled, skipping plan history");
+    }
+
+    if caps.sql_monitor().is_ok() {
+        let scope = Scope::Sql(sql_id.clone());
+        let mut executions = Vec::new();
+        wait_for("the monitored execution", || {
+            executions = queries::monitored_executions(&conn, &scope).unwrap();
+            !executions.is_empty()
+        });
+        let e = &executions[0];
+        assert_eq!((e.sid, e.serial), (worker_sid, worker_serial));
+        assert!(
+            !queries::monitored_executions(&conn, &session)
+                .unwrap()
+                .is_empty()
+        );
+        let package = caps.sql_monitor_package.unwrap();
+        let text = queries::sql_monitor_report(&conn, package, e, false).unwrap();
+        assert!(text.contains("SQL Monitoring Report"), "{text}");
+        let html = queries::sql_monitor_report(&conn, package, e, true).unwrap();
+        assert!(html.to_lowercase().contains("<html"));
+    } else {
+        eprintln!("Tuning Pack not enabled, skipping SQL Monitor");
+    }
+}
+
+/// Tablespaces: files and largest segments, or for a temporary one its
+/// files; the sessions using the most PGA (#74).
+#[test]
+fn tablespace_and_pga_drill_down() {
+    let Some(conn) = dba() else { return };
+    let sysaux = queries::tablespace_detail(&conn, "SYSAUX").unwrap();
+    assert!(!sysaux.temporary);
+    assert!(
+        !sysaux.files.is_empty() && !sysaux.segments.is_empty(),
+        "{sysaux:?}"
+    );
+    assert!(sysaux.segments.windows(2).all(|w| w[0].2 >= w[1].2));
+    let temp: String = conn
+        .query_row_as(
+            "select tablespace_name from dba_tablespaces where contents = 'TEMPORARY' and rownum = 1",
+            &[],
+        )
+        .unwrap();
+    let temp = queries::tablespace_detail(&conn, &temp).unwrap();
+    assert!(temp.temporary && !temp.files.is_empty(), "{temp:?}");
+    let users = queries::pga_users(&conn).unwrap();
+    assert!(!users.is_empty());
+    assert!(users.windows(2).all(|w| w[0].allocated >= w[1].allocated));
 }

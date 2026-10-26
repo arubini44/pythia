@@ -309,7 +309,7 @@ fn report_title(title: &str) -> String {
 }
 
 /// Writes an HTML report to the temp directory.
-fn write_report(title: &str, html: &str) -> std::io::Result<PathBuf> {
+pub(crate) fn write_report(title: &str, html: &str) -> std::io::Result<PathBuf> {
     let safe: String = title
         .chars()
         .map(|c| {

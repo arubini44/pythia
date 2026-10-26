@@ -8,7 +8,9 @@ use pythia_db::DbError;
 
 use super::style::{self, Palette, duration};
 use super::{Refresh, Want, Wants, refresh_selector};
-use crate::queries::{BlockingNode, Capabilities, SessionRow, build_blocking_tree, explain_error};
+use crate::queries::{
+    BlockingNode, Capabilities, SessionRow, Transaction, build_blocking_tree, explain_error,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Mode {
@@ -32,11 +34,76 @@ enum SortCol {
     Blocker,
 }
 
-struct KillConfirm {
+pub(crate) struct KillConfirm {
     sid: i64,
     serial: i64,
     who: String,
     immediate: bool,
+    /// Its open transaction: what a kill rolls back (None while it's read).
+    transaction: Option<Result<Option<Transaction>, String>>,
+}
+
+impl KillConfirm {
+    /// The transaction of the session it is for, as read.
+    pub(crate) fn on_transaction(
+        &mut self,
+        sid: i64,
+        serial: i64,
+        result: &Result<Option<Transaction>, String>,
+    ) {
+        if (self.sid, self.serial) == (sid, serial) {
+            self.transaction = Some(result.clone());
+        }
+    }
+}
+
+/// Sessions of one user, program or machine, or active ones in a wait
+/// class: what the dashboard's bars open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldFilter {
+    User(String),
+    Program(String),
+    Machine(String),
+    /// "CPU" for sessions on CPU, as the dashboard counts them.
+    WaitClass(String),
+    /// Sessions waiting on this event now.
+    Event(String),
+}
+
+impl FieldFilter {
+    fn matches(&self, s: &SessionRow) -> bool {
+        // The dashboard groups NULL as "(unknown)".
+        let is = |v: &Option<String>, want: &str| v.as_deref().unwrap_or("(unknown)") == want;
+        match self {
+            FieldFilter::User(u) => is(&s.username, u),
+            FieldFilter::Program(p) => is(&s.program, p),
+            FieldFilter::Machine(m) => is(&s.machine, m),
+            FieldFilter::Event(e) => {
+                s.state.as_deref() == Some("WAITING") && s.event.as_deref() == Some(e.as_str())
+            }
+            FieldFilter::WaitClass(c) => {
+                let waiting = s.state.as_deref() == Some("WAITING");
+                s.is_active()
+                    && !s.is_self
+                    && if c == "CPU" {
+                        !waiting
+                    } else {
+                        waiting && s.wait_class.as_deref() == Some(c.as_str())
+                    }
+            }
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            FieldFilter::User(u) => format!("user {u}"),
+            FieldFilter::Program(p) => format!("program {p}"),
+            FieldFilter::Machine(m) => format!("machine {m}"),
+            FieldFilter::WaitClass(c) if c == "CPU" => "active on CPU".into(),
+            FieldFilter::WaitClass(c) => format!("active, waiting: {c}"),
+            FieldFilter::Event(e) => format!("waiting on {e}"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -44,6 +111,8 @@ pub struct SessionsView {
     pub refresh: Refresh,
     mode: Mode,
     filter: String,
+    /// An exact filter from the dashboard, shown as a chip.
+    field: Option<FieldFilter>,
     background: bool,
     active_only: bool,
     rows: Vec<SessionRow>,
@@ -65,6 +134,24 @@ impl SessionsView {
         self.mode = Mode::Blocking;
     }
 
+    /// Shows the session list, with only the sessions `field` matches.
+    pub fn show_table(&mut self, field: Option<FieldFilter>) {
+        self.mode = Mode::Table;
+        self.field = field;
+    }
+
+    /// The transaction a kill dialog asked for.
+    pub(crate) fn on_transaction(
+        &mut self,
+        sid: i64,
+        serial: i64,
+        result: &Result<Option<Transaction>, String>,
+    ) {
+        if let Some(k) = &mut self.confirm {
+            k.on_transaction(sid, serial, result);
+        }
+    }
+
     pub(crate) fn refresh_now(&mut self) {
         self.force = true;
     }
@@ -84,6 +171,9 @@ impl SessionsView {
 
     fn matches(&self, s: &SessionRow) -> bool {
         if self.active_only && !s.is_active() && !s.is_blocked() {
+            return false;
+        }
+        if self.field.as_ref().is_some_and(|f| !f.matches(s)) {
             return false;
         }
         let f = self.filter.trim().to_lowercase();
@@ -126,6 +216,16 @@ impl SessionsView {
                     .hint_text("Filter: user, program, SQL_ID, event…")
                     .desired_width(240.0),
             );
+            if let Some(field) = &self.field {
+                let chip = egui::Button::new(
+                    RichText::new(format!("{}  ✕", field.label()))
+                        .color(ui.visuals().hyperlink_color),
+                )
+                .small();
+                if ui.add(chip).on_hover_text("Show all sessions").clicked() {
+                    self.field = None;
+                }
+            }
             ui.checkbox(&mut self.active_only, "Active only");
             if ui.checkbox(&mut self.background, "Background").changed() {
                 refresh_now = true;
@@ -184,12 +284,9 @@ impl SessionsView {
             Mode::Blocking => self.blocking(ui, caps, &mut actions),
         }
         for a in actions {
-            match a {
-                RowAction::Want(w) => wants.push(w),
-                RowAction::Kill(k) => self.confirm = Some(k),
-            }
+            a.apply(&mut self.confirm, wants);
         }
-        self.confirm_ui(ui.ctx(), wants);
+        kill_dialog(ui.ctx(), &mut self.confirm, wants);
     }
 
     fn sorted(&self) -> Vec<&SessionRow> {
@@ -352,9 +449,22 @@ impl SessionsView {
                                 s.logon_time
                             ));
                     });
+                    let open_sql = std::cell::Cell::new(false);
                     cell(&mut row, &|ui| {
-                        ui.label(RichText::new(s.sql_id.as_deref().unwrap_or("")).monospace());
+                        if let Some(id) = &s.sql_id
+                            && ui
+                                .link(RichText::new(id).monospace())
+                                .on_hover_text("Show the statement")
+                                .clicked()
+                        {
+                            open_sql.set(true);
+                        }
                     });
+                    if open_sql.get()
+                        && let Some(sql_id) = s.sql_id.clone()
+                    {
+                        actions.push(RowAction::Want(Want::OpenSqlDetail { sql_id }));
+                    }
                     cell(&mut row, &|ui| event_label(ui, s));
                     cell(&mut row, &|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -389,6 +499,7 @@ impl SessionsView {
                         actions.push(RowAction::Want(Want::OpenDetail {
                             sid: s.sid,
                             serial: s.serial,
+                            tab: None,
                         }));
                     }
                     resp.context_menu(|ui| session_menu(ui, s, caps, actions));
@@ -443,55 +554,99 @@ impl SessionsView {
             }
         }
     }
+}
 
-    fn confirm_ui(&mut self, ctx: &egui::Context, wants: &mut Wants) {
-        let Some(k) = &self.confirm else {
-            return;
-        };
-        let mut decision = None;
-        let modal = egui::Modal::new(egui::Id::new("kill-session")).show(ctx, |ui| {
-            ui.set_max_width(400.0);
-            ui.heading(if k.immediate {
-                "Kill session immediately"
-            } else {
-                "Kill session"
-            });
-            ui.add_space(6.0);
-            ui.label(format!(
-                "Kill session {},{} ({})? Its open transaction is rolled back.",
-                k.sid, k.serial, k.who
-            ));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                let kill = egui::Button::new(RichText::new("Kill").color(Color32::WHITE))
-                    .fill(Palette::RED);
-                if ui.add(kill).clicked() {
-                    decision = Some(true);
-                }
-                if ui.button("Cancel").clicked() {
-                    decision = Some(false);
-                }
-            });
+/// Asks before killing a session, saying what gets rolled back.
+pub(crate) fn kill_dialog(
+    ctx: &egui::Context,
+    confirm: &mut Option<KillConfirm>,
+    wants: &mut Wants,
+) {
+    let Some(k) = confirm else {
+        return;
+    };
+    let mut decision = None;
+    let modal = egui::Modal::new(egui::Id::new("kill-session")).show(ctx, |ui| {
+        ui.set_max_width(400.0);
+        ui.heading(if k.immediate {
+            "Kill session immediately"
+        } else {
+            "Kill session"
         });
-        if modal.should_close() && decision.is_none() {
-            decision = Some(false);
-        }
-        if let Some(yes) = decision {
-            if yes {
-                wants.push(Want::Kill {
-                    sid: k.sid,
-                    serial: k.serial,
-                    immediate: k.immediate,
+        ui.add_space(6.0);
+        ui.label(format!("Kill session {},{} ({})?", k.sid, k.serial, k.who));
+        match &k.transaction {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("Checking its transaction…");
                 });
             }
-            self.confirm = None;
+            Some(Ok(None)) => {
+                ui.label("It has no open transaction.");
+            }
+            Some(Ok(Some(t))) => {
+                ui.label(
+                    RichText::new(format!(
+                        "Its transaction, open since {}, is rolled back: {} undo records \
+                         in {} blocks.",
+                        t.start, t.undo_records, t.undo_blocks
+                    ))
+                    .color(Palette::ORANGE),
+                );
+            }
+            Some(Err(e)) => {
+                ui.label("Its open transaction, if any, is rolled back.");
+                ui.weak(e);
+            }
         }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            let kill =
+                egui::Button::new(RichText::new("Kill").color(Color32::WHITE)).fill(Palette::RED);
+            if ui.add(kill).clicked() {
+                decision = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                decision = Some(false);
+            }
+        });
+    });
+    if modal.should_close() && decision.is_none() {
+        decision = Some(false);
+    }
+    if let Some(yes) = decision {
+        if yes {
+            wants.push(Want::Kill {
+                sid: k.sid,
+                serial: k.serial,
+                immediate: k.immediate,
+            });
+        }
+        *confirm = None;
     }
 }
 
-enum RowAction {
+pub(crate) enum RowAction {
     Want(Want),
     Kill(KillConfirm),
+}
+
+impl RowAction {
+    /// Carries out a row action: a want goes to the driver, a kill opens
+    /// the confirmation (and reads what it would roll back).
+    pub(crate) fn apply(self, confirm: &mut Option<KillConfirm>, wants: &mut Wants) {
+        match self {
+            RowAction::Want(w) => wants.push(w),
+            RowAction::Kill(k) => {
+                wants.push(Want::Transaction {
+                    sid: k.sid,
+                    serial: k.serial,
+                });
+                *confirm = Some(k);
+            }
+        }
+    }
 }
 
 fn event_label(ui: &mut Ui, s: &SessionRow) {
@@ -606,6 +761,7 @@ fn node_ui(
         actions.push(RowAction::Want(Want::OpenDetail {
             sid: s.sid,
             serial: s.serial,
+            tab: None,
         }));
     }
     resp.context_menu(|ui| session_menu(ui, s, caps, actions));
@@ -622,21 +778,15 @@ fn session_menu(
     caps: Option<&Capabilities>,
     actions: &mut Vec<RowAction>,
 ) {
-    let who = s
-        .username
-        .clone()
-        .unwrap_or_else(|| s.program.clone().unwrap_or_default());
-    // Only the SID of a blocker missing from the list is known: its serial#
-    // would be a guess.
-    let unknown = "Not in the session list: only its SID is known";
     if ui
         .add_enabled(!s.is_unknown(), egui::Button::new("Details"))
-        .on_disabled_hover_text(unknown)
+        .on_disabled_hover_text(UNKNOWN)
         .clicked()
     {
         actions.push(RowAction::Want(Want::OpenDetail {
             sid: s.sid,
             serial: s.serial,
+            tab: None,
         }));
         ui.close();
     }
@@ -644,18 +794,41 @@ fn session_menu(
         ui.ctx().copy_text(s.handle());
         ui.close();
     }
-    if let Some(id) = &s.sql_id
-        && ui.button("Copy SQL_ID").clicked()
-    {
-        ui.ctx().copy_text(id.clone());
-        ui.close();
+    if let Some(id) = &s.sql_id {
+        if ui.button("SQL details").clicked() {
+            actions.push(RowAction::Want(Want::OpenSqlDetail { sql_id: id.clone() }));
+            ui.close();
+        }
+        if ui.button("Copy SQL_ID").clicked() {
+            ui.ctx().copy_text(id.clone());
+            ui.close();
+        }
     }
     ui.separator();
+    session_actions(ui, s, caps, actions);
+}
+
+/// Only the SID of a blocker missing from the list is known: its serial#
+/// would be a guess.
+const UNKNOWN: &str = "Not in the session list: only its SID is known";
+
+/// What can be done to a session: cancel, kill, disconnect, trace. In the
+/// session list's menu and the session details.
+pub(crate) fn session_actions(
+    ui: &mut Ui,
+    s: &SessionRow,
+    caps: Option<&Capabilities>,
+    actions: &mut Vec<RowAction>,
+) {
+    let who = s
+        .username
+        .clone()
+        .unwrap_or_else(|| s.program.clone().unwrap_or_default());
     let possible = !s.is_self && !s.background && !s.is_unknown();
     let item = |ui: &mut Ui, label: &str, allowed: std::result::Result<(), String>| {
         let hint = allowed.as_ref().err().cloned().unwrap_or_else(|| {
             if s.is_unknown() {
-                unknown.into()
+                UNKNOWN.into()
             } else {
                 "Not possible for this session".into()
             }
@@ -666,67 +839,56 @@ fn session_menu(
     let checking = || Err("Checking privileges…".to_owned());
     let control = caps.map_or_else(checking, |c| c.session_control());
     let cancel = caps.map_or_else(checking, |c| c.cancel_sql());
+    let (sid, serial) = (s.sid, s.serial);
     if item(ui, "Cancel current SQL", cancel).clicked() {
-        actions.push(RowAction::Want(Want::CancelSql {
-            sid: s.sid,
-            serial: s.serial,
-        }));
+        actions.push(RowAction::Want(Want::CancelSql { sid, serial }));
         ui.close();
     }
-    if item(ui, "Kill session…", control.clone()).clicked() {
-        actions.push(RowAction::Kill(KillConfirm {
-            sid: s.sid,
-            serial: s.serial,
-            who: who.clone(),
-            immediate: false,
-        }));
-        ui.close();
+    for (label, immediate) in [
+        ("Kill session…", false),
+        ("Kill session immediately…", true),
+    ] {
+        if item(ui, label, control.clone()).clicked() {
+            actions.push(RowAction::Kill(KillConfirm {
+                sid,
+                serial,
+                who: who.clone(),
+                immediate,
+                transaction: None,
+            }));
+            ui.close();
+        }
     }
-    if item(ui, "Kill session immediately…", control).clicked() {
-        actions.push(RowAction::Kill(KillConfirm {
-            sid: s.sid,
-            serial: s.serial,
-            who,
-            immediate: true,
-        }));
+    if item(ui, "Disconnect after transaction", control)
+        .on_hover_text("Ends the session once its open transaction is committed or rolled back")
+        .clicked()
+    {
+        actions.push(RowAction::Want(Want::Disconnect { sid, serial }));
         ui.close();
     }
     ui.separator();
     let tracing = if s.is_unknown() {
-        Err(unknown.to_owned())
+        Err(UNKNOWN.to_owned())
     } else {
         caps.map_or(Err("Checking privileges…".to_owned()), |c| c.tracing())
     };
     let hint = tracing.as_ref().err().cloned().unwrap_or_default();
+    // The one that changes something.
+    let (label, on) = if s.sql_trace {
+        ("Disable SQL trace", false)
+    } else {
+        ("Enable SQL trace (waits, binds)", true)
+    };
     if ui
-        .add_enabled(
-            tracing.is_ok(),
-            egui::Button::new("Enable SQL trace (waits, binds)"),
-        )
+        .add_enabled(tracing.is_ok(), egui::Button::new(label))
         .on_disabled_hover_text(&hint)
         .clicked()
     {
-        actions.push(RowAction::Want(Want::Trace {
-            sid: s.sid,
-            serial: s.serial,
-            on: true,
-        }));
-        ui.close();
-    }
-    if ui
-        .add_enabled(tracing.is_ok(), egui::Button::new("Disable SQL trace"))
-        .on_disabled_hover_text(&hint)
-        .clicked()
-    {
-        actions.push(RowAction::Want(Want::Trace {
-            sid: s.sid,
-            serial: s.serial,
-            on: false,
-        }));
+        actions.push(RowAction::Want(Want::Trace { sid, serial, on }));
         ui.close();
     }
     let files = if s.is_unknown() {
-        Err(unknown.to_owned())
+        Err(UNKNOWN.to_owned())
     } else {
         caps.map_or(Err("Checking privileges…".to_owned()), |c| {
             c.trace_files()
@@ -738,7 +900,107 @@ fn session_menu(
         .on_disabled_hover_text(&hint)
         .clicked()
     {
-        actions.push(RowAction::Want(Want::SessionTraceFile { sid: s.sid }));
+        actions.push(RowAction::Want(Want::SessionTraceFile { sid }));
         ui.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(user: &str, state: &str, wait_class: &str) -> SessionRow {
+        SessionRow {
+            username: Some(user.into()),
+            program: Some("sqlplus".into()),
+            machine: None,
+            status: "ACTIVE".into(),
+            state: Some(state.into()),
+            wait_class: Some(wait_class.into()),
+            ..SessionRow::default()
+        }
+    }
+
+    /// The kill dialog says what gets rolled back, and Kill asks for it.
+    #[test]
+    fn kill_dialog_shows_the_transaction() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+        let confirm = KillConfirm {
+            sid: 42,
+            serial: 7,
+            who: "SCOTT".into(),
+            immediate: false,
+            transaction: None,
+        };
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(600.0, 400.0))
+            .build_ui_state(
+                |ui, (confirm, wants): &mut (Option<KillConfirm>, Wants)| {
+                    kill_dialog(ui.ctx(), confirm, wants)
+                },
+                (Some(confirm), Wants::default()),
+            );
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_by_label("Checking its transaction…")
+                .is_some()
+        );
+        let tx = Transaction {
+            start: "2026-10-26 12:00:00".into(),
+            undo_blocks: 3,
+            undo_records: 42,
+            status: "ACTIVE".into(),
+        };
+        if let Some(k) = &mut harness.state_mut().0 {
+            k.on_transaction(42, 7, &Ok(Some(tx)));
+        }
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_by_label_contains("is rolled back: 42 undo records")
+                .is_some()
+        );
+        harness.get_by_label("Kill").click();
+        harness.run_steps(2);
+        let (confirm, wants) = harness.state();
+        assert!(confirm.is_none());
+        assert!(matches!(
+            wants.list.as_slice(),
+            [Want::Kill {
+                sid: 42,
+                serial: 7,
+                immediate: false
+            }]
+        ));
+    }
+
+    /// The dashboard's bars open the sessions they count.
+    #[test]
+    fn field_filters() {
+        let io = session("SCOTT", "WAITING", "User I/O");
+        let cpu = session("HR", "WAITED KNOWN TIME", "User I/O");
+        let idle = SessionRow {
+            status: "INACTIVE".into(),
+            ..session("SCOTT", "WAITING", "Idle")
+        };
+        let user = FieldFilter::User("SCOTT".into());
+        assert!(user.matches(&io) && user.matches(&idle) && !user.matches(&cpu));
+        assert!(FieldFilter::Program("sqlplus".into()).matches(&io));
+        assert!(
+            FieldFilter::Machine("(unknown)".into()).matches(&io),
+            "NULL"
+        );
+        let waiting = FieldFilter::WaitClass("User I/O".into());
+        assert!(waiting.matches(&io) && !waiting.matches(&cpu) && !waiting.matches(&idle));
+        let on_cpu = FieldFilter::WaitClass("CPU".into());
+        assert!(on_cpu.matches(&cpu) && !on_cpu.matches(&io));
+        let reading = SessionRow {
+            event: Some("db file sequential read".into()),
+            ..io.clone()
+        };
+        let event = FieldFilter::Event("db file sequential read".into());
+        assert!(event.matches(&reading) && !event.matches(&io));
     }
 }

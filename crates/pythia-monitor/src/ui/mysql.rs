@@ -167,9 +167,9 @@ impl MySqlDashboardView {
                 activity(ui, snap);
                 ui.add_space(8.0);
                 ui.columns(3, |cols| {
-                    top_list(&mut cols[0], "Connections by user", &snap.by_user);
-                    top_list(&mut cols[1], "Connections by host", &snap.by_host);
-                    top_list(&mut cols[2], "Connections by database", &snap.by_db);
+                    top_list(&mut cols[0], "Connections by user", &snap.by_user, None);
+                    top_list(&mut cols[1], "Connections by host", &snap.by_host, None);
+                    top_list(&mut cols[2], "Connections by database", &snap.by_db, None);
                 });
                 if snap.own_threads_only {
                     ui.weak(
@@ -446,7 +446,7 @@ fn activity(ui: &mut Ui, snap: &MySqlSnapshot) {
             .iter()
             .map(|(state, n)| (state.clone(), *n as f64, state_color(state)))
             .collect();
-        style::stacked_bar(ui, &segments);
+        style::stacked_bar(ui, &segments, None);
     });
 }
 

@@ -23,8 +23,10 @@
 mod awr;
 mod dashboard;
 mod detail;
+mod history;
 mod mysql;
 mod sessions;
+mod sql_detail;
 pub mod style;
 mod trace;
 
@@ -36,11 +38,13 @@ use pythia_db::{DbError, DbKind, Dialect, RunFn, TaskFn, TaskResult};
 
 use crate::queries::{self, Capabilities};
 
+pub use crate::queries::DetailTab;
 pub use awr::AwrView;
 pub use dashboard::{DashboardView, Refresh};
 pub use detail::SessionDetailView;
 pub use mysql::MySqlDashboardView;
-pub use sessions::SessionsView;
+pub use sessions::{FieldFilter, SessionsView};
+pub use sql_detail::SqlDetailView;
 pub use trace::TraceView;
 
 /// Identifies a request inside one [`Monitor`].
@@ -69,6 +73,17 @@ pub enum MonitorAction {
     CopyText(String),
     /// Have the host's AI assistant analyze slow SQL or a report.
     Analyze(Analysis),
+    /// Open a database object in the IDE: a program window (at
+    /// `subprogram`) for PL/SQL, else its object view. `object_type` as in
+    /// `ALL_OBJECTS`, e.g. `PACKAGE`.
+    OpenObject {
+        owner: String,
+        name: String,
+        object_type: String,
+        subprogram: Option<String>,
+    },
+    /// Open a SQL window with this text, on the monitor's connection.
+    OpenSql(String),
 }
 
 /// Slow SQL or a report to have analyzed, with what the monitor knows.
@@ -114,9 +129,11 @@ pub(crate) enum Want {
     Sessions {
         background: bool,
     },
+    /// The header of session details and the parts asked for.
     Detail {
         sid: i64,
         serial: i64,
+        parts: Vec<DetailTab>,
     },
     Kill {
         sid: i64,
@@ -126,6 +143,47 @@ pub(crate) enum Want {
     CancelSql {
         sid: i64,
         serial: i64,
+    },
+    /// Disconnect once its transaction has ended.
+    Disconnect {
+        sid: i64,
+        serial: i64,
+    },
+    /// A session's open transaction, for the kill dialog.
+    Transaction {
+        sid: i64,
+        serial: i64,
+    },
+    /// A statement in the shared pool, with one of its children.
+    SqlDetail {
+        sql_id: String,
+        child: Option<i64>,
+    },
+    /// Open a statement's details tab (handled by the driver, no task).
+    OpenSqlDetail {
+        sql_id: String,
+    },
+    /// How long the waits on an event took, for the dashboard.
+    EventHistogram {
+        event: String,
+    },
+    /// A tablespace's files and largest segments or temp users.
+    Tablespace {
+        name: String,
+    },
+    /// The sessions using the most PGA.
+    PgaUsers,
+    /// What the management packs keep about a session or statement.
+    History {
+        scope: queries::Scope,
+        part: history::HistoryPart,
+    },
+    /// The SQL Monitor report of an execution.
+    MonitorReport {
+        scope: queries::Scope,
+        execution: Box<queries::MonitoredExecution>,
+        title: String,
+        html: bool,
     },
     Trace {
         sid: i64,
@@ -157,15 +215,35 @@ pub(crate) enum Want {
     },
     /// Switch to the blocking tree (handled by the driver, no task).
     ShowBlocking,
-    /// Switch to the session list.
-    ShowSessions,
-    /// Open a session detail tab (handled by the driver, no task).
+    /// Switch to the session list, filtered to one user, program, machine
+    /// or wait class.
+    ShowSessions(Option<FieldFilter>),
+    /// Open a session detail tab, on one of its tabs (handled by the
+    /// driver, no task).
     OpenDetail {
         sid: i64,
         serial: i64,
+        tab: Option<DetailTab>,
     },
     /// Hand to the host's assistant (no task).
     Analyze(Analysis),
+    /// Something for the host to do (no task).
+    Act(MonitorAction),
+}
+
+/// An open details tab: of a session or of a statement.
+enum DetailView {
+    Session(Box<SessionDetailView>),
+    Sql(Box<SqlDetailView>),
+}
+
+impl DetailView {
+    fn title(&self) -> String {
+        match self {
+            DetailView::Session(d) => d.title(),
+            DetailView::Sql(d) => d.title(),
+        }
+    }
 }
 
 /// Result routing for a token.
@@ -175,7 +253,13 @@ enum Job {
     MySqlDashboard,
     Sessions,
     Detail(i64, i64),
+    SqlDetail(String),
+    EventHistogram(String),
+    Tablespace(String),
+    PgaUsers,
+    History(queries::Scope, history::HistoryPart),
     Control(String),
+    Transaction(i64, i64),
     AwrSnapshots,
     Report { html: bool, title: String },
     CreateSnapshot,
@@ -210,12 +294,14 @@ pub struct Monitor {
     pub sessions: SessionsView,
     pub awr: AwrView,
     pub trace: TraceView,
-    details: Vec<SessionDetailView>,
+    details: Vec<DetailView>,
     jobs: HashMap<Token, Job>,
     next_token: Token,
     toast: Option<(String, bool, f64)>,
     /// Follow-up requests produced while handling results.
     deferred: Vec<Want>,
+    /// Things for the host that came out of results (a report to open).
+    actions: Vec<MonitorAction>,
     /// The host has an AI assistant: views offer to analyze with it.
     analyze: bool,
 }
@@ -244,6 +330,7 @@ impl Monitor {
             next_token: 1,
             toast: None,
             deferred: Vec::new(),
+            actions: Vec::new(),
             analyze: false,
         }
     }
@@ -280,7 +367,11 @@ impl Monitor {
 
     /// Opens (or focuses) the detail tab of a session.
     pub fn open_session(&mut self, sid: i64, serial: i64) {
-        self.deferred.push(Want::OpenDetail { sid, serial });
+        self.deferred.push(Want::OpenDetail {
+            sid,
+            serial,
+            tab: None,
+        });
     }
 
     pub fn capabilities(&self) -> Option<&Capabilities> {
@@ -302,7 +393,7 @@ impl Monitor {
             MonitorTab::Sessions => "Sessions".into(),
             MonitorTab::Awr => "AWR / ASH".into(),
             MonitorTab::Trace => "Trace analyzer".into(),
-            MonitorTab::Detail(i) => self.details.get(i).map_or("Session".into(), |d| d.title()),
+            MonitorTab::Detail(i) => self.details.get(i).map_or("Details".into(), |d| d.title()),
         }
     }
 
@@ -377,7 +468,8 @@ impl Monitor {
             MonitorTab::Awr => self.awr.ui(ui, caps, self.caps_pending, &mut wants),
             MonitorTab::Trace => self.trace.ui(ui, caps, &mut wants),
             MonitorTab::Detail(i) => match self.details.get_mut(i) {
-                Some(d) => d.ui(ui, caps, &mut wants),
+                Some(DetailView::Session(d)) => d.ui(ui, caps, &mut wants),
+                Some(DetailView::Sql(d)) => d.ui(ui, caps, &mut wants),
                 None => self.tab = MonitorTab::Sessions,
             },
         }
@@ -392,8 +484,13 @@ impl Monitor {
                 out.actions.push(MonitorAction::Analyze(analysis));
                 continue;
             }
-            if let Want::ShowSessions = want {
+            if let Want::Act(action) = want {
+                out.actions.push(action);
+                continue;
+            }
+            if let Want::ShowSessions(filter) = want {
                 self.tab = MonitorTab::Sessions;
+                self.sessions.show_table(filter);
                 continue;
             }
             if let Want::ShowBlocking = want {
@@ -401,18 +498,31 @@ impl Monitor {
                 self.sessions.show_blocking();
                 continue;
             }
-            if let Want::OpenDetail { sid, serial } = want {
-                let idx = match self
+            if let Want::OpenDetail { sid, serial, tab } = want {
+                let found = self.details.iter().position(
+                    |d| matches!(d, DetailView::Session(s) if s.sid == sid && s.serial == serial),
+                );
+                let idx = found.unwrap_or_else(|| {
+                    let view = SessionDetailView::new(sid, serial);
+                    self.details.push(DetailView::Session(Box::new(view)));
+                    self.details.len() - 1
+                });
+                if let (Some(tab), DetailView::Session(d)) = (tab, &mut self.details[idx]) {
+                    d.show_tab(tab);
+                }
+                self.tab = MonitorTab::Detail(idx);
+                continue;
+            }
+            if let Want::OpenSqlDetail { sql_id } = want {
+                let found = self
                     .details
                     .iter()
-                    .position(|d| d.sid == sid && d.serial == serial)
-                {
-                    Some(i) => i,
-                    None => {
-                        self.details.push(SessionDetailView::new(sid, serial));
-                        self.details.len() - 1
-                    }
-                };
+                    .position(|d| matches!(d, DetailView::Sql(s) if s.sql_id == sql_id));
+                let idx = found.unwrap_or_else(|| {
+                    self.details
+                        .push(DetailView::Sql(Box::new(SqlDetailView::new(sql_id))));
+                    self.details.len() - 1
+                });
                 self.tab = MonitorTab::Detail(idx);
                 continue;
             }
@@ -421,6 +531,15 @@ impl Monitor {
             }
         }
         out.actions.append(&mut self.awr.actions);
+        out.actions.append(&mut self.actions);
+    }
+
+    /// The open session details.
+    fn session_details(&mut self) -> impl Iterator<Item = &mut SessionDetailView> {
+        self.details.iter_mut().filter_map(|d| match d {
+            DetailView::Session(s) => Some(&mut **s),
+            DetailView::Sql(_) => None,
+        })
     }
 
     fn token(&mut self, job: Job) -> Token {
@@ -465,9 +584,9 @@ impl Monitor {
                     ))
                 }),
             ),
-            Want::Detail { sid, serial } => (
+            Want::Detail { sid, serial, parts } => (
                 Job::Detail(sid, serial),
-                Box::new(move |c| boxed(Ok(queries::session_detail(c, sid, serial)))),
+                Box::new(move |c| boxed(Ok(queries::session_details(c, sid, serial, &parts)))),
             ),
             Want::Kill {
                 sid,
@@ -480,6 +599,73 @@ impl Monitor {
             Want::CancelSql { sid, serial } => (
                 Job::Control(format!("SQL of session {sid},{serial} cancelled")),
                 Box::new(move |c| boxed(queries::cancel_sql(c, sid, serial))),
+            ),
+            Want::Disconnect { sid, serial } => (
+                Job::Control(format!(
+                    "Session {sid},{serial} disconnects once its transaction ends"
+                )),
+                Box::new(move |c| boxed(queries::disconnect_session(c, sid, serial))),
+            ),
+            Want::Transaction { sid, serial } => (
+                Job::Transaction(sid, serial),
+                Box::new(move |c| boxed(queries::transaction(c, sid, serial))),
+            ),
+            Want::History { scope, part } => {
+                let (s, p) = (scope.clone(), part.clone());
+                let task: TaskFn = Box::new(move |c| match &p {
+                    history::HistoryPart::Ash => {
+                        boxed(queries::ash_activity(c, &s, history::ASH_MINUTES))
+                    }
+                    history::HistoryPart::Monitored => boxed(queries::monitored_executions(c, &s)),
+                    history::HistoryPart::Plans => match &s {
+                        queries::Scope::Sql(id) => boxed(queries::plan_history(c, id)),
+                        queries::Scope::Session { .. } => {
+                            boxed(Ok(Vec::<queries::PlanHistoryRow>::new()))
+                        }
+                    },
+                    history::HistoryPart::AwrPlan(hash, dbid) => match &s {
+                        queries::Scope::Sql(id) => boxed(queries::awr_plan(c, id, *hash, *dbid)),
+                        queries::Scope::Session { .. } => boxed(Ok(Vec::<String>::new())),
+                    },
+                    history::HistoryPart::Report { html, .. } => boxed(queries::ash_report_for(
+                        c,
+                        Some(&s),
+                        history::ASH_MINUTES,
+                        *html,
+                    )),
+                });
+                (Job::History(scope, part), task)
+            }
+            Want::MonitorReport {
+                scope,
+                execution,
+                title,
+                html,
+            } => {
+                let package = self
+                    .capabilities()
+                    .and_then(|c| c.sql_monitor_package)
+                    .unwrap_or("DBMS_SQL_MONITOR");
+                let task: TaskFn = Box::new(move |c| {
+                    boxed(queries::sql_monitor_report(c, package, &execution, html))
+                });
+                (
+                    Job::History(scope, history::HistoryPart::Report { title, html }),
+                    task,
+                )
+            }
+            Want::Tablespace { name } => (
+                Job::Tablespace(name.clone()),
+                Box::new(move |c| boxed(queries::tablespace_detail(c, &name))),
+            ),
+            Want::PgaUsers => (Job::PgaUsers, Box::new(|c| boxed(queries::pga_users(c)))),
+            Want::EventHistogram { event } => (
+                Job::EventHistogram(event.clone()),
+                Box::new(move |c| boxed(queries::event_histogram(c, &event))),
+            ),
+            Want::SqlDetail { sql_id, child } => (
+                Job::SqlDetail(sql_id.clone()),
+                Box::new(move |c| boxed(Ok(queries::sql_detail(c, &sql_id, child)))),
             ),
             Want::Trace { sid, serial, on } => (
                 Job::Control(format!(
@@ -535,9 +721,11 @@ impl Monitor {
                 Box::new(move |c| boxed(queries::session_trace_file(c, sid))),
             ),
             Want::OpenDetail { .. }
+            | Want::OpenSqlDetail { .. }
             | Want::ShowBlocking
-            | Want::ShowSessions
+            | Want::ShowSessions(_)
             | Want::Analyze(_)
+            | Want::Act(_)
             | Want::MySqlDashboard { .. } => return None,
         };
         Some(MonitorRequest {
@@ -573,17 +761,71 @@ impl Monitor {
             Job::Detail(sid, serial) => {
                 let result = take(result);
                 if let Some(d) = self
-                    .details
-                    .iter_mut()
+                    .session_details()
                     .find(|d| d.sid == sid && d.serial == serial)
                 {
                     d.on_detail(result);
+                }
+            }
+            Job::EventHistogram(event) => self.dashboard.on_histogram(&event, take(result)),
+            Job::Tablespace(name) => self.dashboard.on_tablespace(&name, take(result)),
+            Job::PgaUsers => self.dashboard.on_pga_users(take(result)),
+            Job::History(scope, part) => {
+                use history::{HistoryPart, HistoryResult};
+                let result = match part {
+                    HistoryPart::Ash => HistoryResult::Ash(take(result)),
+                    HistoryPart::Monitored => HistoryResult::Monitored(take(result)),
+                    HistoryPart::Plans => HistoryResult::Plans(take(result)),
+                    HistoryPart::AwrPlan(hash, _) => HistoryResult::AwrPlan(hash, take(result)),
+                    HistoryPart::Report { title, html } => HistoryResult::Report {
+                        title,
+                        html,
+                        result: take(result),
+                    },
+                };
+                let view = self.details.iter_mut().find_map(|d| match (d, &scope) {
+                    (DetailView::Session(v), queries::Scope::Session { sid, serial })
+                        if v.sid == *sid && v.serial == *serial =>
+                    {
+                        Some(&mut v.history)
+                    }
+                    (DetailView::Sql(v), queries::Scope::Sql(id)) if v.sql_id == *id => {
+                        Some(&mut v.history)
+                    }
+                    _ => None,
+                });
+                if let Some(view) = view {
+                    view.on_result(result, &mut self.actions);
+                }
+            }
+            Job::SqlDetail(sql_id) => {
+                let result = take(result);
+                let found = self.details.iter_mut().find_map(|d| match d {
+                    DetailView::Sql(s) if s.sql_id == sql_id => Some(s),
+                    _ => None,
+                });
+                if let Some(d) = found {
+                    d.on_detail(result);
+                }
+            }
+            Job::Transaction(sid, serial) => {
+                let result = take::<Option<queries::Transaction>>(result)
+                    .map_err(|e| queries::explain_error(&e));
+                self.sessions.on_transaction(sid, serial, &result);
+                for d in self
+                    .session_details()
+                    .filter(|d| d.sid == sid && d.serial == serial)
+                {
+                    d.on_transaction(&result);
                 }
             }
             Job::Control(message) => match take::<()>(result) {
                 Ok(()) => {
                     self.toast(message, false, now);
                     self.sessions.refresh_now();
+                    for d in self.session_details() {
+                        d.refresh();
+                    }
                 }
                 Err(e) => self.toast(queries::explain_error(&e), true, now),
             },

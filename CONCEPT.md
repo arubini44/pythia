@@ -341,7 +341,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 
 - [x] Explain plan as a tree grid (cost, cardinality, bytes, predicates)
 - [x] Actual execution plan via `DBMS_XPLAN.DISPLAY_CURSOR` with `GATHER_PLAN_STATISTICS`
-- [ ] SQL Monitor report viewer (if licensed)
+- [x] SQL Monitor report viewer (if licensed): monitored executions of a session or statement, report as text or HTML
 - [x] Statistics of the last execution (`V$MYSTAT` deltas: consistent gets, physical reads, ...)
 - [x] PL/SQL profiler (`DBMS_HPROF`) with result view, hot lines in the editor (per subprogram and statement; double-click opens the line; no editor markers)
 - [x] Trace file helper (enable 10046 for session)
@@ -352,6 +352,10 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Kill session / cancel SQL (with confirmation)
 - [x] Lock tree / blocking sessions
 - [x] Long operations (`V$SESSION_LONGOPS`)
+- [x] Drill-down from the dashboard: tiles, wait classes, users, programs, machines, cursor holders, long operations and wait events lead to the sessions behind them
+- [x] Session details: overview (client, connection, transaction, PGA, temp, PL/SQL, time model, waits), captured binds, the session's own plan, statistic deltas, all columns
+- [x] SQL details: totals, child cursors, plans, binds, why children aren't shared, sessions running it
+- [x] With the Diagnostics Pack: ASH activity of a session or statement, filtered ASH reports, plan history from AWR
 - [x] Tablespace usage overview
 - [x] DBMS_SCHEDULER jobs: list, run, enable/disable, history, create and edit (form with repeat interval presets and the next runs)
 

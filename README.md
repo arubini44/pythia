@@ -95,9 +95,17 @@ for Linux, Windows and macOS.
 **Monitoring**
 - Dashboard with plain-language findings ("session 175 blocks 2 sessions —
   likely an uncommitted transaction"), KPIs and live charts.
-- Sessions with a hierarchical blocking tree, session details, kill/cancel.
-- AWR / ASH reports (only when the Diagnostics Pack is enabled) and a
-  built-in tkprof-style trace analyzer.
+- Every tile, bar and row on the dashboard leads to the sessions behind
+  it; top wait events with their latency histograms.
+- Sessions with a hierarchical blocking tree; session details (client and
+  connection, transaction, PGA, temp, the PL/SQL it runs, time model,
+  captured binds, its own plan, locks, all columns) with cancel, kill,
+  disconnect after transaction and SQL trace.
+- SQL details: totals, child cursors with their plans and binds, why they
+  aren't shared, and the sessions running the statement.
+- With the Diagnostics Pack: ASH activity of a session or statement, ASH
+  and AWR reports and a statement's plan history; with the Tuning Pack:
+  SQL Monitor reports. A built-in tkprof-style trace analyzer.
 
 ![Monitoring dashboard](docs/screenshots/monitor-dashboard.png)
 

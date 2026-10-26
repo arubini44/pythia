@@ -7,6 +7,53 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Monitor: the dashboard leads to what it counts. The *Sessions* tile opens
+  the session list, *Blocked sessions* the blocking tree; a wait class in
+  *Active sessions by wait class* and the bars of *Sessions by user /
+  program / machine* open the session list filtered to them (a chip shows
+  the filter); a *Most open cursors* row opens that session's open cursors,
+  a long operation its session, and a blocking finding has a *Details*
+  link to the blocker. Session details offer the session list's actions in
+  their header (*Session ⏷*): cancel its SQL, kill it, the new *Disconnect
+  after transaction*, and SQL trace on or off as it is now. *Blocked by*
+  and the sessions it blocks are links, and the kill dialog says how much
+  of an open transaction it rolls back (#74).
+- Monitor: session details open on a new *Overview*: OS user, machine,
+  client process and driver, service, network encryption, the open
+  transaction, PGA, temp space and active sorts, long operations, the
+  PL/SQL being run (a link opens it at the subprogram), where its time went
+  (time model) and its waits since logon. The SQL tab shows captured bind
+  values and opens a statement in a SQL window; the plan is the session's
+  own child cursor with peeked binds; statistics show the change since the
+  read before; open cursors group by SQL_ID; locked tables and the row a
+  session waits for open in the IDE; *All columns* lists the `V$SESSION`
+  row. Each tab is read when it is first shown (#74).
+- Monitor: *SQL details*, a tab per statement like a session's: its text
+  (copy, open in a SQL window), totals and per execution since it was
+  loaded, its child cursors with plan hash, executions, bind awareness and
+  SQL profile / baseline / patch; for the child picked, its plan (with
+  actual rows when row source statistics were gathered), captured binds
+  and why it isn't shared with the others; and the sessions running it.
+  Top SQL, the session list (SQL_ID column and menu) and session details
+  open it (#74).
+- Monitor: *Top wait events* on the dashboard: the events waited on most
+  since the refresh before (from `V$SYSTEM_EVENT`), as sessions waiting,
+  waits per second and average wait. An event opens the sessions waiting
+  on it now, and its latency histogram (`V$EVENT_HISTOGRAM`) unfolds below
+  it (#74).
+- Monitor: *History* of a session (a tab of its details) or a statement (a
+  section of its details), from the management packs. With the
+  Diagnostics Pack: its activity in the last hour from Active Session
+  History (per minute and wait class, events, objects, the statements or
+  sessions involved, who blocked it), an ASH report of just it, and a
+  statement's plan history from AWR with the plans AWR kept. With the
+  Tuning Pack: the executions SQL Monitor watched, with their report as
+  text or in the browser. A pack that isn't enabled says so instead, and
+  its views are no longer even probed (#74).
+- Monitor: a tablespace on the dashboard unfolds its files and largest
+  segments, or for a temporary one the sessions using it; the PGA bar
+  unfolds the sessions using the most PGA, each opening its details
+  (#74).
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
 - **Debug…** next to **Test…** on procedures, functions and package
