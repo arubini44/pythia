@@ -57,7 +57,8 @@ mod theme;
 mod to_file;
 
 use std::fs::{self, File};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use pythia_config::Paths;
 use tracing::{error, info, warn};
@@ -71,7 +72,7 @@ fn main() -> anyhow::Result<()> {
     let paths = match paths {
         Ok(paths) => Some(paths),
         Err(e) => {
-            startup_error(&format!(
+            report_error(&format!(
                 "Pythia could not find its settings folder ({e:#}). It starts without saved settings and connections."
             ));
             None
@@ -84,9 +85,15 @@ fn main() -> anyhow::Result<()> {
         warn!("settings from before the rename to Pythia: {problem}");
     }
 
-    let result = run(eframe::Renderer::Wgpu, paths.clone()).or_else(|e| {
+    // Set once the app exists: a later error isn't the renderer's, e.g. the
+    // window system went away (#60).
+    let started = Arc::new(AtomicBool::new(false));
+    let result = run(eframe::Renderer::Wgpu, paths.clone(), &started).or_else(|e| {
+        if started.load(Ordering::SeqCst) {
+            return Err(e);
+        }
         warn!("wgpu renderer failed ({e}), falling back to OpenGL");
-        run(eframe::Renderer::Glow, paths.clone())
+        run(eframe::Renderer::Glow, paths.clone(), &started)
     });
     if let Err(e) = &result {
         let log = paths
@@ -98,17 +105,21 @@ fn main() -> anyhow::Result<()> {
                 )
             })
             .unwrap_or_default();
-        startup_error(&format!(
-            "Pythia could not open its window: neither Vulkan/DirectX/Metal nor OpenGL works here ({e}).{log}"
-        ));
+        report_error(&if started.load(Ordering::SeqCst) {
+            format!("Pythia lost its window: the window system ended the connection ({e}).{log}")
+        } else {
+            format!(
+                "Pythia could not open its window: neither Vulkan/DirectX/Metal nor OpenGL works here ({e}).{log}"
+            )
+        });
     }
     result.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Reports a problem at startup where it's seen: there may be no console
-/// (a GUI program on Windows, or started from the desktop), so also in a
-/// message box.
-fn startup_error(text: &str) {
+/// Reports a problem where it's seen: there may be no console (a GUI
+/// program on Windows, or started from the desktop), so also in a message
+/// box.
+fn report_error(text: &str) {
     error!("{text}");
     eprintln!("pythia: {text}");
     let _ = rfd::MessageDialog::new()
@@ -135,7 +146,14 @@ fn attach_parent_console() {
     }
 }
 
-fn run(renderer: eframe::Renderer, paths: Option<Paths>) -> eframe::Result {
+/// Runs the app until its window closes; sets `started` once the renderer
+/// works and the app exists.
+fn run(
+    renderer: eframe::Renderer,
+    paths: Option<Paths>,
+    started: &Arc<AtomicBool>,
+) -> eframe::Result {
+    let started = started.clone();
     let options = eframe::NativeOptions {
         renderer,
         viewport: egui::ViewportBuilder::default()
@@ -150,7 +168,10 @@ fn run(renderer: eframe::Renderer, paths: Option<Paths>) -> eframe::Result {
     eframe::run_native(
         "pythia",
         options,
-        Box::new(move |cc| Ok(Box::new(app::PythiaApp::new(cc, paths)))),
+        Box::new(move |cc| {
+            started.store(true, Ordering::SeqCst);
+            Ok(Box::new(app::PythiaApp::new(cc, paths)))
+        }),
     )
 }
 
