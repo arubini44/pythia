@@ -507,7 +507,8 @@ impl ProgramWindow {
         Effects::default()
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, cx: &DocContext) -> Effects {
+    /// The rows above the editor: the parts, Compile… and a conflict banner.
+    fn toolbar_ui(&mut self, ui: &mut Ui, cx: &DocContext) -> Effects {
         let mut effects = Effects::default();
         ui.horizontal(|ui| {
             for (i, part) in self.parts.iter().enumerate() {
@@ -656,6 +657,14 @@ impl ProgramWindow {
             });
             ui.add_space(4.0);
         }
+        effects
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui, cx: &DocContext) -> Effects {
+        // The tab has no margin, the toolbar panel brings its own.
+        let mut effects = egui::Panel::top(egui::Id::new(("program-toolbar", cx.id)))
+            .show(ui, |ui| self.toolbar_ui(ui, cx))
+            .inner;
         // The other part of a package or type: its declarations are known
         // here, and jumps and references can lead there.
         let companion = self.companion_of(self.active);
@@ -752,7 +761,7 @@ impl ProgramWindow {
                     }
                 });
         }
-        egui::CentralPanel::default().show(ui, |ui| {
+        egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut out = part.editor.ui(
                 ui,
                 ("program-editor", cx.id, self.active),

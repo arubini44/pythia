@@ -1351,7 +1351,8 @@ impl SqlWindow {
             .default_size(ui.available_height() * 0.45)
             .min_size(80.0)
             .show(ui, |ui| effects.extend(self.bottom_ui(ui, cx)));
-        egui::CentralPanel::default().show(ui, |ui| {
+        // The editor fills the tab to its edges.
+        egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut out = self
                 .editor
                 .ui(ui, ("sql-editor", cx.id), &cx.settings.editor);
