@@ -169,7 +169,8 @@ for Linux, Windows and macOS.
 **MySQL (experimental)**
 - Connect to MySQL (tested with 9.4; MariaDB not yet) with *Type: MySQL* and `host:3306/database`
   (`?tls` for TLS, `?tls=skip-verify` for self-signed certificates); no
-  client library needed.
+  client library needed. The database picked in the object browser is the
+  one SQL windows run in; the toolbar and status bar show it.
 - *Connect through SSH* forwards the connection over an SSH server, like
   `ssh -L` or HeidiSQL's SSH tunnel; the database address is then as the
   SSH server sees it (often `localhost:3306/database`). Log in with a

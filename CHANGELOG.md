@@ -29,6 +29,12 @@ All notable changes to Pythia are documented here. The format follows
   over to another open one. With *Switch connection per window* on, SQL
   windows keep their own connections as before and the object browser
   follows the focused window (#80).
+- MySQL: the database picked in the object browser is the connection's
+  database: the open SQL windows switch to it (after what they're running)
+  and new ones start in it, instead of failing with "No database selected"
+  when the connection's address and profile name none. The toolbar and
+  status bar show the current database, or "No database", and the object
+  browser asks to pick one (#81).
 
 ### Fixed
 - Windows: `pythia.exe` carries Pythia's icon and version, so the taskbar,

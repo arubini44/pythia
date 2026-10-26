@@ -74,6 +74,49 @@ impl Connection {
         self.profile.kind.into()
     }
 
+    /// Makes `database` the connection's (MySQL, where it is what
+    /// unqualified names refer to): new sessions start in it, and the open
+    /// ones switch to it after what they are running.
+    pub fn use_database(&mut self, database: &str, notify: &Notify) {
+        self.params.init_sql = init_sql(&self.profile, Some(database));
+        let statement = format!("use {}", self.dialect().quote_ident(database));
+        let use_it = || -> DbRequest {
+            let statement = statement.clone();
+            DbRequest::Run {
+                id: crate::documents::request_id(),
+                task: Box::new(move |client| {
+                    client.query(&statement, &[])?;
+                    Ok(Box::new(()) as Box<dyn std::any::Any + Send>)
+                }),
+            }
+        };
+        self.main.send(use_it());
+        if self.meta.is_some() {
+            let request = use_it();
+            let DbRequest::Run { id, .. } = &request else {
+                unreachable!()
+            };
+            self.send_meta(*id, request, notify);
+        }
+        for doc in self.docs.values() {
+            doc.session.send(use_it());
+        }
+        if let Status::Connected(server) = &mut self.status {
+            server.current_schema = database.to_owned();
+        }
+    }
+
+    /// The current database of a MySQL connection, for the toolbar and the
+    /// status bar ("No database" without one); none for Oracle, whose
+    /// schema is the user's.
+    pub fn database_label(&self) -> Option<String> {
+        let server = self.server()?;
+        (self.dialect() == Dialect::MYSQL).then(|| match server.current_schema.as_str() {
+            "" => "No database".to_owned(),
+            db => db.to_owned(),
+        })
+    }
+
     /// Schema the browser starts in.
     pub fn current_schema(&self) -> String {
         self.server()
@@ -235,7 +278,7 @@ impl Connections {
             password: passwords.database,
             connect_string: profile.connect_string.clone(),
             privilege: profile.privilege,
-            init_sql: init_sql(&profile),
+            init_sql: init_sql(&profile, None),
             ssh: tunnel,
         };
         let name = profile.display_name();
@@ -348,10 +391,12 @@ fn key_file(text: &str) -> Option<PathBuf> {
     })
 }
 
-/// Statements every session of `profile` runs after connecting.
-fn init_sql(profile: &ConnectionProfile) -> Vec<String> {
+/// Statements every session of `profile` runs after connecting; `database`
+/// is the one picked in the object browser (MySQL), over the profile's
+/// default schema.
+fn init_sql(profile: &ConnectionProfile, database: Option<&str>) -> Vec<String> {
     let mut out = Vec::new();
-    let schema = profile.default_schema.trim();
+    let schema = database.unwrap_or(profile.default_schema.trim());
     if !schema.is_empty() {
         let dialect = Dialect::from(profile.kind);
         let schema = dialect.quote_ident(&dialect.dictionary_name(schema));

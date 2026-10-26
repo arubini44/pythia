@@ -510,6 +510,22 @@ impl PythiaApp {
         }
     }
 
+    /// Makes `database` the connection's (MySQL): its sessions run in it and
+    /// completion looks there.
+    fn use_database(&mut self, connection: &str, database: &str) {
+        let Some(conn) = self.conns.get_mut(connection) else {
+            return;
+        };
+        conn.use_database(database, &self.notify);
+        self.catalogs.insert(
+            connection.to_owned(),
+            pythia_lsp_core::CatalogCache::new(database.to_owned())
+                .with_names(pythia_lsp_core::NameStyle::AsStored),
+        );
+        self.catalog_requested.retain(|(c, _)| c != connection);
+        self.log(format!("{connection}: database {database}"));
+    }
+
     /// Shows a connection in the object browser.
     fn attach_browser(&mut self, connection: String) {
         if self.browser.connection.as_deref() == Some(connection.as_str()) {
@@ -1912,8 +1928,12 @@ impl PythiaApp {
             open,
             log,
             invalid_changed,
+            database,
             ..
         } = effects;
+        if let (Some(name), Some(database)) = (&connection, database) {
+            self.use_database(name, &database);
+        }
         if let Some(name) = connection {
             for (target, request) in requests {
                 match (target, request_key(&request), self.conns.get_mut(&name)) {
@@ -2841,11 +2861,15 @@ impl PythiaApp {
     fn main_event(&mut self, name: &str, event: DbEvent) {
         match event {
             DbEvent::Connected(server) => {
+                let schema = match (server.dialect.kind(), server.current_schema.as_str()) {
+                    (pythia_db::DbKind::MySql, "") => "no database".to_owned(),
+                    (pythia_db::DbKind::MySql, db) => format!("database {db}"),
+                    (_, schema) => format!("schema {schema}"),
+                };
                 let line = format!(
-                    "Connected to {name} ({} {}, schema {})",
+                    "Connected to {name} ({} {}, {schema})",
                     server.dialect.name(),
                     server.version,
-                    server.current_schema
                 );
                 let schema = server.current_schema.clone();
                 let names = match server.dialect.kind() {
@@ -3347,11 +3371,7 @@ impl PythiaApp {
                     let name = conn.name();
                     let color =
                         connection_color(&conn.profile).unwrap_or(ui.visuals().text_color());
-                    let (icon, label) = if conn.profile.production {
-                        (Icon::Production, format!("{name}  PRODUCTION"))
-                    } else {
-                        (Icon::Database, name.clone())
-                    };
+                    let (icon, label) = connection_label(conn);
                     let title = (
                         icon.image(ui),
                         RichText::new(format!("{label}  ⏷")).color(color),
@@ -3405,9 +3425,7 @@ impl PythiaApp {
                         })
                         .0;
                     let hover = match conn.server() {
-                        Some(server) => {
-                            format!("{}\nSchema {}", server.banner, server.current_schema)
-                        }
+                        Some(server) => connection_hover(conn.dialect(), server),
                         None => format!("Connecting to {name}…"),
                     };
                     response.on_hover_text(hover);
@@ -3572,13 +3590,9 @@ impl PythiaApp {
                             ui.label(format!("Connecting to {name}…"));
                         }
                         Some(server) => {
-                            let (icon, text) = if conn.profile.production {
-                                (Icon::Production, format!("{name}  PRODUCTION"))
-                            } else {
-                                (Icon::Database, name)
-                            };
+                            let (icon, text) = connection_label(conn);
                             icon_label(ui, icon, RichText::new(text).color(color))
-                                .on_hover_text(format!("{}\nSchema {}", server.banner, server.current_schema));
+                                .on_hover_text(connection_hover(conn.dialect(), server));
                         }
                     }
                     let session = focused.and_then(|(id, _)| conn.docs.get(&id));
@@ -4266,6 +4280,12 @@ impl PythiaApp {
         (self.active.clone(), self.browser.connection.clone())
     }
 
+    /// Picks a schema (database) in the object browser's picker.
+    pub fn test_pick_schema(&mut self, schema: &str) {
+        let effects = self.browser.pick_schema(schema);
+        self.apply_browser(effects);
+    }
+
     /// The tab title of the window whose title starts with `prefix`.
     pub fn test_tab_title(&self, prefix: &str) -> Option<String> {
         let doc = self.docs.values().find(|d| d.title().starts_with(prefix))?;
@@ -4693,6 +4713,30 @@ impl PythiaApp {
         self.settings_dialog.open = true;
         self.settings_dialog.show_ai();
     }
+}
+
+/// A connection as the toolbar and status bar show it: with its database on
+/// MySQL ("No database" without one), and marked when it's production.
+fn connection_label(conn: &Connection) -> (Icon, String) {
+    let name = match conn.database_label() {
+        Some(database) => format!("{} · {database}", conn.name()),
+        None => conn.name(),
+    };
+    if conn.profile.production {
+        (Icon::Production, format!("{name}  PRODUCTION"))
+    } else {
+        (Icon::Database, name)
+    }
+}
+
+/// The server and the current schema (database on MySQL).
+fn connection_hover(dialect: Dialect, server: &pythia_db::ServerInfo) -> String {
+    let current = match (dialect == Dialect::MYSQL, server.current_schema.as_str()) {
+        (true, "") => "No database".to_owned(),
+        (true, db) => format!("Database {db}"),
+        (false, schema) => format!("Schema {schema}"),
+    };
+    format!("{}\n{current}", server.banner)
 }
 
 /// The connection a window's tab names: one other than the active

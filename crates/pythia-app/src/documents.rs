@@ -97,6 +97,9 @@ pub struct Effects {
     /// The document is done (e.g. a form that handed over to another
     /// window) and closes.
     pub close: bool,
+    /// A database was picked in the object browser (MySQL): the
+    /// connection's sessions use it.
+    pub database: Option<String>,
 }
 
 /// A found reference in a document.

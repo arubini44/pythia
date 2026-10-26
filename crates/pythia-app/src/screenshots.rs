@@ -4368,6 +4368,76 @@ fn mysql_dashboard() {
     save(&mut h, "mysql-dashboard");
 }
 
+/// A MySQL connection without a database (#81): the toolbar, status bar
+/// and object browser say so; picking one in the browser makes it the
+/// database of the open SQL windows and of new ones.
+#[test]
+fn mysql_database_from_the_browser() {
+    let Some(spec) = std::env::var("PYTHIA_TEST_MYSQL").ok() else {
+        return;
+    };
+    let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+    let (username, password) = credentials.split_once('/').unwrap();
+    let (server, database) = connect_string.rsplit_once('/').unwrap();
+    let profile = ConnectionProfile {
+        name: "nodb@mysql".into(),
+        kind: pythia_config::DbKind::MySql,
+        username: username.into(),
+        connect_string: server.into(),
+        ..Default::default()
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password.into());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.run_steps(2);
+    assert!(
+        h.state()
+            .test_log()
+            .iter()
+            .any(|l| l.starts_with("Connected to nodb@mysql (MySQL ")
+                && l.ends_with(", no database)")),
+        "{:?}",
+        h.state().test_log()
+    );
+    // The toolbar and the status bar.
+    let shown = |h: &Ui, label: &str| h.query_all_by_label_contains(label).count();
+    assert_eq!(shown(&h, "nodb@mysql · No database"), 2);
+    assert!(h.query_by_label("No database selected").is_some());
+
+    let current = |h: &mut Ui| -> Option<String> {
+        h.state_mut()
+            .test_sql_window()
+            .editor
+            .set_text("select database() as db");
+        h.state_mut().test_execute_focused();
+        wait_until(h, "select database()", |app| !app.test_focused_busy());
+        let w = h.state_mut().test_sql_window();
+        let result = w.state.results.last().expect("a result");
+        result.rows[0][0].clone()
+    };
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "nodb@mysql".into(),
+        text: String::new(),
+        run: false,
+    });
+    h.run_steps(2);
+    assert_eq!(current(&mut h), None);
+
+    h.state_mut().test_pick_schema(database);
+    h.run_steps(2);
+    assert_eq!(
+        current(&mut h).as_deref(),
+        Some(database),
+        "the open window"
+    );
+    h.state_mut()
+        .test_command(crate::commands::Command::NewSqlWindow);
+    h.run_steps(2);
+    assert_eq!(current(&mut h).as_deref(), Some(database), "a new window");
+    assert_eq!(shown(&h, &format!("nodb@mysql · {database}")), 2);
+    assert!(h.query_by_label("No database selected").is_none());
+}
+
 /// A MySQL connection (`PYTHIA_TEST_MYSQL=user/password@host:port/database`):
 /// queries, transactions, browser and object views work; what MySQL can't
 /// do is left out of the menus, the toolbar and the browser.
