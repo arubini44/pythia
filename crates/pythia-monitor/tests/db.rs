@@ -756,3 +756,21 @@ fn sql_details_of_a_statement() {
     let d = queries::sql_detail(&conn, "0000000000000", None);
     assert!(d.text.is_none() && d.children.is_empty() && d.errors.is_empty());
 }
+
+/// Wait events for the dashboard's rates and an event's histogram (#74).
+#[test]
+fn wait_events_and_histogram() {
+    let Some(conn) = dba() else { return };
+    let events = queries::system_events(&conn).unwrap();
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|e| e.wait_class != "Idle"));
+    let busiest = events
+        .iter()
+        .max_by(|a, b| a.waits.total_cmp(&b.waits))
+        .unwrap();
+    let buckets = queries::event_histogram(&conn, &busiest.event).unwrap();
+    assert!(!buckets.is_empty(), "{busiest:?}");
+    assert!(buckets.windows(2).all(|w| w[0].0 < w[1].0), "{buckets:?}");
+    let snap = queries::dashboard_snapshot(&conn);
+    assert!(!snap.events.is_empty(), "{:?}", snap.errors);
+}

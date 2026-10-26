@@ -162,6 +162,10 @@ pub(crate) enum Want {
     OpenSqlDetail {
         sql_id: String,
     },
+    /// How long the waits on an event took, for the dashboard.
+    EventHistogram {
+        event: String,
+    },
     Trace {
         sid: i64,
         serial: i64,
@@ -231,6 +235,7 @@ enum Job {
     Sessions,
     Detail(i64, i64),
     SqlDetail(String),
+    EventHistogram(String),
     Control(String),
     Transaction(i64, i64),
     AwrSnapshots,
@@ -579,6 +584,10 @@ impl Monitor {
                 Job::Transaction(sid, serial),
                 Box::new(move |c| boxed(queries::transaction(c, sid, serial))),
             ),
+            Want::EventHistogram { event } => (
+                Job::EventHistogram(event.clone()),
+                Box::new(move |c| boxed(queries::event_histogram(c, &event))),
+            ),
             Want::SqlDetail { sql_id, child } => (
                 Job::SqlDetail(sql_id.clone()),
                 Box::new(move |c| boxed(Ok(queries::sql_detail(c, &sql_id, child)))),
@@ -683,6 +692,7 @@ impl Monitor {
                     d.on_detail(result);
                 }
             }
+            Job::EventHistogram(event) => self.dashboard.on_histogram(&event, take(result)),
             Job::SqlDetail(sql_id) => {
                 let result = take(result);
                 let found = self.details.iter_mut().find_map(|d| match d {

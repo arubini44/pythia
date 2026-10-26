@@ -10,7 +10,9 @@ use pythia_db::DbError;
 use super::style::{self, Kpi, Palette, bytes, compact, duration, section};
 use super::{Analysis, DetailTab, FieldFilter, Want, Wants, refresh_selector};
 use crate::insights::{Insight, Severity, Target, insights};
-use crate::queries::{Counters, DashboardSnapshot, Rates, TopSql, explain_error};
+use crate::queries::{
+    Counters, DashboardSnapshot, EventRate, Rates, SystemEvent, TopSql, event_rates, explain_error,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Refresh {
@@ -85,12 +87,20 @@ struct Sample {
 /// Keeps about an hour at 5 s refresh.
 const HISTORY: usize = 720;
 
+/// An event's latency histogram as read: (up to ms, waits), or why not.
+type Histogram = Result<Vec<(f64, i64)>, String>;
+
 #[derive(Default)]
 pub struct DashboardView {
     pub refresh: Refresh,
     snapshot: Option<DashboardSnapshot>,
     prev: Option<(Counters, f64)>,
     rates: Option<Rates>,
+    /// Wait events as of the snapshot before, and the rates since.
+    prev_events: Option<(Vec<SystemEvent>, f64)>,
+    event_rates: Option<Vec<EventRate>>,
+    /// The event whose histogram is shown, and the histogram once read.
+    histogram: Option<(String, Option<Histogram>)>,
     history: VecDeque<Sample>,
     in_flight: bool,
     last_request: Option<f64>,
@@ -126,9 +136,24 @@ impl DashboardView {
                     }
                     self.prev = Some((cur, now));
                 }
+                if !too_close {
+                    if let Some((prev, t)) = &self.prev_events {
+                        self.event_rates = Some(event_rates(prev, &s.events, now - t));
+                    }
+                    self.prev_events = Some((s.events.clone(), now));
+                }
                 self.snapshot = Some(s);
             }
             Err(e) => self.error = Some(explain_error(&e)),
+        }
+    }
+
+    /// The histogram of the event shown.
+    pub(crate) fn on_histogram(&mut self, event: &str, result: Result<Vec<(f64, i64)>, DbError>) {
+        if let Some((shown, data)) = &mut self.histogram
+            && shown == event
+        {
+            *data = Some(result.map_err(|e| explain_error(&e)));
         }
     }
 
@@ -185,6 +210,8 @@ impl DashboardView {
             return;
         };
 
+        // Taken out while the rest of the view is borrowed.
+        let mut histogram = self.histogram.take();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -201,6 +228,8 @@ impl DashboardView {
                 self.charts(ui, snap);
                 ui.add_space(8.0);
                 activity(ui, snap, wants);
+                ui.add_space(8.0);
+                top_events(ui, self.event_rates.as_deref(), &mut histogram, wants);
                 ui.add_space(8.0);
                 let mut field = None;
                 ui.columns(3, |cols| {
@@ -247,6 +276,7 @@ impl DashboardView {
                 ui.add_space(8.0);
                 style::section_errors(ui, &snap.errors);
             });
+        self.histogram = histogram;
     }
 
     fn kpis(&self, ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
@@ -412,6 +442,90 @@ fn activity(ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
         if let Some(i) = style::stacked_bar(ui, &segments, Some("Show these sessions")) {
             let class = segments[i].0.clone();
             wants.push(Want::ShowSessions(Some(FieldFilter::WaitClass(class))));
+        }
+    });
+}
+
+/// The events waited on most since the snapshot before; each leads to the
+/// sessions waiting on it and shows its latency histogram.
+fn top_events(
+    ui: &mut Ui,
+    rates: Option<&[EventRate]>,
+    histogram: &mut Option<(String, Option<Histogram>)>,
+    wants: &mut Wants,
+) {
+    section(ui, "Top wait events (since the refresh before)", |ui| {
+        let Some(rates) = rates else {
+            ui.weak("Measuring…");
+            return;
+        };
+        if rates.is_empty() {
+            ui.weak("No waits besides idle ones");
+            return;
+        }
+        let max = rates.first().map_or(1.0, |r| r.load).max(0.000_001);
+        for r in rates.iter().take(10) {
+            ui.horizontal(|ui| {
+                let shown = histogram.as_ref().is_some_and(|(e, _)| *e == r.event);
+                if ui
+                    .selectable_label(shown, "Histogram")
+                    .on_hover_text("How long its waits took since startup")
+                    .clicked()
+                {
+                    if shown {
+                        *histogram = None;
+                    } else {
+                        *histogram = Some((r.event.clone(), None));
+                        wants.push(Want::EventHistogram {
+                            event: r.event.clone(),
+                        });
+                    }
+                }
+                let text = format!(
+                    "{:.2}  {} · {} · {} waits/s · {:.2} ms avg",
+                    r.load,
+                    r.event,
+                    r.wait_class,
+                    compact(r.waits_per_s),
+                    r.average_ms
+                );
+                let color = style::wait_class_color(&r.wait_class);
+                if style::link_bar(
+                    ui,
+                    (r.load / max) as f32,
+                    color,
+                    text,
+                    "Show the sessions waiting on it",
+                ) {
+                    wants.push(Want::ShowSessions(Some(FieldFilter::Event(
+                        r.event.clone(),
+                    ))));
+                }
+            });
+            if let Some((event, data)) = histogram.as_ref()
+                && *event == r.event
+            {
+                ui.indent(("event-histogram", event), |ui| match data {
+                    None => {
+                        ui.spinner();
+                    }
+                    Some(Err(e)) => {
+                        ui.colored_label(ui.visuals().error_fg_color, e);
+                    }
+                    Some(Ok(buckets)) => {
+                        let most = buckets.iter().map(|b| b.1).max().unwrap_or(1).max(1) as f32;
+                        for (ms, n) in buckets {
+                            style::usage_bar(
+                                ui,
+                                *n as f32 / most,
+                                Palette::TEAL,
+                                format!("≤ {ms} ms  {}", compact(*n as f64)),
+                            );
+                        }
+                    }
+                });
+            }
+            ui.add_space(2.0);
         }
     });
 }
@@ -869,6 +983,7 @@ mod tests {
             Want::ShowBlocking => "blocking tree".into(),
             Want::OpenDetail { sid, serial, tab } => format!("details {sid},{serial} {tab:?}"),
             Want::OpenSqlDetail { sql_id } => format!("sql {sql_id}"),
+            Want::EventHistogram { event } => format!("histogram {event}"),
             _ => "other".into(),
         }
     }
@@ -876,7 +991,23 @@ mod tests {
     /// What clicking the element labeled `label` asks for.
     fn click(label: &str) -> Vec<String> {
         let mut view = DashboardView::default();
-        view.on_snapshot(Ok(snapshot()), 0.0);
+        // Two snapshots: rates between them.
+        let event = |micros| crate::queries::SystemEvent {
+            event: "log file sync".into(),
+            wait_class: "Commit".into(),
+            waits: micros / 1000.0,
+            micros,
+        };
+        let first = DashboardSnapshot {
+            events: vec![event(1e6)],
+            ..snapshot()
+        };
+        view.on_snapshot(Ok(first), 0.0);
+        let second = DashboardSnapshot {
+            events: vec![event(3e6)],
+            ..snapshot()
+        };
+        view.on_snapshot(Ok(second), 2.0);
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1400.0, 2400.0))
             .build_ui_state(
@@ -916,5 +1047,10 @@ mod tests {
         assert_eq!(click("sid 44 · Table Scan"), ["details 44,2 None"]);
         assert_eq!(click("Details"), ["details 21,4 None"]);
         assert_eq!(click("7h35uxf5uhmm1"), ["sql 7h35uxf5uhmm1"]);
+        assert_eq!(
+            click("log file sync · Commit"),
+            [r#"sessions Some(Event("log file sync"))"#]
+        );
+        assert_eq!(click("Histogram"), ["histogram log file sync"]);
     }
 }

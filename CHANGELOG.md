@@ -36,6 +36,11 @@ All notable changes to Pythia are documented here. The format follows
   and why it isn't shared with the others; and the sessions running it.
   Top SQL, the session list (SQL_ID column and menu) and session details
   open it (#74).
+- Monitor: *Top wait events* on the dashboard: the events waited on most
+  since the refresh before (from `V$SYSTEM_EVENT`), as sessions waiting,
+  waits per second and average wait. An event opens the sessions waiting
+  on it now, and its latency histogram (`V$EVENT_HISTOGRAM`) unfolds below
+  it (#74).
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
 - **Debug…** next to **Test…** on procedures, functions and package

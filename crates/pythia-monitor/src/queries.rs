@@ -352,6 +352,8 @@ pub struct DashboardSnapshot {
     pub tablespaces: Vec<Tablespace>,
     pub top_sql: Vec<TopSql>,
     pub long_ops: Vec<LongOp>,
+    /// Non-idle wait events since startup, for rates between snapshots.
+    pub events: Vec<SystemEvent>,
     pub errors: Vec<SectionError>,
 }
 
@@ -489,8 +491,92 @@ pub fn dashboard_snapshot(conn: &Connection) -> DashboardSnapshot {
         &mut errors,
         long_ops(conn).map(|l| s.long_ops = l),
     );
+    section(
+        "Wait events",
+        &mut errors,
+        system_events(conn).map(|e| s.events = e),
+    );
     s.errors = errors;
     s
+}
+
+/// A wait event's totals since startup (`V$SYSTEM_EVENT`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemEvent {
+    pub event: String,
+    pub wait_class: String,
+    pub waits: f64,
+    pub micros: f64,
+}
+
+/// The non-idle wait events.
+pub fn system_events(conn: &Connection) -> Result<Vec<SystemEvent>> {
+    query(
+        conn,
+        "select event, wait_class, total_waits, time_waited_micro \
+           from v$system_event where wait_class <> 'Idle'",
+        &[],
+        |r| {
+            Ok(SystemEvent {
+                event: get(r, 0)?,
+                wait_class: get::<Option<String>>(r, 1)?.unwrap_or_default(),
+                waits: get::<Option<f64>>(r, 2)?.unwrap_or(0.0),
+                micros: get::<Option<f64>>(r, 3)?.unwrap_or(0.0),
+            })
+        },
+    )
+}
+
+/// A wait event between two snapshots.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventRate {
+    pub event: String,
+    pub wait_class: String,
+    pub waits_per_s: f64,
+    /// Seconds waited per second: sessions waiting on it, on average.
+    pub load: f64,
+    pub average_ms: f64,
+}
+
+/// The events waited on between two snapshots `secs` apart, most waited
+/// first.
+pub fn event_rates(prev: &[SystemEvent], cur: &[SystemEvent], secs: f64) -> Vec<EventRate> {
+    let mut out: Vec<EventRate> = cur
+        .iter()
+        .filter_map(|c| {
+            let p = prev.iter().find(|p| p.event == c.event);
+            let (waits, micros) = match p {
+                Some(p) => (c.waits - p.waits, c.micros - p.micros),
+                // New since the last snapshot.
+                None => (c.waits, c.micros),
+            };
+            (micros > 0.0 && secs > 0.0).then(|| EventRate {
+                event: c.event.clone(),
+                wait_class: c.wait_class.clone(),
+                waits_per_s: waits / secs,
+                load: micros / 1e6 / secs,
+                average_ms: if waits > 0.0 {
+                    micros / 1000.0 / waits
+                } else {
+                    0.0
+                },
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.load.total_cmp(&a.load));
+    out
+}
+
+/// How long the waits on an event took since startup: (up to this many
+/// milliseconds, waits).
+pub fn event_histogram(conn: &Connection, event: &str) -> Result<Vec<(f64, i64)>> {
+    query(
+        conn,
+        "select wait_time_milli, wait_count from v$event_histogram \
+          where event = :1 order by wait_time_milli",
+        &[&event],
+        |r| Ok((get(r, 0)?, get(r, 1)?)),
+    )
 }
 
 /// Heads of blocking chains, most blocking first.
@@ -2353,6 +2439,34 @@ pub fn capabilities(conn: &Connection) -> Result<Capabilities> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wait events between two snapshots: per second, most waited first;
+    /// one that appeared counts from zero, one without waits is left out.
+    #[test]
+    fn wait_event_rates() {
+        let e = |event: &str, waits, micros| SystemEvent {
+            event: event.into(),
+            wait_class: "User I/O".into(),
+            waits,
+            micros,
+        };
+        let prev = [
+            e("db file sequential read", 100.0, 1e6),
+            e("idle-ish", 5.0, 0.0),
+        ];
+        let cur = [
+            e("db file sequential read", 300.0, 3e6),
+            e("idle-ish", 5.0, 0.0),
+            e("log file sync", 10.0, 5e6),
+        ];
+        let rates = event_rates(&prev, &cur, 2.0);
+        let names: Vec<&str> = rates.iter().map(|r| r.event.as_str()).collect();
+        assert_eq!(names, ["log file sync", "db file sequential read"]);
+        assert_eq!(rates[0].load, 2.5);
+        assert_eq!(rates[0].average_ms, 500.0);
+        assert_eq!(rates[1].waits_per_s, 100.0);
+        assert_eq!(rates[1].average_ms, 10.0);
+    }
 
     /// A newer read replaces the header and the parts it read, keeps the
     /// others with their errors; once the session is gone, nothing is kept.

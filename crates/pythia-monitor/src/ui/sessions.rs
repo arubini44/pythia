@@ -66,6 +66,8 @@ pub enum FieldFilter {
     Machine(String),
     /// "CPU" for sessions on CPU, as the dashboard counts them.
     WaitClass(String),
+    /// Sessions waiting on this event now.
+    Event(String),
 }
 
 impl FieldFilter {
@@ -76,6 +78,9 @@ impl FieldFilter {
             FieldFilter::User(u) => is(&s.username, u),
             FieldFilter::Program(p) => is(&s.program, p),
             FieldFilter::Machine(m) => is(&s.machine, m),
+            FieldFilter::Event(e) => {
+                s.state.as_deref() == Some("WAITING") && s.event.as_deref() == Some(e.as_str())
+            }
             FieldFilter::WaitClass(c) => {
                 let waiting = s.state.as_deref() == Some("WAITING");
                 s.is_active()
@@ -96,6 +101,7 @@ impl FieldFilter {
             FieldFilter::Machine(m) => format!("machine {m}"),
             FieldFilter::WaitClass(c) if c == "CPU" => "active on CPU".into(),
             FieldFilter::WaitClass(c) => format!("active, waiting: {c}"),
+            FieldFilter::Event(e) => format!("waiting on {e}"),
         }
     }
 }
@@ -990,5 +996,11 @@ mod tests {
         assert!(waiting.matches(&io) && !waiting.matches(&cpu) && !waiting.matches(&idle));
         let on_cpu = FieldFilter::WaitClass("CPU".into());
         assert!(on_cpu.matches(&cpu) && !on_cpu.matches(&io));
+        let reading = SessionRow {
+            event: Some("db file sequential read".into()),
+            ..io.clone()
+        };
+        let event = FieldFilter::Event("db file sequential read".into());
+        assert!(event.matches(&reading) && !event.matches(&io));
     }
 }
