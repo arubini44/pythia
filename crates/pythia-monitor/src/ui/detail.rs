@@ -28,6 +28,8 @@ pub struct SessionDetailView {
     loading: bool,
     requested: bool,
     stat_filter: String,
+    /// The open cursor whose statement is shown below the list.
+    cursor: Option<usize>,
 }
 
 impl SessionDetailView {
@@ -41,6 +43,7 @@ impl SessionDetailView {
             loading: false,
             requested: false,
             stat_filter: String::new(),
+            cursor: None,
         }
     }
 
@@ -53,6 +56,11 @@ impl SessionDetailView {
         match result {
             Ok(d) => {
                 self.error = None;
+                // Keep the selected cursor if it's still there.
+                let selected = self
+                    .cursor
+                    .and_then(|i| self.detail.as_ref()?.cursors.get(i));
+                self.cursor = selected.and_then(|c| d.cursors.iter().position(|n| n == c));
                 self.detail = Some(d);
             }
             Err(e) => self.error = Some(explain_error(&e)),
@@ -263,28 +271,76 @@ impl SessionDetailView {
                 );
             }
             Tab::Cursors => {
-                table(
-                    ui,
-                    "detail-cursors",
-                    h,
-                    &["SQL_ID", "Type", "SQL text"],
-                    d.cursors.len(),
-                    |row, i| {
-                        let c = &d.cursors[i];
-                        row.col(|ui| {
-                            ui.label(RichText::new(c.sql_id.as_deref().unwrap_or("")).monospace());
-                        });
-                        row.col(|ui| {
-                            ui.label(c.cursor_type.as_deref().unwrap_or(""));
-                        });
-                        row.col(|ui| {
-                            ui.add(
-                                egui::Label::new(RichText::new(&c.text).monospace().small())
-                                    .truncate(),
-                            );
-                        });
-                    },
-                );
+                // The selected cursor's whole statement below the list.
+                egui::Panel::bottom(egui::Id::new(("detail-cursor-text", self.sid)))
+                    .resizable(true)
+                    .default_size(140.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink(false)
+                            .show(ui, |ui| match self.cursor.and_then(|i| d.cursors.get(i)) {
+                                Some(c) => code(ui, Some(&c.text)),
+                                None => {
+                                    ui.weak("Select a cursor to see its statement");
+                                }
+                            });
+                    });
+                let mut clicked = None;
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        TableBuilder::new(ui)
+                            .id_salt("detail-cursors")
+                            .striped(true)
+                            .resizable(true)
+                            .auto_shrink(false)
+                            .sense(egui::Sense::click())
+                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                            .column(Column::initial(130.0).clip(true))
+                            .column(Column::initial(130.0).clip(true))
+                            .column(Column::remainder().clip(true))
+                            .header(h, |mut r| {
+                                for title in ["SQL_ID", "Type", "SQL text"] {
+                                    r.col(|ui| {
+                                        ui.strong(title);
+                                    });
+                                }
+                            })
+                            .body(|body| {
+                                body.rows(h, d.cursors.len(), |mut row| {
+                                    let i = row.index();
+                                    let c = &d.cursors[i];
+                                    row.set_selected(self.cursor == Some(i));
+                                    row.col(|ui| {
+                                        ui.label(
+                                            RichText::new(c.sql_id.as_deref().unwrap_or(""))
+                                                .monospace(),
+                                        );
+                                    });
+                                    row.col(|ui| {
+                                        ui.label(c.cursor_type.as_deref().unwrap_or(""));
+                                    });
+                                    row.col(|ui| {
+                                        let line =
+                                            c.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(line).monospace().small(),
+                                            )
+                                            .truncate()
+                                            .show_tooltip_when_elided(false)
+                                            .selectable(false),
+                                        );
+                                    });
+                                    if row.response().clicked() {
+                                        clicked = Some(i);
+                                    }
+                                });
+                            });
+                    });
+                if clicked.is_some() {
+                    self.cursor = clicked;
+                }
             }
             Tab::Locks => {
                 table(
@@ -463,5 +519,63 @@ fn analysis(sid: i64, serial: i64, d: &SessionDetail) -> Analysis {
         sql_id: sql_id.filter(|_| d.plan.is_empty()),
         details,
         binds: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+    use crate::queries::{OpenCursor, SessionRow};
+
+    /// Clicking an open cursor shows its whole statement below the list
+    /// (#73).
+    #[test]
+    fn open_cursor_statement_below_the_list() {
+        let text = "select id,\n       name\n  from a_table_with_a_long_name\n where id = :1";
+        let cursor = |sql_id: &str, text: &str| OpenCursor {
+            sql_id: Some(sql_id.into()),
+            text: text.into(),
+            cursor_type: Some("OPEN".into()),
+        };
+        let mut view = SessionDetailView::new(42, 7);
+        view.tab = Tab::Cursors;
+        // Loaded already: no request, no spinner.
+        view.requested = true;
+        view.on_detail(Ok(SessionDetail {
+            session: Some(SessionRow {
+                sid: 42,
+                serial: 7,
+                status: "INACTIVE".into(),
+                ..SessionRow::default()
+            }),
+            cursors: vec![cursor("a1", "select 1 from dual"), cursor("b2", text)],
+            ..SessionDetail::default()
+        }));
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(900.0, 500.0))
+            .build_ui_state(
+                |ui, view: &mut SessionDetailView| view.ui(ui, None, &mut Wants::default()),
+                view,
+            );
+        harness.run();
+        // The list shows the statement on one line; the whole text only
+        // once selected.
+        assert!(harness.query_by_label(text).is_none());
+        harness
+            .get_by_label("select id, name from a_table_with_a_long_name where id = :1")
+            .click();
+        harness.run();
+        assert!(harness.query_by_label(text).is_some());
+        assert_eq!(harness.state().cursor, Some(1));
+        // A refresh keeps the selection where the cursor is now.
+        let mut detail = harness.state().detail.clone().unwrap();
+        detail.cursors.insert(0, cursor("00", "begin null; end;"));
+        harness.state_mut().on_detail(Ok(detail));
+        harness.run();
+        assert_eq!(harness.state().cursor, Some(2));
+        assert!(harness.query_by_label(text).is_some());
     }
 }

@@ -28,6 +28,18 @@ All notable changes to Pythia are documented here. The format follows
 - Clicking an entry in the completion list inserts it. The click closed the
   list without inserting anything and left the editor without focus; only
   the keyboard worked (#72).
+- Session details: open cursors show their whole statement, not the first
+  60 characters V$OPEN_CURSOR keeps; selecting one shows it in full below
+  the list (#73).
+- Session details of a session that has ended no longer show the waits,
+  statistics, open cursors and locks of the session that got its SID since.
+  A blocker missing from the session list (shown with its SID only in the
+  blocking tree) offers no details, kill or trace with a guessed serial#,
+  and isn't labelled idle (#75).
+- Monitor: the object a session waits on, the row it waits for and the
+  tables of TM locks are named for every schema, not only for tables the
+  monitoring user has privileges on (they were looked up in ALL_OBJECTS)
+  (#76).
 
 ## [0.4.1] - 2026-10-26
 

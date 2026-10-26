@@ -566,7 +566,9 @@ fn node_ui(
             };
             ui.label(title.monospace());
             if is_root {
-                let status = if s.is_active() {
+                let status = if s.is_unknown() {
+                    "not in the session list"
+                } else if s.is_active() {
                     "active"
                 } else {
                     "idle — likely an uncommitted transaction"
@@ -600,7 +602,7 @@ fn node_ui(
         })
         .response
         .interact(egui::Sense::click());
-    if resp.double_clicked() {
+    if resp.double_clicked() && !s.is_unknown() {
         actions.push(RowAction::Want(Want::OpenDetail {
             sid: s.sid,
             serial: s.serial,
@@ -624,7 +626,14 @@ fn session_menu(
         .username
         .clone()
         .unwrap_or_else(|| s.program.clone().unwrap_or_default());
-    if ui.button("Details").clicked() {
+    // Only the SID of a blocker missing from the list is known: its serial#
+    // would be a guess.
+    let unknown = "Not in the session list: only its SID is known";
+    if ui
+        .add_enabled(!s.is_unknown(), egui::Button::new("Details"))
+        .on_disabled_hover_text(unknown)
+        .clicked()
+    {
         actions.push(RowAction::Want(Want::OpenDetail {
             sid: s.sid,
             serial: s.serial,
@@ -642,13 +651,15 @@ fn session_menu(
         ui.close();
     }
     ui.separator();
-    let possible = !s.is_self && !s.background;
+    let possible = !s.is_self && !s.background && !s.is_unknown();
     let item = |ui: &mut Ui, label: &str, allowed: std::result::Result<(), String>| {
-        let hint = allowed
-            .as_ref()
-            .err()
-            .cloned()
-            .unwrap_or_else(|| "Not possible for this session".into());
+        let hint = allowed.as_ref().err().cloned().unwrap_or_else(|| {
+            if s.is_unknown() {
+                unknown.into()
+            } else {
+                "Not possible for this session".into()
+            }
+        });
         ui.add_enabled(allowed.is_ok() && possible, egui::Button::new(label))
             .on_disabled_hover_text(hint)
     };
@@ -681,7 +692,11 @@ fn session_menu(
         ui.close();
     }
     ui.separator();
-    let tracing = caps.map_or(Err("Checking privileges…".to_owned()), |c| c.tracing());
+    let tracing = if s.is_unknown() {
+        Err(unknown.to_owned())
+    } else {
+        caps.map_or(Err("Checking privileges…".to_owned()), |c| c.tracing())
+    };
     let hint = tracing.as_ref().err().cloned().unwrap_or_default();
     if ui
         .add_enabled(
@@ -710,9 +725,13 @@ fn session_menu(
         }));
         ui.close();
     }
-    let files = caps.map_or(Err("Checking privileges…".to_owned()), |c| {
-        c.trace_files()
-    });
+    let files = if s.is_unknown() {
+        Err(unknown.to_owned())
+    } else {
+        caps.map_or(Err("Checking privileges…".to_owned()), |c| {
+            c.trace_files()
+        })
+    };
     let hint = files.as_ref().err().cloned().unwrap_or_default();
     if ui
         .add_enabled(files.is_ok(), egui::Button::new("Analyze trace file"))

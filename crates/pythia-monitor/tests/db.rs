@@ -413,3 +413,129 @@ fn awr_and_ash() {
         &ash[..ash.len().min(500)]
     );
 }
+
+fn open_dba() -> Connection {
+    connect("PYTHIA_TEST_DB_DBA").unwrap()
+}
+
+fn serial(c: &Connection) -> i64 {
+    c.query_row_as(
+        "select serial# from v$session where sid = sys_context('USERENV', 'SID')",
+        &[],
+    )
+    .unwrap()
+}
+
+/// Details of a session that has ended don't show the session that got its
+/// SID since: the views without serial# aren't read (#75).
+#[test]
+fn session_detail_of_a_reused_sid() {
+    let Some(conn) = dba() else { return };
+    let other = open_dba();
+    let (other_sid, other_serial) = (sid(&other), serial(&other));
+    let detail = queries::session_detail(&conn, other_sid, other_serial);
+    assert!(detail.session.is_some());
+    assert!(!detail.stats.is_empty());
+    // Another serial#: the session the details were for is gone.
+    let detail = queries::session_detail(&conn, other_sid, other_serial + 1);
+    assert!(detail.session.is_none());
+    assert!(detail.stats.is_empty(), "{:?}", detail.stats);
+    assert!(detail.waits.is_empty() && detail.cursors.is_empty() && detail.locks.is_empty());
+    assert!(detail.errors.is_empty(), "{:?}", detail.errors);
+}
+
+/// Open cursors show whole statements, not V$OPEN_CURSOR's first 60
+/// characters: up to 1000 from V$SQL.SQL_TEXT, longer ones in full (#73).
+#[test]
+fn open_cursors_show_whole_statements() {
+    let Some(conn) = dba() else { return };
+    let medium = "select /* pythia_cursor_medium: a statement longer than sixty characters */ \
+                  dummy from dual"
+        .to_owned();
+    let long = format!(
+        "select /* pythia_cursor_long */ 1{} as total from dual",
+        " + 1".repeat(400)
+    );
+    assert!(long.len() > 1000);
+    let other = open_dba();
+    // DBMS_SQL cursors stay open until closed (these never are).
+    for statement in [&medium, &long] {
+        other
+            .execute(
+                "declare c integer; begin c := dbms_sql.open_cursor; \
+                 dbms_sql.parse(c, :1, dbms_sql.native); end;",
+                &[statement],
+            )
+            .unwrap();
+    }
+    let detail = queries::session_detail(&conn, sid(&other), serial(&other));
+    assert!(detail.errors.is_empty(), "{:?}", detail.errors);
+    for statement in [medium, long] {
+        assert!(
+            detail.cursors.iter().any(|c| c.text == statement),
+            "{statement}: {:?}",
+            detail.cursors
+        );
+    }
+}
+
+/// Object names of locks and row lock waits on tables the monitoring user
+/// has no privileges on: ALL_OBJECTS doesn't list them, DBA_OBJECTS does
+/// (#76). Needs `PYTHIA_TEST_DB`, a user with SELECT_CATALOG_ROLE only.
+#[test]
+fn lock_names_of_other_schemas() {
+    let (Some(dba), Some(monitor)) = (dba(), connect("PYTHIA_TEST_DB")) else {
+        return;
+    };
+    let _ = dba.execute("drop table pythia_mon_names purge", &[]);
+    dba.execute("create table pythia_mon_names (id number primary key)", &[])
+        .unwrap();
+    dba.execute("insert into pythia_mon_names values (1)", &[])
+        .unwrap();
+    dba.commit().unwrap();
+    let owner: String = dba.query_row_as("select user from dual", &[]).unwrap();
+    let name = format!("{owner}.PYTHIA_MON_NAMES");
+    let hidden: i64 = monitor
+        .query_row_as(
+            "select count(*) from all_objects where owner = :1 and object_name = 'PYTHIA_MON_NAMES'",
+            &[&owner],
+        )
+        .unwrap();
+    assert_eq!(hidden, 0, "the monitoring user can't see the table");
+
+    // A holds a row lock (and the table's TM lock), B waits for the row.
+    let a = open_dba();
+    let a_sid = sid(&a);
+    a.execute("update pythia_mon_names set id = 1 where id = 1", &[])
+        .unwrap();
+    let b = open_dba();
+    let b_sid = sid(&b);
+    let waiter = thread::spawn(move || {
+        let _ = b.execute("update pythia_mon_names set id = 1 where id = 1", &[]);
+        let _ = b.rollback();
+    });
+    wait_for("the waiter", || {
+        queries::sessions(&monitor, SessionFilter::default())
+            .unwrap()
+            .iter()
+            .any(|s| s.sid == b_sid && s.blocking_session == Some(a_sid))
+    });
+    let b_row = queries::sessions(&monitor, SessionFilter::default())
+        .unwrap()
+        .into_iter()
+        .find(|s| s.sid == b_sid)
+        .unwrap();
+    assert_eq!(b_row.wait_object.as_deref(), Some(name.as_str()));
+    assert!(b_row.wait_rowid.is_some());
+    let locks = queries::locks(&monitor, a_sid).unwrap();
+    assert!(
+        locks
+            .iter()
+            .any(|l| l.lock_type == "TM" && l.object.as_deref() == Some(name.as_str())),
+        "{locks:?}"
+    );
+    a.rollback().unwrap();
+    waiter.join().unwrap();
+    dba.execute("drop table pythia_mon_names purge", &[])
+        .unwrap();
+}
