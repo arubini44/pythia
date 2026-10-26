@@ -10,6 +10,12 @@ All notable changes to Pythia are documented here. The format follows
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
 
+### Fixed
+- Windows: `pythia.exe` carries Pythia's icon and version, so the taskbar,
+  the Start menu and desktop shortcuts, Explorer, Installed apps and
+  associated files show Pythia's icon rather than the default one, and Task
+  Manager and "Open with" list it as Pythia (#77).
+
 ## [0.4.1] - 2026-10-26
 
 ### Added

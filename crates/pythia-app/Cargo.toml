@@ -38,6 +38,10 @@ serde.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[build-dependencies]
+# The icon and version resource of pythia.exe (build.rs).
+embed-resource = "3"
+
 [dev-dependencies]
 toml.workspace = true
 serde_json = "1"
