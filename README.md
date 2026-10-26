@@ -106,6 +106,9 @@ for Linux, Windows and macOS.
 - With the Diagnostics Pack: ASH activity of a session or statement, ASH
   and AWR reports and a statement's plan history; with the Tuning Pack:
   SQL Monitor reports. A built-in tkprof-style trace analyzer.
+- MySQL: a dashboard of its own; its threads open their details
+  (statement and plan, transaction, locks, the thread they wait for) and
+  can be killed.
 
 ![Monitoring dashboard](docs/screenshots/monitor-dashboard.png)
 

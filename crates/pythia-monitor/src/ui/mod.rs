@@ -25,6 +25,7 @@ mod dashboard;
 mod detail;
 mod history;
 mod mysql;
+mod mysql_thread;
 mod sessions;
 mod sql_detail;
 pub mod style;
@@ -43,6 +44,7 @@ pub use awr::AwrView;
 pub use dashboard::{DashboardView, Refresh};
 pub use detail::SessionDetailView;
 pub use mysql::MySqlDashboardView;
+pub use mysql_thread::ThreadDetailView;
 pub use sessions::{FieldFilter, SessionsView};
 pub use sql_detail::SqlDetailView;
 pub use trace::TraceView;
@@ -173,6 +175,19 @@ pub(crate) enum Want {
     },
     /// The sessions using the most PGA.
     PgaUsers,
+    /// Open a MySQL thread's details tab (handled by the driver, no task).
+    OpenThread {
+        id: i64,
+    },
+    /// A MySQL thread's details.
+    ThreadDetail {
+        id: i64,
+    },
+    /// End a MySQL thread's statement, or its connection.
+    KillThread {
+        id: i64,
+        query_only: bool,
+    },
     /// What the management packs keep about a session or statement.
     History {
         scope: queries::Scope,
@@ -235,6 +250,8 @@ pub(crate) enum Want {
 enum DetailView {
     Session(Box<SessionDetailView>),
     Sql(Box<SqlDetailView>),
+    /// A MySQL thread.
+    Thread(Box<ThreadDetailView>),
 }
 
 impl DetailView {
@@ -242,6 +259,7 @@ impl DetailView {
         match self {
             DetailView::Session(d) => d.title(),
             DetailView::Sql(d) => d.title(),
+            DetailView::Thread(d) => d.title(),
         }
     }
 }
@@ -257,6 +275,7 @@ enum Job {
     EventHistogram(String),
     Tablespace(String),
     PgaUsers,
+    ThreadDetail(i64),
     History(queries::Scope, history::HistoryPart),
     Control(String),
     Transaction(i64, i64),
@@ -385,9 +404,6 @@ impl Monitor {
 
     /// Title for a host tab.
     pub fn title(&self) -> String {
-        if self.is_mysql() {
-            return "Dashboard".into();
-        }
         match self.tab {
             MonitorTab::Dashboard => "Dashboard".into(),
             MonitorTab::Sessions => "Sessions".into(),
@@ -406,7 +422,21 @@ impl Monitor {
         let mut out = MonitorOutput::default();
 
         if self.is_mysql() {
-            self.mysql.ui(ui, now, &mut wants);
+            // The dashboard, and the threads opened from it.
+            if !self.details.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.tab, MonitorTab::Dashboard, "Dashboard");
+                    self.detail_tabs(ui);
+                });
+                ui.separator();
+            }
+            match self.tab {
+                MonitorTab::Detail(i) => match self.details.get_mut(i) {
+                    Some(DetailView::Thread(d)) => d.ui(ui, &mut wants),
+                    _ => self.tab = MonitorTab::Dashboard,
+                },
+                _ => self.mysql.ui(ui, now, &mut wants),
+            }
             self.handle(wants, &mut out);
             return out;
         }
@@ -420,21 +450,7 @@ impl Monitor {
                 ui.selectable_value(&mut self.tab, MonitorTab::Sessions, "Sessions");
                 ui.selectable_value(&mut self.tab, MonitorTab::Awr, "AWR / ASH");
                 ui.selectable_value(&mut self.tab, MonitorTab::Trace, "Trace analyzer");
-                let mut close = None;
-                for (i, d) in self.details.iter().enumerate() {
-                    ui.selectable_value(&mut self.tab, MonitorTab::Detail(i), d.title());
-                    if ui.small_button("×").on_hover_text("Close").clicked() {
-                        close = Some(i);
-                    }
-                }
-                if let Some(i) = close {
-                    self.details.remove(i);
-                    self.tab = match self.tab {
-                        MonitorTab::Detail(j) if j == i => MonitorTab::Sessions,
-                        MonitorTab::Detail(j) if j > i => MonitorTab::Detail(j - 1),
-                        t => t,
-                    };
-                }
+                self.detail_tabs(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some((text, error, until)) = &self.toast {
                         if now < *until {
@@ -470,6 +486,7 @@ impl Monitor {
             MonitorTab::Detail(i) => match self.details.get_mut(i) {
                 Some(DetailView::Session(d)) => d.ui(ui, caps, &mut wants),
                 Some(DetailView::Sql(d)) => d.ui(ui, caps, &mut wants),
+                Some(DetailView::Thread(d)) => d.ui(ui, &mut wants),
                 None => self.tab = MonitorTab::Sessions,
             },
         }
@@ -513,6 +530,19 @@ impl Monitor {
                 self.tab = MonitorTab::Detail(idx);
                 continue;
             }
+            if let Want::OpenThread { id } = want {
+                let found = self
+                    .details
+                    .iter()
+                    .position(|d| matches!(d, DetailView::Thread(t) if t.id == id));
+                let idx = found.unwrap_or_else(|| {
+                    self.details
+                        .push(DetailView::Thread(Box::new(ThreadDetailView::new(id))));
+                    self.details.len() - 1
+                });
+                self.tab = MonitorTab::Detail(idx);
+                continue;
+            }
             if let Want::OpenSqlDetail { sql_id } = want {
                 let found = self
                     .details
@@ -534,11 +564,35 @@ impl Monitor {
         out.actions.append(&mut self.actions);
     }
 
+    /// The tabs of the open details, each with a close button.
+    fn detail_tabs(&mut self, ui: &mut Ui) {
+        let mut close = None;
+        for (i, d) in self.details.iter().enumerate() {
+            ui.selectable_value(&mut self.tab, MonitorTab::Detail(i), d.title());
+            if ui.small_button("×").on_hover_text("Close").clicked() {
+                close = Some(i);
+            }
+        }
+        if let Some(i) = close {
+            self.details.remove(i);
+            let back = if self.is_mysql() {
+                MonitorTab::Dashboard
+            } else {
+                MonitorTab::Sessions
+            };
+            self.tab = match self.tab {
+                MonitorTab::Detail(j) if j == i => back,
+                MonitorTab::Detail(j) if j > i => MonitorTab::Detail(j - 1),
+                t => t,
+            };
+        }
+    }
+
     /// The open session details.
     fn session_details(&mut self) -> impl Iterator<Item = &mut SessionDetailView> {
         self.details.iter_mut().filter_map(|d| match d {
             DetailView::Session(s) => Some(&mut **s),
-            DetailView::Sql(_) => None,
+            DetailView::Sql(_) | DetailView::Thread(_) => None,
         })
     }
 
@@ -558,6 +612,27 @@ impl Monitor {
                 token: self.token(Job::MySqlDashboard),
                 task: MonitorTask::Client(Box::new(move |c| {
                     boxed(Ok(crate::mysql::snapshot(c, storage)))
+                })),
+            });
+        }
+        if let Want::ThreadDetail { id } = want {
+            return Some(MonitorRequest {
+                token: self.token(Job::ThreadDetail(id)),
+                task: MonitorTask::Client(Box::new(move |c| {
+                    boxed(Ok(crate::mysql::thread_detail(c, id)))
+                })),
+            });
+        }
+        if let Want::KillThread { id, query_only } = want {
+            let what = if query_only {
+                "Query of thread"
+            } else {
+                "Thread"
+            };
+            return Some(MonitorRequest {
+                token: self.token(Job::Control(format!("{what} {id} killed"))),
+                task: MonitorTask::Client(Box::new(move |c| {
+                    boxed(crate::mysql::kill(c, id, query_only))
                 })),
             });
         }
@@ -726,6 +801,9 @@ impl Monitor {
             | Want::ShowSessions(_)
             | Want::Analyze(_)
             | Want::Act(_)
+            | Want::OpenThread { .. }
+            | Want::ThreadDetail { .. }
+            | Want::KillThread { .. }
             | Want::MySqlDashboard { .. } => return None,
         };
         Some(MonitorRequest {
@@ -770,6 +848,16 @@ impl Monitor {
             Job::EventHistogram(event) => self.dashboard.on_histogram(&event, take(result)),
             Job::Tablespace(name) => self.dashboard.on_tablespace(&name, take(result)),
             Job::PgaUsers => self.dashboard.on_pga_users(take(result)),
+            Job::ThreadDetail(id) => {
+                let result = take(result);
+                let found = self.details.iter_mut().find_map(|d| match d {
+                    DetailView::Thread(t) if t.id == id => Some(t),
+                    _ => None,
+                });
+                if let Some(d) = found {
+                    d.on_detail(result);
+                }
+            }
             Job::History(scope, part) => {
                 use history::{HistoryPart, HistoryResult};
                 let result = match part {
@@ -826,6 +914,11 @@ impl Monitor {
                     for d in self.session_details() {
                         d.refresh();
                     }
+                    for d in &mut self.details {
+                        if let DetailView::Thread(t) = d {
+                            t.refresh();
+                        }
+                    }
                 }
                 Err(e) => self.toast(queries::explain_error(&e), true, now),
             },
@@ -860,4 +953,68 @@ pub(crate) fn refresh_selector(ui: &mut Ui, id: &str, refresh: &mut Refresh) {
                 ui.selectable_value(refresh, r, r.label());
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+    use crate::mysql::{MySqlSnapshot, Thread};
+
+    /// On MySQL a thread on the dashboard opens its details in a tab of
+    /// their own, which reads the thread; closing it shows the dashboard
+    /// again (#87).
+    #[test]
+    fn mysql_thread_tab() {
+        let mut monitor = Monitor::new(MonitorTab::Dashboard);
+        monitor.set_dialect(Dialect::MYSQL);
+        monitor.mysql.on_snapshot(
+            Ok(MySqlSnapshot {
+                running: vec![Thread {
+                    id: 77,
+                    user: "app".into(),
+                    command: "Query".into(),
+                    time_secs: 12,
+                    query: Some("select sleep(60)".into()),
+                    ..Thread::default()
+                }],
+                ..MySqlSnapshot::default()
+            }),
+            0.0,
+        );
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1200.0, 1600.0))
+            .build_ui_state(
+                |ui, (monitor, out): &mut (Monitor, Vec<String>)| {
+                    let o = monitor.ui(ui);
+                    out.extend(
+                        o.requests
+                            .iter()
+                            .map(|r| format!("{:?}", monitor.jobs.get(&r.token).map(job_name))),
+                    );
+                },
+                (monitor, Vec::new()),
+            );
+        harness.run_steps(2);
+        harness.get_by_label("77").click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().0.title(), "Thread 77");
+        assert!(
+            harness.state().1.iter().any(|j| j.contains("thread 77")),
+            "{:?}",
+            harness.state().1
+        );
+        harness.get_by_label("×").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().0.title(), "Dashboard");
+    }
+
+    fn job_name(job: &Job) -> String {
+        match job {
+            Job::ThreadDetail(id) => format!("thread {id}"),
+            _ => "other".into(),
+        }
+    }
 }

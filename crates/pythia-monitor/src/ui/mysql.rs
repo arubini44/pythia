@@ -179,13 +179,13 @@ impl MySqlDashboardView {
                 }
                 if !snap.lock_waits.is_empty() {
                     ui.add_space(8.0);
-                    lock_waits(ui, snap);
+                    lock_waits(ui, snap, wants);
                 }
                 ui.add_space(8.0);
-                running(ui, snap);
+                running(ui, snap, wants);
                 if !snap.transactions.is_empty() {
                     ui.add_space(8.0);
-                    transactions(ui, snap);
+                    transactions(ui, snap, wants);
                 }
                 if !snap.replicas.is_empty() {
                     ui.add_space(8.0);
@@ -452,7 +452,16 @@ fn activity(ui: &mut Ui, snap: &MySqlSnapshot) {
 
 /// A plain table: (title, width, right-aligned) columns, the last one
 /// taking the rest. Its cells show their full text on hover.
-fn table(ui: &mut Ui, id: &str, columns: &[(&str, f32, bool)], rows: &[Vec<String>]) {
+/// A table of text; the cells of `threads` columns are thread ids, links to
+/// the thread: returns the one clicked.
+fn table(
+    ui: &mut Ui,
+    id: &str,
+    columns: &[(&str, f32, bool)],
+    rows: &[Vec<String>],
+    threads: &[usize],
+) -> Option<i64> {
+    let mut clicked = None;
     let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
     let mut builder = TableBuilder::new(ui)
         .id_salt(id)
@@ -492,16 +501,23 @@ fn table(ui: &mut Ui, id: &str, columns: &[(&str, f32, bool)], rows: &[Vec<Strin
                             egui::Layout::left_to_right(egui::Align::Center)
                         };
                         ui.with_layout(layout, |ui| {
-                            ui.add(egui::Label::new(label).truncate())
-                                .on_hover_text(text);
+                            if threads.contains(&i) && !text.is_empty() {
+                                if ui.link(label).on_hover_text("Show the thread").clicked() {
+                                    clicked = text.parse().ok();
+                                }
+                            } else {
+                                ui.add(egui::Label::new(label).truncate())
+                                    .on_hover_text(text);
+                            }
                         });
                     });
                 }
             });
         });
+    clicked
 }
 
-fn lock_waits(ui: &mut Ui, snap: &MySqlSnapshot) {
+fn lock_waits(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
     section(ui, "Lock waits", |ui| {
         let rows: Vec<Vec<String>> = snap
             .lock_waits
@@ -519,7 +535,7 @@ fn lock_waits(ui: &mut Ui, snap: &MySqlSnapshot) {
                 ]
             })
             .collect();
-        table(
+        let thread = table(
             ui,
             "mysql-lock-waits",
             &[
@@ -531,11 +547,15 @@ fn lock_waits(ui: &mut Ui, snap: &MySqlSnapshot) {
                 ("Waiting statement", 0.0, false),
             ],
             &rows,
+            &[0, 2],
         );
+        if let Some(id) = thread {
+            wants.push(Want::OpenThread { id });
+        }
     });
 }
 
-fn running(ui: &mut Ui, snap: &MySqlSnapshot) {
+fn running(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
     section(ui, "Running statements, longest first", |ui| {
         if snap.running.is_empty() {
             ui.weak("—");
@@ -559,7 +579,7 @@ fn running(ui: &mut Ui, snap: &MySqlSnapshot) {
                 ]
             })
             .collect();
-        table(
+        let thread = table(
             ui,
             "mysql-running",
             &[
@@ -571,11 +591,15 @@ fn running(ui: &mut Ui, snap: &MySqlSnapshot) {
                 ("Statement", 0.0, false),
             ],
             &rows,
+            &[0],
         );
+        if let Some(id) = thread {
+            wants.push(Want::OpenThread { id });
+        }
     });
 }
 
-fn transactions(ui: &mut Ui, snap: &MySqlSnapshot) {
+fn transactions(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
     let title = match snap.open_transactions {
         Some(n) if n as usize > snap.transactions.len() => {
             format!("Open transactions, oldest first ({n} in all)")
@@ -602,7 +626,7 @@ fn transactions(ui: &mut Ui, snap: &MySqlSnapshot) {
                 ]
             })
             .collect();
-        table(
+        let thread = table(
             ui,
             "mysql-transactions",
             &[
@@ -615,7 +639,11 @@ fn transactions(ui: &mut Ui, snap: &MySqlSnapshot) {
                 ("Statement", 0.0, false),
             ],
             &rows,
+            &[0],
         );
+        if let Some(id) = thread {
+            wants.push(Want::OpenThread { id });
+        }
     });
 }
 
@@ -652,6 +680,7 @@ fn replication(ui: &mut Ui, snap: &MySqlSnapshot) {
                 ("Last error", 0.0, false),
             ],
             &rows,
+            &[],
         );
     });
 }
