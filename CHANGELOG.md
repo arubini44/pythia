@@ -41,6 +41,15 @@ All notable changes to Pythia are documented here. The format follows
   waits per second and average wait. An event opens the sessions waiting
   on it now, and its latency histogram (`V$EVENT_HISTOGRAM`) unfolds below
   it (#74).
+- Monitor: *History* of a session (a tab of its details) or a statement (a
+  section of its details), from the management packs. With the
+  Diagnostics Pack: its activity in the last hour from Active Session
+  History (per minute and wait class, events, objects, the statements or
+  sessions involved, who blocked it), an ASH report of just it, and a
+  statement's plan history from AWR with the plans AWR kept. With the
+  Tuning Pack: the executions SQL Monitor watched, with their report as
+  text or in the browser. A pack that isn't enabled says so instead, and
+  its views are no longer even probed (#74).
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
 - **Debug…** next to **Test…** on procedures, functions and package

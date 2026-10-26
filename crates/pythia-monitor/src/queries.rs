@@ -1025,9 +1025,12 @@ pub enum DetailTab {
     Cursors,
     Locks,
     Columns,
+    /// What the management packs keep (read by the view itself).
+    History,
 }
 
 impl DetailTab {
+    /// The parts read from the database (all but History).
     pub const ALL: [DetailTab; 8] = [
         DetailTab::Overview,
         DetailTab::Sql,
@@ -1060,6 +1063,7 @@ impl DetailTab {
             DetailTab::Cursors => &["Open cursors"],
             DetailTab::Locks => &["Locks"],
             DetailTab::Columns => &["Columns"],
+            DetailTab::History => &[],
         }
     }
 }
@@ -1124,6 +1128,7 @@ impl SessionDetail {
                 DetailTab::Cursors => self.cursors = std::mem::take(&mut newer.cursors),
                 DetailTab::Locks => self.locks = std::mem::take(&mut newer.locks),
                 DetailTab::Columns => self.columns = std::mem::take(&mut newer.columns),
+                DetailTab::History => {}
             }
             if !self.loaded.contains(&part) {
                 self.loaded.push(part);
@@ -1383,6 +1388,7 @@ pub fn session_details(
                 "Columns",
                 session_columns(conn, sid, serial).map(|c| d.columns = c),
             ),
+            DetailTab::History => {}
         }
     }
     d.loaded = parts.to_vec();
@@ -2251,22 +2257,297 @@ pub fn awr_report(
 
 /// ASH report for the last `minutes` minutes, as text or HTML.
 pub fn ash_report(conn: &Connection, minutes: i64, html: bool) -> Result<String> {
+    ash_report_for(conn, None, minutes, html)
+}
+
+/// An ASH report of the last `minutes`, of one session or statement or of
+/// everything.
+pub fn ash_report_for(
+    conn: &Connection,
+    scope: Option<&Scope>,
+    minutes: i64,
+    html: bool,
+) -> Result<String> {
     let func = if html {
         "ash_report_html"
     } else {
         "ash_report_text"
     };
     let dbid = dbid_column(conn)?;
+    let (sid, sql_id): (Option<i64>, Option<&str>) = match scope {
+        Some(Scope::Session { sid, .. }) => (Some(*sid), None),
+        Some(Scope::Sql(id)) => (None, Some(id)),
+        None => (None, None),
+    };
     collect_lines(
         conn,
         &format!(
             "select output from table(dbms_workload_repository.{func}( \
-               (select {dbid} from v$database), \
-               (select instance_number from v$instance), \
-               sysdate - :1 / 1440, sysdate))"
+               l_dbid => (select {dbid} from v$database), \
+               l_inst_num => (select instance_number from v$instance), \
+               l_btime => sysdate - :1 / 1440, l_etime => sysdate, \
+               l_sid => :2, l_sql_id => :3))"
         ),
-        &[&minutes],
+        &[&minutes, &sid, &sql_id],
     )
+}
+
+// ----- history (management packs) -------------------------------------
+
+/// What activity, plan history and monitored executions are about.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Scope {
+    Session { sid: i64, serial: i64 },
+    Sql(String),
+}
+
+impl Scope {
+    /// The `V$ACTIVE_SESSION_HISTORY` / `V$SQL_MONITOR` condition, with
+    /// its binds.
+    fn filter(&self, sid_col: &str, serial_col: &str) -> (String, Vec<Box<dyn ToSql>>) {
+        match self {
+            Scope::Session { sid, serial } => (
+                format!("{sid_col} = :s1 and {serial_col} = :s2"),
+                vec![Box::new(*sid), Box::new(*serial)],
+            ),
+            Scope::Sql(id) => ("sql_id = :s1".to_owned(), vec![Box::new(id.clone())]),
+        }
+    }
+}
+
+/// A session's or statement's activity from Active Session History
+/// (Diagnostics Pack), in samples (about one per second active).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AshActivity {
+    /// Per minute (`HH24:MI`) and wait class (`CPU` on CPU): samples.
+    pub timeline: Vec<(String, String, i64)>,
+    pub events: Vec<(String, i64)>,
+    /// The statements a session ran.
+    pub sql: Vec<(String, i64)>,
+    /// The sessions that ran a statement: sid, serial#, samples.
+    pub sessions: Vec<(i64, i64, i64)>,
+    /// Objects waited on (`CURRENT_OBJ#`), `OWNER.NAME`.
+    pub objects: Vec<(String, i64)>,
+    /// Who blocked it: sid, serial#, samples.
+    pub blockers: Vec<(i64, Option<i64>, i64)>,
+    pub samples: i64,
+}
+
+/// Activity of the last `minutes` from `V$ACTIVE_SESSION_HISTORY`.
+pub fn ash_activity(conn: &Connection, scope: &Scope, minutes: i64) -> Result<AshActivity> {
+    let (filter, binds) = scope.filter("session_id", "session_serial#");
+    // SAMPLE_TIME is in the server's time without a zone: compared with
+    // SYSTIMESTAMP, it would take the session's time zone (the client's).
+    let filter = format!(
+        "{filter} and sample_time > cast(systimestamp as timestamp) - numtodsinterval(:m, 'MINUTE')"
+    );
+    let mut params: Vec<&dyn ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    params.push(&minutes);
+    let ash = "v$active_session_history";
+    let mut a = AshActivity {
+        timeline: query(
+            conn,
+            &format!(
+                "select to_char(trunc(sample_time, 'MI'), 'HH24:MI'), nvl(wait_class, 'CPU'), count(*) \
+                   from {ash} where {filter} \
+                  group by trunc(sample_time, 'MI'), nvl(wait_class, 'CPU') order by 1"
+            ),
+            &params,
+            |r| Ok((get(r, 0)?, get(r, 1)?, get(r, 2)?)),
+        )?,
+        ..AshActivity::default()
+    };
+    a.samples = a.timeline.iter().map(|t| t.2).sum();
+    let top = |select: &str, group: &str| -> String {
+        compat::first_rows(
+            &format!(
+                "select {select}, count(*) from {ash} where {filter} group by {group} order by count(*) desc"
+            ),
+            10,
+        )
+    };
+    a.events = query(
+        conn,
+        &top("nvl(event, 'ON CPU')", "nvl(event, 'ON CPU')"),
+        &params,
+        |r| Ok((get(r, 0)?, get(r, 1)?)),
+    )?;
+    match scope {
+        Scope::Session { .. } => {
+            a.sql = query(
+                conn,
+                &top("sql_id", "sql_id").replace(" group by", " and sql_id is not null group by"),
+                &params,
+                |r| Ok((get(r, 0)?, get(r, 1)?)),
+            )?;
+        }
+        Scope::Sql(_) => {
+            a.sessions = query(
+                conn,
+                &top("session_id, session_serial#", "session_id, session_serial#"),
+                &params,
+                |r| Ok((get(r, 0)?, get(r, 1)?, get(r, 2)?)),
+            )?;
+        }
+    }
+    a.blockers = query(
+        conn,
+        &top(
+            "blocking_session, blocking_session_serial#",
+            "blocking_session, blocking_session_serial#",
+        )
+        .replace(" group by", " and blocking_session is not null group by"),
+        &params,
+        |r| Ok((get(r, 0)?, get(r, 1)?, get(r, 2)?)),
+    )?;
+    let objects = compat::first_rows(
+        &format!(
+            "select o.owner || '.' || o.object_name, count(*) \
+               from {ash} a join {{objects}} o on o.object_id = a.current_obj# \
+              where {} and a.current_obj# > 0 \
+              group by o.owner, o.object_name order by count(*) desc",
+            filter
+                .replace("session_id", "a.session_id")
+                .replace("sql_id", "a.sql_id")
+                .replace("sample_time", "a.sample_time")
+        ),
+        10,
+    );
+    a.objects = with_objects(&objects, |sql| {
+        query(conn, sql, &params, |r| Ok((get(r, 0)?, get(r, 1)?)))
+    })?;
+    Ok(a)
+}
+
+/// A statement's executions per AWR snapshot (Diagnostics Pack).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanHistoryRow {
+    /// The AWR it is in: a PDB's own, or the database's.
+    pub dbid: i64,
+    pub snap_id: i64,
+    /// When the snapshot ended.
+    pub end: String,
+    pub plan_hash: i64,
+    pub executions: f64,
+    pub elapsed: f64,
+    pub buffer_gets: f64,
+    pub rows: f64,
+}
+
+/// When which plan ran, from `DBA_HIST_SQLSTAT`.
+pub fn plan_history(conn: &Connection, sql_id: &str) -> Result<Vec<PlanHistoryRow>> {
+    query(
+        conn,
+        "select s.snap_id, to_char(sn.end_interval_time, 'YYYY-MM-DD HH24:MI'), s.plan_hash_value, \
+                s.executions_delta, s.elapsed_time_delta / 1e6, s.buffer_gets_delta, s.rows_processed_delta, \
+                s.dbid \
+           from dba_hist_sqlstat s \
+           join dba_hist_snapshot sn \
+             on sn.snap_id = s.snap_id and sn.dbid = s.dbid and sn.instance_number = s.instance_number \
+          where s.sql_id = :1 \
+          order by s.snap_id, s.plan_hash_value",
+        &[&sql_id],
+        |r| {
+            let f = |i| -> Result<f64> { Ok(get::<Option<f64>>(r, i)?.unwrap_or(0.0)) };
+            Ok(PlanHistoryRow {
+                dbid: get(r, 7)?,
+                snap_id: get(r, 0)?,
+                end: get::<Option<String>>(r, 1)?.unwrap_or_default(),
+                plan_hash: get::<Option<i64>>(r, 2)?.unwrap_or(0),
+                executions: f(3)?,
+                elapsed: f(4)?,
+                buffer_gets: f(5)?,
+                rows: f(6)?,
+            })
+        },
+    )
+}
+
+/// A plan AWR kept, from the AWR with `dbid` (a plan history row's).
+pub fn awr_plan(conn: &Connection, sql_id: &str, plan_hash: i64, dbid: i64) -> Result<Vec<String>> {
+    let sql = if compat::at_least(conn, 12, 2)? {
+        // A PDB with snapshots of its own keeps them apart from the root's.
+        "select plan_table_output from table(dbms_xplan.display_workload_repository( \
+           sql_id => :1, plan_hash_value => :2, dbid => :3, \
+           awr_location => case when sys_context('USERENV', 'CON_ID') > 2 \
+                                 and :3 = (select con_dbid from v$database) \
+                                then 'AWR_PDB' else 'AWR_ROOT' end))"
+    } else {
+        "select plan_table_output from table(dbms_xplan.display_awr(:1, :2, :3))"
+    };
+    query(conn, sql, &[&sql_id, &plan_hash, &dbid], |r| {
+        Ok(get::<Option<String>>(r, 0)?.unwrap_or_default())
+    })
+}
+
+/// An execution SQL Monitor watched (Tuning Pack): long-running, parallel
+/// or hinted `MONITOR`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitoredExecution {
+    pub sql_id: String,
+    pub exec_id: i64,
+    /// `YYYY-MM-DD HH24:MI:SS`, which with the SQL_ID and the id names it.
+    pub start: String,
+    pub status: String,
+    pub sid: i64,
+    pub serial: i64,
+    pub user: Option<String>,
+    pub elapsed: f64,
+    pub cpu: f64,
+    pub buffer_gets: f64,
+}
+
+/// The executions SQL Monitor has of a session or statement, newest first.
+pub fn monitored_executions(conn: &Connection, scope: &Scope) -> Result<Vec<MonitoredExecution>> {
+    let (filter, binds) = scope.filter("sid", "session_serial#");
+    let params: Vec<&dyn ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    query(
+        conn,
+        &compat::first_rows(
+            &format!(
+                "select sql_id, sql_exec_id, to_char(sql_exec_start, 'YYYY-MM-DD HH24:MI:SS'), status, \
+                        sid, session_serial#, username, elapsed_time / 1e6, cpu_time / 1e6, buffer_gets \
+                   from v$sql_monitor where {filter} and sql_id is not null \
+                  order by sql_exec_start desc"
+            ),
+            20,
+        ),
+        &params,
+        |r| {
+            let f = |i| -> Result<f64> { Ok(get::<Option<f64>>(r, i)?.unwrap_or(0.0)) };
+            Ok(MonitoredExecution {
+                sql_id: get(r, 0)?,
+                exec_id: get(r, 1)?,
+                start: get::<Option<String>>(r, 2)?.unwrap_or_default(),
+                status: get::<Option<String>>(r, 3)?.unwrap_or_default(),
+                sid: get(r, 4)?,
+                serial: get(r, 5)?,
+                user: get(r, 6)?,
+                elapsed: f(7)?,
+                cpu: f(8)?,
+                buffer_gets: f(9)?,
+            })
+        },
+    )
+}
+
+/// The SQL Monitor report of one execution, as text or HTML.
+pub fn sql_monitor_report(
+    conn: &Connection,
+    package: &str,
+    e: &MonitoredExecution,
+    html: bool,
+) -> Result<String> {
+    let kind = if html { "HTML" } else { "TEXT" };
+    let report: Option<String> = conn.query_row_as(
+        &format!(
+            "select {package}.report_sql_monitor(sql_id => :1, sql_exec_id => :2, \
+                    sql_exec_start => to_date(:3, 'YYYY-MM-DD HH24:MI:SS'), type => :4) \
+               from dual"
+        ),
+        &[&e.sql_id, &e.exec_id, &e.start, &kind],
+    )?;
+    Ok(report.unwrap_or_default())
 }
 
 // ----- capabilities ------------------------------------------------------
@@ -2281,6 +2562,9 @@ pub struct Capabilities {
     pub alter_system: bool,
     pub dbms_monitor: bool,
     pub dbms_workload_repository: bool,
+    /// The package with REPORT_SQL_MONITOR: DBMS_SQL_MONITOR (12c+), else
+    /// DBMS_SQLTUNE.
+    pub sql_monitor_package: Option<&'static str>,
     /// The server's release, for statements newer versions have.
     pub release: compat::Release,
 }
@@ -2303,9 +2587,17 @@ const PROBED_VIEWS: &[&str] = &[
     "DBA_TABLESPACE_USAGE_METRICS",
     "V$DIAG_TRACE_FILE",
     "V$DIAG_TRACE_FILE_CONTENTS",
+];
+
+/// Views of the Diagnostics Pack: not even probed unless it is enabled.
+const DIAGNOSTICS_VIEWS: &[&str] = &[
     "DBA_HIST_SNAPSHOT",
+    "DBA_HIST_SQLSTAT",
     "V$ACTIVE_SESSION_HISTORY",
 ];
+
+/// Views of the Tuning Pack, likewise.
+const TUNING_VIEWS: &[&str] = &["V$SQL_MONITOR"];
 
 impl Capabilities {
     pub fn can(&self, view: &str) -> bool {
@@ -2316,28 +2608,75 @@ impl Capabilities {
 
     /// True if the Diagnostics Pack is enabled for this database.
     pub fn diagnostics_licensed(&self) -> bool {
+        self.pack_enabled("DIAGNOSTIC")
+    }
+
+    pub fn tuning_licensed(&self) -> bool {
+        self.pack_enabled("TUNING")
+    }
+
+    fn pack_enabled(&self, pack: &str) -> bool {
         self.pack_access
             .as_deref()
-            .is_some_and(|v| v.to_ascii_uppercase().contains("DIAGNOSTIC"))
+            .is_some_and(|v| v.to_ascii_uppercase().contains(pack))
+    }
+
+    /// Whether a management pack is enabled, or why `what` isn't offered.
+    fn pack(&self, pack: &str, name: &str, what: &str) -> std::result::Result<(), String> {
+        match &self.pack_access {
+            None => Err(format!(
+                "The control_management_pack_access parameter can't be read, so it is unknown whether \
+                 the Oracle {name} is licensed. {what} is disabled."
+            )),
+            Some(_) if !self.pack_enabled(pack) => Err(format!(
+                "{what} requires the Oracle {name}, which is not enabled on this database \
+                 (control_management_pack_access = {}).",
+                self.pack_access.as_deref().unwrap_or("NONE")
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether Active Session History may be read, or why not.
+    pub fn ash(&self) -> std::result::Result<(), String> {
+        self.pack("DIAGNOSTIC", "Diagnostics Pack", "Active Session History")?;
+        if self.can("V$ACTIVE_SESSION_HISTORY") {
+            Ok(())
+        } else {
+            Err(format!(
+                "Active Session History needs SELECT on V$ACTIVE_SESSION_HISTORY ({DICTIONARY_GRANT})."
+            ))
+        }
+    }
+
+    /// Whether a statement's plan history (AWR) may be read, or why not.
+    pub fn plan_history(&self) -> std::result::Result<(), String> {
+        self.pack("DIAGNOSTIC", "Diagnostics Pack", "Plan history from AWR")?;
+        if self.can("DBA_HIST_SQLSTAT") && self.can("DBA_HIST_SNAPSHOT") {
+            Ok(())
+        } else {
+            Err(format!(
+                "Plan history needs SELECT on DBA_HIST_SQLSTAT and DBA_HIST_SNAPSHOT ({DICTIONARY_GRANT})."
+            ))
+        }
+    }
+
+    /// Whether SQL Monitor may be used, or why not.
+    pub fn sql_monitor(&self) -> std::result::Result<(), String> {
+        self.pack("TUNING", "Tuning Pack", "SQL Monitor")?;
+        if self.can("V$SQL_MONITOR") && self.sql_monitor_package.is_some() {
+            Ok(())
+        } else {
+            Err(format!(
+                "SQL Monitor needs SELECT on V$SQL_MONITOR ({DICTIONARY_GRANT}) and EXECUTE on \
+                 DBMS_SQL_MONITOR or DBMS_SQLTUNE."
+            ))
+        }
     }
 
     /// Whether AWR/ASH reports may be used, or why not.
     pub fn awr(&self) -> std::result::Result<(), String> {
-        match &self.pack_access {
-            None => {
-                return Err("The control_management_pack_access parameter can't be read, so it is unknown whether \
-                     the Oracle Diagnostics Pack is licensed. AWR and ASH are disabled."
-                    .into());
-            }
-            Some(_) if !self.diagnostics_licensed() => {
-                return Err(format!(
-                    "AWR and ASH require the Oracle Diagnostics Pack, which is not enabled on this database \
-                     (control_management_pack_access = {}).",
-                    self.pack_access.as_deref().unwrap_or("NONE")
-                ));
-            }
-            _ => {}
-        }
+        self.pack("DIAGNOSTIC", "Diagnostics Pack", "AWR and ASH")?;
         if !self.can("DBA_HIST_SNAPSHOT") || !self.dbms_workload_repository {
             return Err(format!(
                 "AWR needs SELECT on DBA_HIST_SNAPSHOT ({DICTIONARY_GRANT}) and EXECUTE on DBMS_WORKLOAD_REPOSITORY."
@@ -2395,16 +2734,7 @@ impl Capabilities {
 
 pub fn capabilities(conn: &Connection) -> Result<Capabilities> {
     let user: String = conn.query_row_as("select user from dual", &[])?;
-    let views = PROBED_VIEWS
-        .iter()
-        .map(|v| {
-            (
-                *v,
-                conn.query_row_as::<i64>(&format!("select count(*) from {v} where 1 = 0"), &[])
-                    .is_ok(),
-            )
-        })
-        .collect();
+    // The packs first: their views aren't touched unless they are enabled.
     let pack_access = conn
         .query_row_as::<Option<String>>(
             "select value from v$parameter where name = 'control_management_pack_access'",
@@ -2412,6 +2742,28 @@ pub fn capabilities(conn: &Connection) -> Result<Capabilities> {
         )
         .ok()
         .map(|v| v.unwrap_or_else(|| "NONE".into()));
+    let enabled = |pack: &str| {
+        pack_access
+            .as_deref()
+            .is_some_and(|v| v.to_ascii_uppercase().contains(pack))
+    };
+    let mut probed: Vec<&'static str> = PROBED_VIEWS.to_vec();
+    if enabled("DIAGNOSTIC") {
+        probed.extend(DIAGNOSTICS_VIEWS);
+    }
+    if enabled("TUNING") {
+        probed.extend(TUNING_VIEWS);
+    }
+    let views = probed
+        .into_iter()
+        .map(|v| {
+            (
+                v,
+                conn.query_row_as::<i64>(&format!("select count(*) from {v} where 1 = 0"), &[])
+                    .is_ok(),
+            )
+        })
+        .collect();
     let alter_system = conn
         .query_row_as::<i64>(
             "select count(*) from session_privs where privilege = 'ALTER SYSTEM'",
@@ -2432,6 +2784,9 @@ pub fn capabilities(conn: &Connection) -> Result<Capabilities> {
         alter_system,
         dbms_monitor: has_package("DBMS_MONITOR"),
         dbms_workload_repository: has_package("DBMS_WORKLOAD_REPOSITORY"),
+        sql_monitor_package: ["DBMS_SQL_MONITOR", "DBMS_SQLTUNE"]
+            .into_iter()
+            .find(|p| has_package(p)),
         release: compat::release(conn)?,
     })
 }
@@ -2621,5 +2976,30 @@ mod tests {
         assert!(caps.awr().is_ok());
         caps.dbms_workload_repository = false;
         assert!(caps.awr().is_err());
+    }
+
+    /// ASH and plan history need the Diagnostics Pack, SQL Monitor the
+    /// Tuning Pack, and each its views.
+    #[test]
+    fn pack_gates() {
+        let mut caps = Capabilities {
+            views: vec![
+                ("V$ACTIVE_SESSION_HISTORY", true),
+                ("DBA_HIST_SQLSTAT", true),
+                ("DBA_HIST_SNAPSHOT", true),
+                ("V$SQL_MONITOR", true),
+            ],
+            sql_monitor_package: Some("DBMS_SQL_MONITOR"),
+            pack_access: Some("DIAGNOSTIC".into()),
+            ..Capabilities::default()
+        };
+        assert!(caps.ash().is_ok() && caps.plan_history().is_ok());
+        assert!(caps.sql_monitor().unwrap_err().contains("Tuning Pack"));
+        caps.pack_access = Some("DIAGNOSTIC+TUNING".into());
+        assert!(caps.sql_monitor().is_ok());
+        caps.pack_access = Some("NONE".into());
+        assert!(caps.ash().unwrap_err().contains("Diagnostics Pack"));
+        caps.pack_access = None;
+        assert!(caps.plan_history().unwrap_err().contains("unknown"));
     }
 }

@@ -8,11 +8,12 @@ use egui::{RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 use pythia_db::DbError;
 
+use super::history::HistoryView;
 use super::sessions::{KillConfirm, RowAction, kill_dialog, session_actions};
 use super::style::{self, Palette, duration, section};
 use super::{Analysis, MonitorAction, Want, Wants};
 use crate::queries::{
-    Capabilities, DetailTab, SessionDetail, SessionOverview, Transaction, explain_error,
+    Capabilities, DetailTab, Scope, SessionDetail, SessionOverview, Transaction, explain_error,
 };
 
 /// The parts the assistant's analysis is made of.
@@ -45,6 +46,8 @@ pub struct SessionDetailView {
     confirm: Option<KillConfirm>,
     /// Analyze with AI waits for the parts it needs.
     analyze: bool,
+    /// Its activity, ASH report and monitored executions.
+    pub(crate) history: HistoryView,
 }
 
 impl SessionDetailView {
@@ -64,6 +67,7 @@ impl SessionDetailView {
             column_filter: String::new(),
             confirm: None,
             analyze: false,
+            history: HistoryView::new(Scope::Session { sid, serial }),
         }
     }
 
@@ -93,6 +97,7 @@ impl SessionDetailView {
             let shown = self.tab;
             d.loaded.retain(|t| *t == shown);
         }
+        self.history.refresh();
     }
 
     /// Asks for the header and `parts`.
@@ -321,6 +326,7 @@ impl SessionDetailView {
                 (DetailTab::Cursors, "Open cursors"),
                 (DetailTab::Locks, "Locks"),
                 (DetailTab::Columns, "All columns"),
+                (DetailTab::History, "History"),
             ] {
                 ui.selectable_value(&mut self.tab, t, label);
             }
@@ -688,6 +694,11 @@ impl SessionDetailView {
                         });
                     },
                 );
+            }
+            DetailTab::History => {
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| self.history.ui(ui, caps, wants));
             }
             DetailTab::Columns => {
                 ui.add(

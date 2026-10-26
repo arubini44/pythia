@@ -6,9 +6,10 @@ use egui::{RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 use pythia_db::DbError;
 
+use super::history::HistoryView;
 use super::style::{self, compact, duration, section};
 use super::{Analysis, MonitorAction, Want, Wants};
-use crate::queries::{SqlDetail, explain_error};
+use crate::queries::{Capabilities, Scope, SqlDetail, explain_error};
 
 pub struct SqlDetailView {
     pub sql_id: String,
@@ -18,11 +19,14 @@ pub struct SqlDetailView {
     requested: bool,
     /// The child cursor asked for (else the most executed).
     child: Option<i64>,
+    /// Its activity, plan history and monitored executions.
+    pub(crate) history: HistoryView,
 }
 
 impl SqlDetailView {
     pub fn new(sql_id: String) -> Self {
         Self {
+            history: HistoryView::new(Scope::Sql(sql_id.clone())),
             sql_id,
             detail: None,
             error: None,
@@ -57,7 +61,7 @@ impl SqlDetailView {
         });
     }
 
-    pub(crate) fn ui(&mut self, ui: &mut Ui, wants: &mut Wants) {
+    pub(crate) fn ui(&mut self, ui: &mut Ui, caps: Option<&Capabilities>, wants: &mut Wants) {
         if !self.requested && !self.loading {
             self.request(wants);
         }
@@ -106,6 +110,7 @@ impl SqlDetailView {
         ui.separator();
         if reload {
             self.request(wants);
+            self.history.refresh();
         }
         if let Some(e) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, e);
@@ -185,6 +190,13 @@ impl SqlDetailView {
                         ui.add_space(6.0);
                     }
                 }
+                let history = &mut self.history;
+                egui::CollapsingHeader::new(
+                    RichText::new("History: activity, plan history, SQL Monitor").strong(),
+                )
+                .id_salt("sql-history")
+                .show(ui, |ui| history.ui(ui, caps, wants));
+                ui.add_space(6.0);
                 section(ui, "Sessions running it now", |ui| {
                     if d.sessions.is_empty() {
                         ui.weak("None");
@@ -457,7 +469,7 @@ mod tests {
         let mut harness = Harness::builder()
             .with_size(egui::vec2(1000.0, 900.0))
             .build_ui_state(
-                |ui, (view, wants): &mut (SqlDetailView, Wants)| view.ui(ui, wants),
+                |ui, (view, wants): &mut (SqlDetailView, Wants)| view.ui(ui, None, wants),
                 (view, Wants::default()),
             );
         harness.run_steps(2);

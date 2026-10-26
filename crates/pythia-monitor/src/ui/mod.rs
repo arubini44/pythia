@@ -23,6 +23,7 @@
 mod awr;
 mod dashboard;
 mod detail;
+mod history;
 mod mysql;
 mod sessions;
 mod sql_detail;
@@ -166,6 +167,18 @@ pub(crate) enum Want {
     EventHistogram {
         event: String,
     },
+    /// What the management packs keep about a session or statement.
+    History {
+        scope: queries::Scope,
+        part: history::HistoryPart,
+    },
+    /// The SQL Monitor report of an execution.
+    MonitorReport {
+        scope: queries::Scope,
+        execution: Box<queries::MonitoredExecution>,
+        title: String,
+        html: bool,
+    },
     Trace {
         sid: i64,
         serial: i64,
@@ -236,6 +249,7 @@ enum Job {
     Detail(i64, i64),
     SqlDetail(String),
     EventHistogram(String),
+    History(queries::Scope, history::HistoryPart),
     Control(String),
     Transaction(i64, i64),
     AwrSnapshots,
@@ -278,6 +292,8 @@ pub struct Monitor {
     toast: Option<(String, bool, f64)>,
     /// Follow-up requests produced while handling results.
     deferred: Vec<Want>,
+    /// Things for the host that came out of results (a report to open).
+    actions: Vec<MonitorAction>,
     /// The host has an AI assistant: views offer to analyze with it.
     analyze: bool,
 }
@@ -306,6 +322,7 @@ impl Monitor {
             next_token: 1,
             toast: None,
             deferred: Vec::new(),
+            actions: Vec::new(),
             analyze: false,
         }
     }
@@ -444,7 +461,7 @@ impl Monitor {
             MonitorTab::Trace => self.trace.ui(ui, caps, &mut wants),
             MonitorTab::Detail(i) => match self.details.get_mut(i) {
                 Some(DetailView::Session(d)) => d.ui(ui, caps, &mut wants),
-                Some(DetailView::Sql(d)) => d.ui(ui, &mut wants),
+                Some(DetailView::Sql(d)) => d.ui(ui, caps, &mut wants),
                 None => self.tab = MonitorTab::Sessions,
             },
         }
@@ -506,6 +523,7 @@ impl Monitor {
             }
         }
         out.actions.append(&mut self.awr.actions);
+        out.actions.append(&mut self.actions);
     }
 
     /// The open session details.
@@ -584,6 +602,50 @@ impl Monitor {
                 Job::Transaction(sid, serial),
                 Box::new(move |c| boxed(queries::transaction(c, sid, serial))),
             ),
+            Want::History { scope, part } => {
+                let (s, p) = (scope.clone(), part.clone());
+                let task: TaskFn = Box::new(move |c| match &p {
+                    history::HistoryPart::Ash => {
+                        boxed(queries::ash_activity(c, &s, history::ASH_MINUTES))
+                    }
+                    history::HistoryPart::Monitored => boxed(queries::monitored_executions(c, &s)),
+                    history::HistoryPart::Plans => match &s {
+                        queries::Scope::Sql(id) => boxed(queries::plan_history(c, id)),
+                        queries::Scope::Session { .. } => {
+                            boxed(Ok(Vec::<queries::PlanHistoryRow>::new()))
+                        }
+                    },
+                    history::HistoryPart::AwrPlan(hash, dbid) => match &s {
+                        queries::Scope::Sql(id) => boxed(queries::awr_plan(c, id, *hash, *dbid)),
+                        queries::Scope::Session { .. } => boxed(Ok(Vec::<String>::new())),
+                    },
+                    history::HistoryPart::Report { html, .. } => boxed(queries::ash_report_for(
+                        c,
+                        Some(&s),
+                        history::ASH_MINUTES,
+                        *html,
+                    )),
+                });
+                (Job::History(scope, part), task)
+            }
+            Want::MonitorReport {
+                scope,
+                execution,
+                title,
+                html,
+            } => {
+                let package = self
+                    .capabilities()
+                    .and_then(|c| c.sql_monitor_package)
+                    .unwrap_or("DBMS_SQL_MONITOR");
+                let task: TaskFn = Box::new(move |c| {
+                    boxed(queries::sql_monitor_report(c, package, &execution, html))
+                });
+                (
+                    Job::History(scope, history::HistoryPart::Report { title, html }),
+                    task,
+                )
+            }
             Want::EventHistogram { event } => (
                 Job::EventHistogram(event.clone()),
                 Box::new(move |c| boxed(queries::event_histogram(c, &event))),
@@ -693,6 +755,34 @@ impl Monitor {
                 }
             }
             Job::EventHistogram(event) => self.dashboard.on_histogram(&event, take(result)),
+            Job::History(scope, part) => {
+                use history::{HistoryPart, HistoryResult};
+                let result = match part {
+                    HistoryPart::Ash => HistoryResult::Ash(take(result)),
+                    HistoryPart::Monitored => HistoryResult::Monitored(take(result)),
+                    HistoryPart::Plans => HistoryResult::Plans(take(result)),
+                    HistoryPart::AwrPlan(hash, _) => HistoryResult::AwrPlan(hash, take(result)),
+                    HistoryPart::Report { title, html } => HistoryResult::Report {
+                        title,
+                        html,
+                        result: take(result),
+                    },
+                };
+                let view = self.details.iter_mut().find_map(|d| match (d, &scope) {
+                    (DetailView::Session(v), queries::Scope::Session { sid, serial })
+                        if v.sid == *sid && v.serial == *serial =>
+                    {
+                        Some(&mut v.history)
+                    }
+                    (DetailView::Sql(v), queries::Scope::Sql(id)) if v.sql_id == *id => {
+                        Some(&mut v.history)
+                    }
+                    _ => None,
+                });
+                if let Some(view) = view {
+                    view.on_result(result, &mut self.actions);
+                }
+            }
             Job::SqlDetail(sql_id) => {
                 let result = take(result);
                 let found = self.details.iter_mut().find_map(|d| match d {

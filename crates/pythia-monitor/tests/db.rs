@@ -774,3 +774,111 @@ fn wait_events_and_histogram() {
     let snap = queries::dashboard_snapshot(&conn);
     assert!(!snap.events.is_empty(), "{:?}", snap.errors);
 }
+
+/// What the management packs keep about a session and a statement (#74):
+/// activity from ASH, a filtered ASH report, plan history from AWR and SQL
+/// Monitor's executions and report. Skips a pack that isn't enabled.
+#[test]
+fn management_pack_history() {
+    use queries::Scope;
+    let Some(conn) = dba() else { return };
+    let caps = queries::capabilities(&conn).unwrap();
+    let worker = open_dba();
+    let (worker_sid, worker_serial) = (sid(&worker), serial(&worker));
+    let marker = format!(
+        "pythia_history_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    // On CPU for about three seconds: ASH samples it.
+    worker
+        .execute(
+            "declare n number := 0; t pls_integer := dbms_utility.get_time; \
+             begin while dbms_utility.get_time - t < 300 loop n := n + 1; end loop; end;",
+            &[],
+        )
+        .unwrap();
+    // Hinted MONITOR: SQL Monitor watches it however short.
+    let sql = format!(
+        "select /*+ monitor */ /* {marker} */ count(*) from dual connect by level <= 10000"
+    );
+    let n: i64 = worker.query_row_as(&sql, &[]).unwrap();
+    assert_eq!(n, 10000);
+    let sql_id: String = conn
+        .query_row_as(
+            "select sql_id from v$sql where sql_text like '%' || :1 || '%' \
+               and sql_text not like '%v$sql%' and rownum = 1",
+            &[&marker],
+        )
+        .unwrap();
+    let session = Scope::Session {
+        sid: worker_sid,
+        serial: worker_serial,
+    };
+
+    if caps.ash().is_ok() {
+        let mut activity = None;
+        wait_for("ASH samples of the session", || {
+            let a = queries::ash_activity(&conn, &session, 10).unwrap();
+            let found = a.samples > 0;
+            activity = Some(a);
+            found
+        });
+        let a = activity.unwrap();
+        assert!(a.timeline.iter().any(|t| t.1 == "CPU"), "{a:?}");
+        assert!(a.events.iter().any(|e| e.0 == "ON CPU"), "{a:?}");
+        let report = queries::ash_report_for(&conn, Some(&session), 10, false).unwrap();
+        assert!(!report.trim().is_empty());
+    } else {
+        eprintln!("Diagnostics Pack not enabled, skipping ASH");
+    }
+
+    if caps.plan_history().is_ok() {
+        // Colored, AWR keeps it whatever it cost: run again after coloring,
+        // so the next snapshot (also another test's) has it.
+        conn.execute(
+            "begin dbms_workload_repository.add_colored_sql(:1); end;",
+            &[&sql_id],
+        )
+        .unwrap();
+        let _: i64 = worker.query_row_as(&sql, &[]).unwrap();
+        queries::awr_create_snapshot(&conn).unwrap();
+        let history = queries::plan_history(&conn, &sql_id).unwrap();
+        assert!(!history.is_empty(), "the colored statement is in AWR");
+        let plan =
+            queries::awr_plan(&conn, &sql_id, history[0].plan_hash, history[0].dbid).unwrap();
+        assert!(plan.iter().any(|l| l.contains("CONNECT BY")), "{plan:?}");
+        conn.execute(
+            "begin dbms_workload_repository.remove_colored_sql(:1); end;",
+            &[&sql_id],
+        )
+        .unwrap();
+    } else {
+        eprintln!("Diagnostics Pack not enabled, skipping plan history");
+    }
+
+    if caps.sql_monitor().is_ok() {
+        let scope = Scope::Sql(sql_id.clone());
+        let mut executions = Vec::new();
+        wait_for("the monitored execution", || {
+            executions = queries::monitored_executions(&conn, &scope).unwrap();
+            !executions.is_empty()
+        });
+        let e = &executions[0];
+        assert_eq!((e.sid, e.serial), (worker_sid, worker_serial));
+        assert!(
+            !queries::monitored_executions(&conn, &session)
+                .unwrap()
+                .is_empty()
+        );
+        let package = caps.sql_monitor_package.unwrap();
+        let text = queries::sql_monitor_report(&conn, package, e, false).unwrap();
+        assert!(text.contains("SQL Monitoring Report"), "{text}");
+        let html = queries::sql_monitor_report(&conn, package, e, true).unwrap();
+        assert!(html.to_lowercase().contains("<html"));
+    } else {
+        eprintln!("Tuning Pack not enabled, skipping SQL Monitor");
+    }
+}
