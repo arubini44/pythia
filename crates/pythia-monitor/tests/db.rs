@@ -910,14 +910,21 @@ fn management_pack_history() {
         )
         .unwrap();
         // Under load (the whole suite) the cursor may age out of the small
-        // shared pool before the snapshot: run and snapshot again.
+        // shared pool before the snapshot, and a snapshot on a slow machine
+        // (CI) may keep the statement's statistics without its plan (#93):
+        // run and snapshot again until AWR has both.
+        let has_plan = |plan: &[String]| plan.iter().any(|l| l.contains("CONNECT BY"));
         let mut history = Vec::new();
+        let mut plan = Vec::new();
         for _ in 0..5 {
             let _: i64 = worker.query_row_as(&sql, &[]).unwrap();
             queries::awr_create_snapshot(&conn).unwrap();
             history = queries::plan_history(&conn, &sql_id).unwrap();
-            if !history.is_empty() {
-                break;
+            if let Some(newest) = history.last() {
+                plan = queries::awr_plan(&conn, &sql_id, newest.plan_hash, newest.dbid).unwrap();
+                if has_plan(&plan) {
+                    break;
+                }
             }
         }
         assert!(!history.is_empty(), "the colored statement is in AWR");
@@ -927,9 +934,18 @@ fn management_pack_history() {
             history.windows(2).all(|w| w[0].end <= w[1].end),
             "{history:?}"
         );
+        if !has_plan(&plan) {
+            // What AWR says went wrong while flushing the snapshots.
+            let flush_errors = conn
+                .query_as::<String>(
+                    "select snap_id || ' ' || table_name || ' ORA-' || error_number \
+                       from dba_hist_snap_error order by snap_id desc fetch first 10 rows only",
+                    &[],
+                )
+                .map(|rows| rows.flatten().collect::<Vec<_>>());
+            panic!("no plan in AWR: {plan:?}\n{history:?}\nsnapshot errors: {flush_errors:?}");
+        }
         let newest = history.last().unwrap();
-        let plan = queries::awr_plan(&conn, &sql_id, newest.plan_hash, newest.dbid).unwrap();
-        assert!(plan.iter().any(|l| l.contains("CONNECT BY")), "{plan:?}");
         // A row of the other repository (in a PDB) finds the plan too.
         let (pdb, root): (i64, i64) = conn
             .query_row_as("select con_dbid, dbid from v$database", &[])
