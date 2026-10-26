@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use pythia_db::{Cell, Client, DbError};
 
+use crate::cells::{all_counts, int, num, opt, plural, text, top_counts};
 use crate::insights::{Insight, Severity};
 use crate::queries::SectionError;
 use crate::ui::style::{bytes, duration};
@@ -452,23 +453,6 @@ fn threads(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError> {
     running.truncate(10);
     s.running = running;
     Ok(())
-}
-
-/// Counts of each value, most frequent first, at most 8.
-fn top_counts(values: impl Iterator<Item = String>) -> Vec<(String, i64)> {
-    let mut counts = all_counts(values);
-    counts.truncate(8);
-    counts
-}
-
-fn all_counts(values: impl Iterator<Item = String>) -> Vec<(String, i64)> {
-    let mut counts: HashMap<String, i64> = HashMap::new();
-    for v in values {
-        *counts.entry(v).or_default() += 1;
-    }
-    let mut counts: Vec<(String, i64)> = counts.into_iter().collect();
-    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    counts
 }
 
 fn transactions(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError> {
@@ -984,32 +968,6 @@ pub fn kill(c: &mut dyn Client, id: i64, query_only: bool) -> Result<(), DbError
     let what = if query_only { "query " } else { "" };
     c.query(&format!("kill {what}{id}"), &[])?;
     Ok(())
-}
-
-fn opt(row: &[Cell], i: usize) -> Option<String> {
-    row.get(i).cloned().flatten()
-}
-
-fn text(row: &[Cell], i: usize) -> String {
-    opt(row, i).unwrap_or_default()
-}
-
-fn num(row: &[Cell], i: usize) -> f64 {
-    row.get(i)
-        .and_then(|c| c.as_deref()?.parse().ok())
-        .unwrap_or(0.0)
-}
-
-fn int(row: &[Cell], i: usize) -> i64 {
-    num(row, i) as i64
-}
-
-fn plural(n: i64, one: &str) -> String {
-    if n == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{n} {one}s")
-    }
 }
 
 /// Findings, most severe first; empty means all is well. `rates` are the

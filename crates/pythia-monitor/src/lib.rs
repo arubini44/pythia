@@ -8,9 +8,12 @@
 //! - [`tkprof`]: pure-Rust 10046 trace parser and aggregator.
 //! - [`ui`]: egui views and the [`Monitor`] driver that hosts them.
 
+mod cells;
 pub mod insights;
 pub mod mysql;
+pub mod postgres;
 pub mod queries;
+pub mod sqlserver;
 pub mod tkprof;
 pub mod ui;
 

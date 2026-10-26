@@ -20,6 +20,9 @@ const STORAGE_EVERY: f64 = 60.0;
 /// Keeps about an hour at 5 s refresh.
 const HISTORY: usize = 720;
 
+/// What a thread id in the tables opens.
+const THREAD_LINK: &str = "Show the thread";
+
 /// One point of the rolling history.
 #[derive(Debug, Clone, Copy)]
 struct Sample {
@@ -450,73 +453,6 @@ fn activity(ui: &mut Ui, snap: &MySqlSnapshot) {
     });
 }
 
-/// A plain table: (title, width, right-aligned) columns, the last one
-/// taking the rest. Its cells show their full text on hover.
-/// A table of text; the cells of `threads` columns are thread ids, links to
-/// the thread: returns the one clicked.
-fn table(
-    ui: &mut Ui,
-    id: &str,
-    columns: &[(&str, f32, bool)],
-    rows: &[Vec<String>],
-    threads: &[usize],
-) -> Option<i64> {
-    let mut clicked = None;
-    let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
-    let mut builder = TableBuilder::new(ui)
-        .id_salt(id)
-        .striped(true)
-        .vscroll(false)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-    let last = columns.len().saturating_sub(1);
-    for (i, (_, width, _)) in columns.iter().enumerate() {
-        builder = builder.column(if i == last {
-            Column::remainder().clip(true)
-        } else {
-            Column::exact(*width).clip(true)
-        });
-    }
-    builder
-        .header(h, |mut r| {
-            for (title, ..) in columns {
-                r.col(|ui| {
-                    ui.strong(*title);
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(h, rows.len(), |mut row| {
-                let cells = &rows[row.index()];
-                for (i, (_, _, right)) in columns.iter().enumerate() {
-                    let text = cells.get(i).map_or("", String::as_str);
-                    row.col(|ui| {
-                        let label = if i == last {
-                            RichText::new(text.replace('\n', " ")).monospace()
-                        } else {
-                            RichText::new(text)
-                        };
-                        let layout = if *right {
-                            egui::Layout::right_to_left(egui::Align::Center)
-                        } else {
-                            egui::Layout::left_to_right(egui::Align::Center)
-                        };
-                        ui.with_layout(layout, |ui| {
-                            if threads.contains(&i) && !text.is_empty() {
-                                if ui.link(label).on_hover_text("Show the thread").clicked() {
-                                    clicked = text.parse().ok();
-                                }
-                            } else {
-                                ui.add(egui::Label::new(label).truncate())
-                                    .on_hover_text(text);
-                            }
-                        });
-                    });
-                }
-            });
-        });
-    clicked
-}
-
 fn lock_waits(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
     section(ui, "Lock waits", |ui| {
         let rows: Vec<Vec<String>> = snap
@@ -535,7 +471,7 @@ fn lock_waits(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
                 ]
             })
             .collect();
-        let thread = table(
+        let thread = style::text_table(
             ui,
             "mysql-lock-waits",
             &[
@@ -548,6 +484,7 @@ fn lock_waits(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
             ],
             &rows,
             &[0, 2],
+            THREAD_LINK,
         );
         if let Some(id) = thread {
             wants.push(Want::OpenThread { id });
@@ -579,7 +516,7 @@ fn running(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
                 ]
             })
             .collect();
-        let thread = table(
+        let thread = style::text_table(
             ui,
             "mysql-running",
             &[
@@ -592,6 +529,7 @@ fn running(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
             ],
             &rows,
             &[0],
+            THREAD_LINK,
         );
         if let Some(id) = thread {
             wants.push(Want::OpenThread { id });
@@ -626,7 +564,7 @@ fn transactions(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
                 ]
             })
             .collect();
-        let thread = table(
+        let thread = style::text_table(
             ui,
             "mysql-transactions",
             &[
@@ -640,6 +578,7 @@ fn transactions(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
             ],
             &rows,
             &[0],
+            THREAD_LINK,
         );
         if let Some(id) = thread {
             wants.push(Want::OpenThread { id });
@@ -668,7 +607,7 @@ fn replication(ui: &mut Ui, snap: &MySqlSnapshot) {
                 ]
             })
             .collect();
-        table(
+        style::text_table(
             ui,
             "mysql-replication",
             &[
@@ -681,6 +620,7 @@ fn replication(ui: &mut Ui, snap: &MySqlSnapshot) {
             ],
             &rows,
             &[],
+            "",
         );
     });
 }
