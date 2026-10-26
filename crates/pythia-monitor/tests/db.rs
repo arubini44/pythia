@@ -843,9 +843,17 @@ fn management_pack_history() {
             &[&sql_id],
         )
         .unwrap();
-        let _: i64 = worker.query_row_as(&sql, &[]).unwrap();
-        queries::awr_create_snapshot(&conn).unwrap();
-        let history = queries::plan_history(&conn, &sql_id).unwrap();
+        // Under load (the whole suite) the cursor may age out of the small
+        // shared pool before the snapshot: run and snapshot again.
+        let mut history = Vec::new();
+        for _ in 0..5 {
+            let _: i64 = worker.query_row_as(&sql, &[]).unwrap();
+            queries::awr_create_snapshot(&conn).unwrap();
+            history = queries::plan_history(&conn, &sql_id).unwrap();
+            if !history.is_empty() {
+                break;
+            }
+        }
         assert!(!history.is_empty(), "the colored statement is in AWR");
         let plan =
             queries::awr_plan(&conn, &sql_id, history[0].plan_hash, history[0].dbid).unwrap();
