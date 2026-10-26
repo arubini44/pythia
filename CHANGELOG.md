@@ -6,6 +6,12 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Monitor: the object a session waits on, the row it waits for and the
+  tables of TM locks are named for every schema, not only for tables the
+  monitoring user has privileges on (they were looked up in ALL_OBJECTS)
+  (#76).
+
 ## [0.4.1] - 2026-10-26
 
 ### Added

@@ -52,6 +52,17 @@ fn get<T: FromSql>(row: &oracle::Row, idx: usize) -> Result<T> {
     Ok(row.get(idx)?)
 }
 
+/// Runs a statement that names objects through `{objects}` in `sql`:
+/// `dba_objects`, which lists every schema's objects and is readable with
+/// [`DICTIONARY_GRANT`], else `all_objects` (only the objects the user has
+/// privileges on).
+fn with_objects<T>(sql: &str, mut f: impl FnMut(&str) -> Result<T>) -> Result<T> {
+    match f(&sql.replace("{objects}", "dba_objects")) {
+        Err(e) if is_privilege_error(&e) => f(&sql.replace("{objects}", "all_objects")),
+        r => r,
+    }
+}
+
 // ----- instance ----------------------------------------------------------
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -674,7 +685,7 @@ select s.sid, s.serial#, s.username, s.status, s.osuser, s.machine, s.program, s
        (select substr(q.sql_text, 1, 300) from v$sql q where q.sql_id = s.sql_id and rownum = 1), \
        case when s.sid = sys_context('USERENV', 'SID') then 1 else 0 end \
   from v$session s \
-  left join all_objects o on o.object_id = s.row_wait_obj#";
+  left join {objects} o on o.object_id = s.row_wait_obj#";
 
 fn session_row(r: &oracle::Row) -> Result<SessionRow> {
     Ok(SessionRow {
@@ -716,7 +727,7 @@ pub fn sessions(conn: &Connection, filter: SessionFilter) -> Result<Vec<SessionR
     } else {
         format!("{SESSION_SELECT} where s.type = 'USER' order by s.sid")
     };
-    query(conn, &sql, &[], session_row)
+    with_objects(&sql, |sql| query(conn, sql, &[], session_row))
 }
 
 /// A session and the sessions it blocks.
@@ -891,7 +902,7 @@ pub fn session_detail(conn: &Connection, sid: i64, serial: i64) -> SessionDetail
         "Session",
         (|| {
             let sql = format!("{SESSION_SELECT} where s.sid = :1 and s.serial# = :2");
-            d.session = query(conn, &sql, &[&sid, &serial], session_row)?
+            d.session = with_objects(&sql, |sql| query(conn, sql, &[&sid, &serial], session_row))?
                 .into_iter()
                 .next();
             Ok(())
@@ -1000,26 +1011,26 @@ fn lock_mode(m: i64) -> String {
 }
 
 pub fn locks(conn: &Connection, sid: i64) -> Result<Vec<LockRow>> {
-    query(
-        conn,
-        "select l.type, l.id1, l.id2, l.lmode, l.request, l.ctime, l.block, \
-                (select o.owner || '.' || o.object_name from all_objects o \
-                  where o.object_id = l.id1 and l.type = 'TM') \
-           from v$lock l where l.sid = :1 order by l.type, l.id1",
-        &[&sid],
-        |r| {
-            Ok(LockRow {
-                lock_type: get(r, 0)?,
-                id1: get(r, 1)?,
-                id2: get(r, 2)?,
-                mode_held: lock_mode(get(r, 3)?),
-                mode_requested: lock_mode(get(r, 4)?),
-                seconds: get(r, 5)?,
-                blocking: get::<i64>(r, 6)? > 0,
-                object: get(r, 7)?,
-            })
-        },
-    )
+    let sql = "select l.type, l.id1, l.id2, l.lmode, l.request, l.ctime, l.block, \
+                      (select o.owner || '.' || o.object_name from {objects} o \
+                        where o.object_id = l.id1 and l.type = 'TM') \
+                 from v$lock l where l.sid = :1 order by l.type, l.id1";
+    with_objects(sql, |sql| locks_with(conn, sql, sid))
+}
+
+fn locks_with(conn: &Connection, sql: &str, sid: i64) -> Result<Vec<LockRow>> {
+    query(conn, sql, &[&sid], |r| {
+        Ok(LockRow {
+            lock_type: get(r, 0)?,
+            id1: get(r, 1)?,
+            id2: get(r, 2)?,
+            mode_held: lock_mode(get(r, 3)?),
+            mode_requested: lock_mode(get(r, 4)?),
+            seconds: get(r, 5)?,
+            blocking: get::<i64>(r, 6)? > 0,
+            object: get(r, 7)?,
+        })
+    })
 }
 
 // ----- session control ---------------------------------------------------
