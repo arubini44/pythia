@@ -13,6 +13,19 @@ All notable changes to Pythia are documented here. The format follows
   dollar-quoted routine bodies and `::` casts on PostgreSQL, `GO` batches
   and `BEGIN … END` blocks on SQL Server.
 
+### Fixed
+- Editing another user no longer needs SELECT_CATALOG_ROLE: `ALTER USER`
+  and `GRANT` don't need the DBA views, and the form failed with
+  *reading users and roles needs SELECT_CATALOG_ROLE* (also when only
+  `DBA_USERS` could be read, e.g. with AUDIT_ADMIN). It opens with what
+  the session can read. Fields it couldn't read start empty and stay as
+  they are unless filled in; lock and unlock are an explicit choice. Roles
+  and privileges it couldn't read can be added but aren't revoked, and
+  object privileges show those the session granted or on its own objects.
+  A role not enabled in the session shows its grants as unknown instead
+  of none, and a user that doesn't exist says so instead of *no data
+  found* (#89).
+
 ## [0.5.0] - 2026-10-26
 
 ### Added
