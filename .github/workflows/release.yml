@@ -113,10 +113,12 @@ jobs:
           # beforePackagingCommand builds for the runner's own target.
           cp "target/release/$bin" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE dist/archive/
           cd dist/archive
+          # A branch run by hand (feat/x) has a slash in its name.
+          name="pythia-${GITHUB_REF_NAME//\//-}-${{ matrix.platform.name }}${{ matrix.flavor.suffix }}"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "../pythia-${{ github.ref_name }}-${{ matrix.platform.name }}${{ matrix.flavor.suffix }}.zip" .
+            7z a "../$name.zip" .
           else
-            tar czf "../pythia-${{ github.ref_name }}-${{ matrix.platform.name }}${{ matrix.flavor.suffix }}.tar.gz" .
+            tar czf "../$name.tar.gz" .
           fi
 
       - uses: actions/upload-artifact@v4
