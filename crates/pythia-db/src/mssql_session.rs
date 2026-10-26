@@ -16,6 +16,7 @@
 //! (`@@TRANCOUNT`).
 
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
@@ -39,6 +40,7 @@ use crate::sql_text::{
     civil_from_days, has_word, hex, leading_words, line_offset, release, replace_binds,
     statement_kind,
 };
+use crate::ssh::Tunnel;
 use crate::types::{
     Cell, Client, Column, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
 };
@@ -64,7 +66,8 @@ pub(crate) fn run(
         .map_err(|e| DbError::new(format!("Can't start the SQL Server client: {e}")))
         .and_then(|rt| {
             let config = config(&params)?;
-            let client = rt.block_on(connect(&config))?;
+            let client =
+                connect(&rt, &config, params.ssh.as_deref()).map_err(|e| params.explain(e))?;
             Ok((rt, config, client))
         });
     let (rt, config, client) = match connected {
@@ -86,6 +89,7 @@ pub(crate) fn run(
         rt,
         client,
         config,
+        tunnel: params.ssh,
         init_sql: params.init_sql,
         events,
         cancel,
@@ -182,29 +186,54 @@ fn runtime() -> std::io::Result<Runtime> {
         .build()
 }
 
-/// Connects, following an Azure gateway's redirect.
-async fn connect(config: &tiberius::Config) -> Result<Tds, DbError> {
-    let attempt = |config: tiberius::Config| async move {
-        // Finds a named instance's port through the SQL Server Browser.
-        let tcp = TcpStream::connect_named(&config).await?;
-        tcp.set_nodelay(true)?;
-        tiberius::Client::connect(config, tcp.compat_write()).await
-    };
-    let connecting = async {
-        match attempt(config.clone()).await {
-            Err(tiberius::error::Error::Routing { host, port }) => {
-                let mut routed = config.clone();
-                routed.host(host);
-                routed.port(port);
-                attempt(routed).await
+/// Connects, through `tunnel` if there is one, following an Azure
+/// gateway's redirect.
+fn connect(
+    rt: &Runtime,
+    config: &tiberius::Config,
+    tunnel: Option<&Tunnel>,
+) -> Result<Tds, DbError> {
+    let mut config = config.clone();
+    // The first answer may name the server to connect to instead.
+    for _ in 0..2 {
+        // Outside the runtime: the tunnel blocks while it logs in.
+        let via = tunnel.map(|t| forward(t, &config)).transpose()?;
+        let connecting = attempt(config.clone(), via);
+        match rt.block_on(async { tokio::time::timeout(Duration::from_secs(15), connecting).await })
+        {
+            Err(_) => return Err(DbError::new("Timed out connecting to SQL Server")),
+            Ok(Err(tiberius::error::Error::Routing { host, port })) => {
+                config.host(host);
+                config.port(port);
             }
-            other => other,
+            Ok(connected) => return connected.map_err(connect_error),
         }
-    };
-    match tokio::time::timeout(Duration::from_secs(15), connecting).await {
-        Ok(connected) => connected.map_err(connect_error),
-        Err(_) => Err(DbError::new("Timed out connecting to SQL Server")),
     }
+    Err(DbError::new(
+        "SQL Server redirected the connection more than once",
+    ))
+}
+
+/// Connects to the server, or (through SSH) to the local end of a forward
+/// to it; TLS and the login still name the server.
+async fn attempt(config: tiberius::Config, via: Option<SocketAddr>) -> tiberius::Result<Tds> {
+    let tcp = match via {
+        Some(local) => TcpStream::connect(local).await?,
+        // Finds a named instance's port through the SQL Server Browser.
+        None => TcpStream::connect_named(&config).await?,
+    };
+    tcp.set_nodelay(true)?;
+    tiberius::Client::connect(config, tcp.compat_write()).await
+}
+
+/// The local end of a forward to the server's `host:port`.
+fn forward(tunnel: &Tunnel, config: &tiberius::Config) -> Result<SocketAddr, DbError> {
+    let address = config.get_addr();
+    let (host, port) = address
+        .rsplit_once(':')
+        .and_then(|(host, port)| Some((host, port.parse().ok()?)))
+        .ok_or_else(|| DbError::new(format!("Not a server address: {address}")))?;
+    tunnel.forward(host, port)
 }
 
 /// A failed connect, with what to do about an untrusted certificate.
@@ -226,6 +255,8 @@ struct Worker {
     rt: Runtime,
     client: Tds,
     config: tiberius::Config,
+    /// Connecting again goes through it too.
+    tunnel: Option<Arc<Tunnel>>,
     init_sql: Vec<String>,
     events: Events,
     /// Break: notified from the UI thread.
@@ -310,7 +341,12 @@ impl Worker {
     /// and the session's settings.
     fn reset(&mut self, why: &str) {
         warn!("opening the connection again: {why}");
-        let connected = self.rt.block_on(connect(&self.config));
+        let connected = connect(&self.rt, &self.config, self.tunnel.as_deref()).map_err(|e| {
+            match &self.tunnel {
+                Some(tunnel) => tunnel.explain(e),
+                None => e,
+            }
+        });
         let prepared = connected.and_then(|client| {
             self.client = client;
             self.prepare_session()
@@ -776,10 +812,20 @@ fn changes(sql: &str) -> bool {
 
 /// Connection options from `host[\instance][:port][/database][?trust]`
 /// (`?encrypt=off|strict` too), or an ADO.NET connection string
-/// (`Server=…;Database=…;TrustServerCertificate=true`).
+/// (`Server=…;Database=…;TrustServerCertificate=true`). Through SSH, the
+/// host is as the SSH server sees it.
 pub(crate) fn config(params: &ConnectParams) -> Result<tiberius::Config, DbError> {
     let text = params.connect_string.trim();
-    let mut config = if text.contains(';') || text.contains('=') && !text.contains('?') {
+    let ado = text.contains(';') || text.contains('=') && !text.contains('?');
+    // A named instance's port comes from the SQL Server Browser, over UDP,
+    // which a tunnel doesn't carry.
+    if params.ssh.is_some() && instance_named(text, ado)? {
+        return Err(DbError::new(
+            "Through SSH, give the instance's port (host:port) rather than host\\instance: \
+             the SQL Server Browser that tells it can't be reached through the tunnel",
+        ));
+    }
+    let mut config = if ado {
         tiberius::Config::from_ado_string(text)
             .map_err(|e| DbError::new(format!("Can't read the connection string: {e}")))?
     } else {
@@ -804,6 +850,28 @@ pub(crate) fn config(params: &ConnectParams) -> Result<tiberius::Config, DbError
     }
     config.application_name("Pythia");
     Ok(config)
+}
+
+/// Whether the address names an instance (`host\instance`, or the ADO.NET
+/// string's server).
+fn instance_named(text: &str, ado: bool) -> Result<bool, DbError> {
+    if !ado {
+        return Ok(parse_target(text)?.instance.is_some());
+    }
+    Ok(text.split(';').any(|pair| {
+        pair.split_once('=').is_some_and(|(key, value)| {
+            let key = key.trim().to_ascii_lowercase();
+            [
+                "server",
+                "data source",
+                "address",
+                "addr",
+                "network address",
+            ]
+            .contains(&key.as_str())
+                && value.contains('\\')
+        })
+    }))
 }
 
 #[derive(Debug, PartialEq)]

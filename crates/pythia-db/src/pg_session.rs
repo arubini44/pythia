@@ -24,7 +24,7 @@ use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use tokio::runtime::Runtime;
-use tokio_postgres::config::SslMode;
+use tokio_postgres::config::{Host, SslMode};
 use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::types::{Kind, Type};
@@ -43,6 +43,7 @@ use crate::sql_text::{
     char_offset, has_inner_semicolon, has_word, leading_words, release, replace_binds,
     statement_kind, word_followed_by,
 };
+use crate::ssh::Tunnel;
 use crate::types::{
     Cell, Client, Column, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
 };
@@ -68,7 +69,9 @@ pub(crate) fn run(
         .map_err(|e| DbError::new(format!("Can't start the PostgreSQL client: {e}")))
         .and_then(|rt| {
             let (config, tls) = config(&params)?;
-            let (client, connection) = rt.block_on(config.connect(tls.clone()))?;
+            let (client, connection) = rt
+                .block_on(config.connect(tls.clone()))
+                .map_err(|e| params.explain(e.into()))?;
             Ok((rt, client, connection, tls))
         });
     let (rt, client, connection, tls) = match connected {
@@ -834,7 +837,8 @@ impl Transaction {
 /// Connection options from `host[:port][/database][?sslmode=…]`, a
 /// `postgresql://` URL or `key=value` pairs. `sslmode` is libpq's: `prefer`
 /// (the default) and `require` don't check the server's certificate,
-/// `verify-ca` and `verify-full` do.
+/// `verify-ca` and `verify-full` do. Through SSH, the host is as the SSH
+/// server sees it.
 pub(crate) fn config(params: &ConnectParams) -> Result<(Config, MakeRustlsConnect), DbError> {
     let text = params.connect_string.trim();
     let mut ssl = None;
@@ -895,7 +899,53 @@ pub(crate) fn config(params: &ConnectParams) -> Result<(Config, MakeRustlsConnec
         }
     };
     config.ssl_mode(mode);
+    if let Some(tunnel) = &params.ssh {
+        config = through(&config, tunnel)?;
+    }
     Ok((config, tls(verify)))
+}
+
+/// `config` through an SSH tunnel: TCP goes to the local end of a forward
+/// to the database (`hostaddr`), TLS still checks the database host's
+/// name. A config only adds hosts and ports, so it's built again.
+fn through(config: &Config, tunnel: &Tunnel) -> Result<Config, DbError> {
+    let host = match config.get_hosts() {
+        [] => "localhost".to_owned(),
+        [Host::Tcp(host)] => host.clone(),
+        _ => {
+            return Err(DbError::new(
+                "Through SSH, connect to one host by name or address, as the SSH server sees it",
+            ));
+        }
+    };
+    let port = config.get_ports().first().copied().unwrap_or(5432);
+    let local = tunnel.forward(&host, port)?;
+    let mut through = Config::new();
+    through.host(&host).hostaddr(local.ip()).port(local.port());
+    if let Some(user) = config.get_user() {
+        through.user(user);
+    }
+    if let Some(password) = config.get_password() {
+        through.password(password);
+    }
+    if let Some(dbname) = config.get_dbname() {
+        through.dbname(dbname);
+    }
+    if let Some(options) = config.get_options() {
+        through.options(options);
+    }
+    if let Some(name) = config.get_application_name() {
+        through.application_name(name);
+    }
+    if let Some(timeout) = config.get_connect_timeout() {
+        through.connect_timeout(*timeout);
+    }
+    through
+        .ssl_mode(config.get_ssl_mode())
+        .ssl_negotiation(config.get_ssl_negotiation())
+        .channel_binding(config.get_channel_binding())
+        .target_session_attrs(config.get_target_session_attrs());
+    Ok(through)
 }
 
 fn tls(verify: bool) -> MakeRustlsConnect {

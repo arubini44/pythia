@@ -95,16 +95,12 @@ impl Dialect {
             // Its connect strings (TNS aliases, descriptors) aren't pointed
             // at a tunnel yet.
             DbKind::Oracle => feature != Feature::SshTunnel,
-            DbKind::MySql => matches!(
+            DbKind::MySql | DbKind::Postgres | DbKind::SqlServer => matches!(
                 feature,
                 Feature::ExplainPlan
                     | Feature::Completion
                     | Feature::SshTunnel
                     | Feature::Dashboard
-            ),
-            DbKind::Postgres | DbKind::SqlServer => matches!(
-                feature,
-                Feature::ExplainPlan | Feature::Completion | Feature::Dashboard
             ),
         }
     }
@@ -276,10 +272,10 @@ mod tests {
             assert!(!dialect.supports(Feature::ServerOutput));
             assert!(!dialect.supports(Feature::Monitor));
         }
-        // A dashboard (#92), no tunnel yet.
+        // A dashboard (#92) and SSH tunnels (#97).
         for dialect in [Dialect::POSTGRES, Dialect::SQLSERVER] {
             assert!(dialect.supports(Feature::Dashboard));
-            assert!(!dialect.supports(Feature::SshTunnel));
+            assert!(dialect.supports(Feature::SshTunnel));
         }
         assert_eq!(Dialect::default(), Dialect::ORACLE);
     }

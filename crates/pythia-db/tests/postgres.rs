@@ -3,17 +3,45 @@
 //! Skipped unless `PYTHIA_TEST_POSTGRES` is set to `user/password@host[:port]/database`,
 //! e.g. the PostgreSQL container from `docker-compose.yml`:
 //! `PYTHIA_TEST_POSTGRES=pythia/pythia@localhost:5432/pythia cargo test -p pythia-db --test postgres`
+//!
+//! The SSH tunnel test also needs `PYTHIA_TEST_SSH=user:password@host[:port]`
+//! and `PYTHIA_TEST_POSTGRES_VIA_SSH`, the database as the SSH server sees
+//! it (the `ssh` service: `pythia:pythia@localhost:2222` and
+//! `pythia/pythia@postgres:5432/pythia`).
 
-use std::sync::mpsc;
+use std::path::Path;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use pythia_db::ssh::{SshParams, Tunnel};
 use pythia_db::{
     ConnectParams, DbEvent, DbKind, DbRequest, Detail, Dialect, MetaQuery, MetaResult, ObjectType,
     Session,
 };
 
 fn params() -> Option<ConnectParams> {
-    let spec = std::env::var("PYTHIA_TEST_POSTGRES").ok()?;
+    from_spec(&std::env::var("PYTHIA_TEST_POSTGRES").ok()?)
+}
+
+/// The database through the SSH server, trusting the host keys kept in
+/// `known_hosts`.
+fn ssh_params(known_hosts: &Path) -> Option<ConnectParams> {
+    let ssh = std::env::var("PYTHIA_TEST_SSH").ok()?;
+    let mut params = from_spec(&std::env::var("PYTHIA_TEST_POSTGRES_VIA_SSH").ok()?)?;
+    let (credentials, host) = ssh.rsplit_once('@')?;
+    let (username, password) = credentials.split_once(':')?;
+    params.ssh = Some(Arc::new(Tunnel::new(SshParams {
+        host: host.into(),
+        username: username.into(),
+        password: password.into(),
+        key_file: None,
+        known_hosts: known_hosts.to_owned(),
+    })));
+    Some(params)
+}
+
+/// `user/password@connect string`.
+fn from_spec(spec: &str) -> Option<ConnectParams> {
     let (credentials, connect_string) = spec.rsplit_once('@')?;
     let (username, password) = credentials.split_once('/')?;
     Some(ConnectParams {
@@ -35,7 +63,10 @@ struct Harness {
 
 impl Harness {
     fn connect() -> Option<Self> {
-        let params = params()?;
+        Some(Self::with(params()?))
+    }
+
+    fn with(params: ConnectParams) -> Self {
         let (tx, wake) = mpsc::channel();
         let session = Session::connect(params, move || {
             let _ = tx.send(());
@@ -51,7 +82,7 @@ impl Harness {
                 assert!(server.release >= (12, 0), "{server:?}");
                 assert!(server.banner.starts_with("PostgreSQL "), "{server:?}");
                 h.schema = server.current_schema;
-                Some(h)
+                h
             }
             other => panic!("connect failed: {other:?}"),
         }
@@ -650,4 +681,76 @@ fn dictionary() {
     h.ok("drop table meta_emp");
     h.ok("drop table meta_dept");
     h.ok("drop function meta_f(int)");
+}
+
+/// Waits for a session's connect to fail.
+fn connect_error(params: ConnectParams) -> pythia_db::DbError {
+    let (tx, wake) = mpsc::channel();
+    let session = Session::connect(params, move || {
+        let _ = tx.send(());
+    });
+    loop {
+        match session.try_recv() {
+            Some(DbEvent::ConnectFailed(error)) => return error,
+            Some(other) => panic!("expected ConnectFailed, got {other:?}"),
+            None => wake
+                .recv_timeout(Duration::from_secs(60))
+                .expect("timed out waiting for the connect"),
+        }
+    }
+}
+
+/// Through the SSH server (#97): trusting its key, sessions sharing the
+/// tunnel, Break (its cancel request goes through the tunnel too), and an
+/// address the SSH server can't reach.
+#[test]
+fn through_an_ssh_tunnel() {
+    let dir = std::env::temp_dir().join(format!("pythia-postgres-ssh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let known_hosts = dir.join("known_hosts");
+    let Some(params) = ssh_params(&known_hosts) else {
+        return;
+    };
+
+    // The first connect asks to trust the server.
+    let error = connect_error(params.clone());
+    let key = error.host_key.expect("an unknown host key");
+    key.trust().unwrap();
+
+    let mut h = Harness::with(params.clone());
+    assert_eq!(h.scalar("select 6 * 7").as_deref(), Some("42"));
+    // A second session rides the same SSH connection.
+    let mut other = Harness::with(params.clone());
+    assert_eq!(
+        other.scalar("select current_database()").as_deref(),
+        Some("pythia")
+    );
+
+    h.execute(1, "select pg_sleep(30)", 10);
+    std::thread::sleep(Duration::from_millis(500));
+    h.session.cancel();
+    let error = loop {
+        match h.next_result() {
+            DbEvent::QueryStarted { .. } => {}
+            DbEvent::Failed { error, .. } => break error,
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    };
+    assert!(error.message.contains("57014"), "{error}");
+    h.settle();
+    assert_eq!(h.scalar("select 1").as_deref(), Some("1"));
+
+    // An address the SSH server can't reach: the tunnel says why.
+    let unreachable = ConnectParams {
+        connect_string: "nosuchhost.invalid:5432/pythia".into(),
+        ..params
+    };
+    let error = connect_error(unreachable);
+    assert!(
+        error
+            .message
+            .contains("the server couldn't connect to nosuchhost.invalid:5432"),
+        "{error}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
