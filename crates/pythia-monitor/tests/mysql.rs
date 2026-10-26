@@ -6,12 +6,16 @@
 //! also checks what needs privileges: transactions, lock waits, top
 //! statements.
 
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
 use pythia_db::{ConnectParams, DbEvent, DbKind, DbRequest, Session};
 use pythia_monitor::insights::Severity;
 use pythia_monitor::mysql::{self, MySqlSnapshot};
+
+/// The tests that make lock waits, one at a time: each looks at the
+/// server's lock waits.
+static LOCK_WAITS: Mutex<()> = Mutex::new(());
 
 fn params(var: &str) -> Option<ConnectParams> {
     let spec = std::env::var(var).ok()?;
@@ -98,6 +102,22 @@ impl Harness {
         }
     }
 
+    /// Runs a task on the session's client and waits for its result.
+    fn run<T: Send + 'static>(
+        &mut self,
+        task: impl FnOnce(&mut dyn pythia_db::Client) -> Result<T, pythia_db::DbError> + Send + 'static,
+    ) -> Result<T, pythia_db::DbError> {
+        self.session.send(DbRequest::Run {
+            id: 3,
+            task: Box::new(move |c| task(c).map(|v| Box::new(v) as Box<dyn std::any::Any + Send>)),
+        });
+        loop {
+            if let DbEvent::TaskDone { result, .. } = self.next() {
+                return result.map(|any| *any.downcast::<T>().expect("the task's result"));
+            }
+        }
+    }
+
     fn snapshot(&mut self, storage: bool) -> MySqlSnapshot {
         self.session.send(DbRequest::Run {
             id: 2,
@@ -173,6 +193,7 @@ fn lock_waits_and_top_statements() {
     else {
         return;
     };
+    let _serial = LOCK_WAITS.lock().unwrap_or_else(|e| e.into_inner());
     let mut setup = Harness::connect(app.clone());
     setup.ok("create table if not exists pythia_mon_locks (id int primary key, v int)");
     setup.ok("delete from pythia_mon_locks");
@@ -254,4 +275,92 @@ fn lock_waits_and_top_statements() {
         s.top_statements
     );
     setup.ok("drop table pythia_mon_locks");
+}
+
+/// A thread's details (#87): the statement it runs and its plan, the lock
+/// it waits for and whose; the transaction of the one it waits for; then
+/// killing the query, and the connection.
+#[test]
+fn thread_details_and_kill() {
+    let (Some(app), Some(dba)) = (params("PYTHIA_TEST_MYSQL"), params("PYTHIA_TEST_MYSQL_DBA"))
+    else {
+        return;
+    };
+    let _serial = LOCK_WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut setup = Harness::connect(app.clone());
+    setup.ok("create table if not exists pythia_mon_threads (id int primary key, v int)");
+    setup.ok("delete from pythia_mon_threads");
+    setup.ok("insert into pythia_mon_threads values (1, 0)");
+    setup.ok("commit");
+
+    let mut a = Harness::connect(app.clone());
+    let mut b = Harness::connect(app);
+    let a_id: i64 = a.scalar("select connection_id()").parse().unwrap();
+    let b_id: i64 = b.scalar("select connection_id()").parse().unwrap();
+    a.ok("update pythia_mon_threads set v = 1 where id = 1");
+    b.send("update pythia_mon_threads set v = 2 where id = 1");
+
+    let mut monitor = Harness::connect(dba);
+    let mut d = monitor
+        .run(move |c| Ok(mysql::thread_detail(c, b_id)))
+        .unwrap();
+    for _ in 0..50 {
+        if d.waits_for.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        d = monitor
+            .run(move |c| Ok(mysql::thread_detail(c, b_id)))
+            .unwrap();
+    }
+    eprintln!("{d:#?}");
+    assert!(d.errors.is_empty(), "{:?}", d.errors);
+    assert_eq!(d.thread.as_ref().unwrap().command, "Query");
+    let statement = d.statement.as_ref().expect("its statement");
+    assert!(
+        statement.running && statement.text.contains("set v = 2"),
+        "{statement:?}"
+    );
+    let plan = d.plan.as_deref().expect("EXPLAIN FOR CONNECTION");
+    assert!(plan.contains("pythia_mon_threads"), "{plan}");
+    assert_eq!(d.waits_for, Some(a_id));
+    assert!(
+        d.locks.iter().any(|l| l.status == "WAITING"),
+        "{:?}",
+        d.locks
+    );
+    assert!(!d.connection.is_empty());
+
+    let held = monitor
+        .run(move |c| Ok(mysql::thread_detail(c, a_id)))
+        .unwrap();
+    let t = held.transaction.as_ref().expect("A's transaction");
+    assert!(t.rows_locked >= 1 && t.rows_modified == 1, "{t:?}");
+    assert!(held.locks.iter().any(|l| l.status == "GRANTED"));
+    assert!(
+        held.history.iter().any(|s| s.text.contains("set v = 1")),
+        "{:?}",
+        held.history
+    );
+
+    // Kill B's query: its update ends with "Query execution was
+    // interrupted"; then A's connection.
+    monitor.run(move |c| mysql::kill(c, b_id, true)).unwrap();
+    loop {
+        match b.next() {
+            DbEvent::Failed { error, .. } => {
+                assert_eq!(error.code, Some(1317), "{error}");
+                break;
+            }
+            DbEvent::Transaction { .. } => panic!("B's update went through"),
+            _ => {}
+        }
+    }
+    monitor.run(move |c| mysql::kill(c, a_id, false)).unwrap();
+    let gone = monitor
+        .run(move |c| Ok(mysql::thread_detail(c, a_id)))
+        .unwrap();
+    assert!(gone.thread.is_none() || gone.thread.unwrap().command == "Killed");
+    b.session.send(DbRequest::Rollback);
+    setup.ok("drop table pythia_mon_threads");
 }

@@ -54,6 +54,14 @@ All notable changes to Pythia are documented here. The format follows
   segments, or for a temporary one the sessions using it; the PGA bar
   unfolds the sessions using the most PGA, each opening its details
   (#74).
+- Monitor on MySQL: *thread details*, opened from the thread ids of the
+  dashboard's running statements, open transactions and lock waits: how it
+  connected (program, client library and version), the statement it runs
+  or ran last (rows examined, temp tables, no index used; open in a SQL
+  window) with `EXPLAIN FOR CONNECTION`, its transaction, the data and
+  metadata locks it holds or waits for and the thread it waits for, and
+  the statements before. *Kill query* and *Kill connection* ask first,
+  saying what a kill rolls back (#87).
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
 - **Debug…** next to **Test…** on procedures, functions and package

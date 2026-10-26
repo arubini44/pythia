@@ -672,6 +672,320 @@ fn top_statements(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbErr
     Ok(())
 }
 
+/// One thread of the server and what it holds (thread details).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThreadDetail {
+    pub id: i64,
+    /// Its processlist row; none when it is gone (or not visible without
+    /// `PROCESS`).
+    pub thread: Option<Thread>,
+    /// How it connected: name, value (`performance_schema.threads`,
+    /// `session_connect_attrs`).
+    pub connection: Vec<(String, String)>,
+    /// The statement it runs, or ran last.
+    pub statement: Option<ThreadStatement>,
+    /// The statements before, newest first.
+    pub history: Vec<ThreadStatement>,
+    /// `EXPLAIN FOR CONNECTION` of the running statement.
+    pub plan: Option<String>,
+    pub transaction: Option<ThreadTransaction>,
+    pub locks: Vec<DataLock>,
+    /// The thread whose lock it waits for.
+    pub waits_for: Option<i64>,
+    /// Metadata locks: object, type, lock type, status.
+    pub metadata_locks: Vec<(String, String, String, String)>,
+    pub errors: Vec<SectionError>,
+}
+
+/// A statement of a thread (`events_statements_current` / `_history`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThreadStatement {
+    pub text: String,
+    pub digest: Option<String>,
+    /// Seconds; none while it runs.
+    pub seconds: Option<f64>,
+    pub rows_examined: i64,
+    pub rows_sent: i64,
+    pub tmp_disk_tables: i64,
+    pub sort_rows: i64,
+    pub no_index_used: bool,
+    pub errors: i64,
+    /// Still running.
+    pub running: bool,
+}
+
+/// A thread's open InnoDB transaction.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThreadTransaction {
+    pub state: String,
+    pub started: String,
+    pub age_secs: i64,
+    pub rows_locked: i64,
+    pub rows_modified: i64,
+    pub isolation: String,
+    pub tables_locked: i64,
+}
+
+/// A data lock a thread holds or waits for (`performance_schema.data_locks`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DataLock {
+    pub object: String,
+    pub index: Option<String>,
+    pub lock_type: String,
+    pub mode: String,
+    /// `GRANTED` or `WAITING`.
+    pub status: String,
+    pub data: Option<String>,
+}
+
+/// Everything about one thread; each part may fail alone.
+pub fn thread_detail(c: &mut dyn Client, id: i64) -> ThreadDetail {
+    let mut d = ThreadDetail {
+        id,
+        ..ThreadDetail::default()
+    };
+    let mut errors = Vec::new();
+    let mut section = |name: &'static str, needs: &str, r: Result<(), DbError>| {
+        if let Err(e) = r {
+            errors.push((name, explain(&e, needs)));
+        }
+    };
+    let id_text = id.to_string();
+    section(
+        "Thread",
+        "",
+        (|| {
+            let rows = c.query(
+                "select id, user, host, db, command, time, state, info \
+                   from information_schema.processlist where id = ?",
+                &[&id_text],
+            )?;
+            d.thread = rows.first().map(|r| Thread {
+                id: int(r, 0),
+                user: text(r, 1),
+                host: text(r, 2),
+                db: opt(r, 3),
+                command: text(r, 4),
+                time_secs: int(r, 5),
+                state: text(r, 6),
+                query: opt(r, 7),
+            });
+            Ok(())
+        })(),
+    );
+    let Some(thread) = d.thread.clone() else {
+        d.errors = errors;
+        return d;
+    };
+    // performance_schema knows threads by a THREAD_ID of its own.
+    let mut ps_thread: Option<String> = None;
+    section(
+        "Connection",
+        "SELECT on performance_schema",
+        (|| {
+            let rows = c.query(
+                "select thread_id, connection_type, thread_os_id \
+                   from performance_schema.threads where processlist_id = ?",
+                &[&id_text],
+            )?;
+            if let Some(r) = rows.first() {
+                ps_thread = opt(r, 0);
+                for (name, i) in [("Connection type", 1), ("OS thread", 2)] {
+                    if let Some(v) = opt(r, i) {
+                        d.connection.push((name.to_owned(), v));
+                    }
+                }
+            }
+            let attrs = c.query(
+                "select attr_name, attr_value from performance_schema.session_connect_attrs \
+                  where processlist_id = ? order by ordinal_position",
+                &[&id_text],
+            )?;
+            for r in &attrs {
+                let name = match text(r, 0).as_str() {
+                    "program_name" => "Program",
+                    "_client_name" => "Client library",
+                    "_client_version" => "Client version",
+                    "_os" => "Client OS",
+                    "_platform" => "Client platform",
+                    "_pid" => "Client process",
+                    "os_user" => "OS user",
+                    _ => continue,
+                };
+                d.connection.push((name.to_owned(), text(r, 1)));
+            }
+            Ok(())
+        })(),
+    );
+    if let Some(ps) = &ps_thread {
+        let statement = |r: &[Cell], running: bool| ThreadStatement {
+            text: text(r, 0),
+            digest: opt(r, 1),
+            seconds: opt(r, 2).and_then(|v| v.parse().ok()),
+            rows_examined: int(r, 3),
+            rows_sent: int(r, 4),
+            tmp_disk_tables: int(r, 5),
+            sort_rows: int(r, 6),
+            no_index_used: int(r, 7) > 0,
+            errors: int(r, 8),
+            running,
+        };
+        const COLUMNS: &str = "sql_text, digest_text, timer_wait / 1e12, rows_examined, rows_sent, \
+             created_tmp_disk_tables, sort_rows, no_index_used, errors";
+        section(
+            "Statement",
+            "SELECT on performance_schema",
+            (|| {
+                let rows = c.query(
+                    &format!(
+                        "select {COLUMNS}, end_event_id is null \
+                           from performance_schema.events_statements_current where thread_id = ?"
+                    ),
+                    &[ps],
+                )?;
+                d.statement = rows
+                    .first()
+                    .map(|r| statement(r, int(r, 9) > 0))
+                    .filter(|s| !s.text.is_empty());
+                let rows = c.query(
+                    &format!(
+                        "select {COLUMNS} from performance_schema.events_statements_history \
+                          where thread_id = ? order by event_id desc limit 10"
+                    ),
+                    &[ps],
+                )?;
+                d.history = rows.iter().map(|r| statement(r, false)).collect();
+                Ok(())
+            })(),
+        );
+        section(
+            "Metadata locks",
+            "SELECT on performance_schema",
+            (|| {
+                let rows = c.query(
+                    "select concat_ws('.', object_schema, object_name), object_type, lock_type, lock_status \
+                       from performance_schema.metadata_locks where owner_thread_id = ?",
+                    &[ps],
+                )?;
+                d.metadata_locks = rows
+                    .iter()
+                    .map(|r| (text(r, 0), text(r, 1), text(r, 2), text(r, 3)))
+                    .collect();
+                Ok(())
+            })(),
+        );
+        section(
+            "Locks",
+            "SELECT on performance_schema",
+            (|| {
+                let rows = c.query(
+                    "select concat(object_schema, '.', object_name), index_name, lock_type, lock_mode, \
+                            lock_status, lock_data \
+                       from performance_schema.data_locks where thread_id = ? \
+                      order by lock_status desc, object_name limit 50",
+                    &[ps],
+                )?;
+                d.locks = rows
+                    .iter()
+                    .map(|r| DataLock {
+                        object: text(r, 0),
+                        index: opt(r, 1),
+                        lock_type: text(r, 2),
+                        mode: text(r, 3),
+                        status: text(r, 4),
+                        data: opt(r, 5),
+                    })
+                    .collect();
+                let rows = c.query(
+                    "select b.trx_mysql_thread_id \
+                       from performance_schema.data_lock_waits w \
+                       join information_schema.innodb_trx r \
+                         on r.trx_id = w.requesting_engine_transaction_id \
+                       join information_schema.innodb_trx b \
+                         on b.trx_id = w.blocking_engine_transaction_id \
+                      where r.trx_mysql_thread_id = ? limit 1",
+                    &[&id_text],
+                )?;
+                d.waits_for = rows.first().map(|r| int(r, 0));
+                Ok(())
+            })(),
+        );
+    }
+    section(
+        "Transaction",
+        "the PROCESS privilege",
+        (|| {
+            let rows = c.query(
+                "select trx_state, trx_started, timestampdiff(second, trx_started, now()), \
+                        trx_rows_locked, trx_rows_modified, trx_isolation_level, trx_tables_locked \
+                   from information_schema.innodb_trx where trx_mysql_thread_id = ?",
+                &[&id_text],
+            )?;
+            d.transaction = rows.first().map(|r| ThreadTransaction {
+                state: text(r, 0),
+                started: text(r, 1),
+                age_secs: int(r, 2),
+                rows_locked: int(r, 3),
+                rows_modified: int(r, 4),
+                isolation: text(r, 5),
+                tables_locked: int(r, 6),
+            });
+            Ok(())
+        })(),
+    );
+    if thread.command == "Query" && thread.query.is_some() {
+        // The id is a number: safe in the statement. TREE (8.0.16+) reads
+        // best; older servers have the table.
+        let plan = c
+            .query(&format!("explain format=tree for connection {id}"), &[])
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| text(r, 0))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            // The tree only covers what the iterator executor runs (not an
+            // UPDATE, for one): the table then.
+            .and_then(|tree| {
+                if tree.contains("not executable by iterator executor") {
+                    Err(DbError::new(tree))
+                } else {
+                    Ok(tree)
+                }
+            })
+            .or_else(|_| {
+                c.query(&format!("explain for connection {id}"), &[])
+                    .map(|rows| {
+                        rows.iter()
+                            .map(|r| {
+                                r.iter()
+                                    .map(|c| c.as_deref().unwrap_or("NULL"))
+                                    .collect::<Vec<_>>()
+                                    .join("  ")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+            });
+        match plan {
+            Ok(plan) if !plan.is_empty() => d.plan = Some(plan),
+            Ok(_) => {}
+            // Not every statement can be explained (e.g. SLEEP()); say why.
+            Err(e) => section("Plan", "the PROCESS privilege", Err(e)),
+        }
+    }
+    d.errors = errors;
+    d
+}
+
+/// Ends a thread's running statement (`query_only`) or its connection.
+pub fn kill(c: &mut dyn Client, id: i64, query_only: bool) -> Result<(), DbError> {
+    // A number: safe in the statement.
+    let what = if query_only { "query " } else { "" };
+    c.query(&format!("kill {what}{id}"), &[])?;
+    Ok(())
+}
+
 fn opt(row: &[Cell], i: usize) -> Option<String> {
     row.get(i).cloned().flatten()
 }
