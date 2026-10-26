@@ -3802,8 +3802,19 @@ impl PythiaApp {
 }
 
 impl eframe::App for PythiaApp {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        theme::base(visuals).to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // The theme's background between the panels and the dock's areas,
+        // whatever the renderer clears to (#64).
+        ctx.layer_painter(egui::LayerId::background()).rect_filled(
+            ctx.content_rect(),
+            0.0,
+            theme::base(ui.visuals()),
+        );
         self.pump_events();
         self.refresh_invalid_periodically(&ctx);
         self.handle_dropped_files(&ctx);

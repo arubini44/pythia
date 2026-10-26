@@ -163,7 +163,16 @@ fn apply(style: &mut Style, p: &Palette) {
     w.open = widget(p.active, p.border, p.text);
     // Weak text (labels marked .weak()) uses this.
     v.weak_text_color = Some(p.text_weak);
-    let _ = p.base;
+}
+
+/// The window's background behind the panels: in the dock's gaps and
+/// outside the tabs' rounded corners.
+pub fn base(visuals: &egui::Visuals) -> Color32 {
+    if visuals.dark_mode {
+        DARK.base
+    } else {
+        LIGHT.base
+    }
 }
 
 /// Frame of the toolbar strip below the menu.
