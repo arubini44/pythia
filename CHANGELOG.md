@@ -50,6 +50,10 @@ All notable changes to Pythia are documented here. The format follows
   Tuning Pack: the executions SQL Monitor watched, with their report as
   text or in the browser. A pack that isn't enabled says so instead, and
   its views are no longer even probed (#74).
+- Monitor: a tablespace on the dashboard unfolds its files and largest
+  segments, or for a temporary one the sessions using it; the PGA bar
+  unfolds the sessions using the most PGA, each opening its details
+  (#74).
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
 - **Debug…** next to **Test…** on procedures, functions and package

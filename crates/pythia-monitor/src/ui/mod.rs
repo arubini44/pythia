@@ -167,6 +167,12 @@ pub(crate) enum Want {
     EventHistogram {
         event: String,
     },
+    /// A tablespace's files and largest segments or temp users.
+    Tablespace {
+        name: String,
+    },
+    /// The sessions using the most PGA.
+    PgaUsers,
     /// What the management packs keep about a session or statement.
     History {
         scope: queries::Scope,
@@ -249,6 +255,8 @@ enum Job {
     Detail(i64, i64),
     SqlDetail(String),
     EventHistogram(String),
+    Tablespace(String),
+    PgaUsers,
     History(queries::Scope, history::HistoryPart),
     Control(String),
     Transaction(i64, i64),
@@ -646,6 +654,11 @@ impl Monitor {
                     task,
                 )
             }
+            Want::Tablespace { name } => (
+                Job::Tablespace(name.clone()),
+                Box::new(move |c| boxed(queries::tablespace_detail(c, &name))),
+            ),
+            Want::PgaUsers => (Job::PgaUsers, Box::new(|c| boxed(queries::pga_users(c)))),
             Want::EventHistogram { event } => (
                 Job::EventHistogram(event.clone()),
                 Box::new(move |c| boxed(queries::event_histogram(c, &event))),
@@ -755,6 +768,8 @@ impl Monitor {
                 }
             }
             Job::EventHistogram(event) => self.dashboard.on_histogram(&event, take(result)),
+            Job::Tablespace(name) => self.dashboard.on_tablespace(&name, take(result)),
+            Job::PgaUsers => self.dashboard.on_pga_users(take(result)),
             Job::History(scope, part) => {
                 use history::{HistoryPart, HistoryResult};
                 let result = match part {

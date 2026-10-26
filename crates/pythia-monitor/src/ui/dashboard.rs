@@ -11,7 +11,8 @@ use super::style::{self, Kpi, Palette, bytes, compact, duration, section};
 use super::{Analysis, DetailTab, FieldFilter, Want, Wants, refresh_selector};
 use crate::insights::{Insight, Severity, Target, insights};
 use crate::queries::{
-    Counters, DashboardSnapshot, EventRate, Rates, SystemEvent, TopSql, event_rates, explain_error,
+    Counters, DashboardSnapshot, EventRate, PgaUser, Rates, SystemEvent, TablespaceDetail, TopSql,
+    event_rates, explain_error,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,6 +91,18 @@ const HISTORY: usize = 720;
 /// An event's latency histogram as read: (up to ms, waits), or why not.
 type Histogram = Result<Vec<(f64, i64)>, String>;
 
+/// What is unfolded on the dashboard, with its data once read (`None`
+/// while it is being read).
+#[derive(Default)]
+struct Unfolded {
+    /// An event and its latency histogram.
+    histogram: Option<(String, Option<Histogram>)>,
+    /// A tablespace and what it holds.
+    tablespace: Option<(String, Option<Result<TablespaceDetail, String>>)>,
+    /// The sessions using the most PGA.
+    pga: Option<Option<Result<Vec<PgaUser>, String>>>,
+}
+
 #[derive(Default)]
 pub struct DashboardView {
     pub refresh: Refresh,
@@ -99,8 +112,7 @@ pub struct DashboardView {
     /// Wait events as of the snapshot before, and the rates since.
     prev_events: Option<(Vec<SystemEvent>, f64)>,
     event_rates: Option<Vec<EventRate>>,
-    /// The event whose histogram is shown, and the histogram once read.
-    histogram: Option<(String, Option<Histogram>)>,
+    unfolded: Unfolded,
     history: VecDeque<Sample>,
     in_flight: bool,
     last_request: Option<f64>,
@@ -150,9 +162,23 @@ impl DashboardView {
 
     /// The histogram of the event shown.
     pub(crate) fn on_histogram(&mut self, event: &str, result: Result<Vec<(f64, i64)>, DbError>) {
-        if let Some((shown, data)) = &mut self.histogram
+        if let Some((shown, data)) = &mut self.unfolded.histogram
             && shown == event
         {
+            *data = Some(result.map_err(|e| explain_error(&e)));
+        }
+    }
+
+    pub(crate) fn on_tablespace(&mut self, name: &str, result: Result<TablespaceDetail, DbError>) {
+        if let Some((shown, data)) = &mut self.unfolded.tablespace
+            && shown == name
+        {
+            *data = Some(result.map_err(|e| explain_error(&e)));
+        }
+    }
+
+    pub(crate) fn on_pga_users(&mut self, result: Result<Vec<PgaUser>, DbError>) {
+        if let Some(data) = &mut self.unfolded.pga {
             *data = Some(result.map_err(|e| explain_error(&e)));
         }
     }
@@ -211,7 +237,7 @@ impl DashboardView {
         };
 
         // Taken out while the rest of the view is borrowed.
-        let mut histogram = self.histogram.take();
+        let mut unfolded = std::mem::take(&mut self.unfolded);
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -229,7 +255,12 @@ impl DashboardView {
                 ui.add_space(8.0);
                 activity(ui, snap, wants);
                 ui.add_space(8.0);
-                top_events(ui, self.event_rates.as_deref(), &mut histogram, wants);
+                top_events(
+                    ui,
+                    self.event_rates.as_deref(),
+                    &mut unfolded.histogram,
+                    wants,
+                );
                 ui.add_space(8.0);
                 let mut field = None;
                 ui.columns(3, |cols| {
@@ -263,10 +294,10 @@ impl DashboardView {
                 ui.add_space(8.0);
                 ui.columns(2, |cols| {
                     cursors(&mut cols[0], snap, wants);
-                    memory(&mut cols[1], snap);
+                    memory(&mut cols[1], snap, &mut unfolded.pga, wants);
                 });
                 ui.add_space(8.0);
-                tablespaces(ui, snap);
+                tablespaces(ui, snap, &mut unfolded.tablespace, wants);
                 ui.add_space(8.0);
                 top_sql(ui, snap, wants);
                 if !snap.long_ops.is_empty() {
@@ -276,7 +307,7 @@ impl DashboardView {
                 ui.add_space(8.0);
                 style::section_errors(ui, &snap.errors);
             });
-        self.histogram = histogram;
+        self.unfolded = unfolded;
     }
 
     fn kpis(&self, ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
@@ -608,7 +639,12 @@ fn cursors(ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
     });
 }
 
-fn memory(ui: &mut Ui, snap: &DashboardSnapshot) {
+fn memory(
+    ui: &mut Ui,
+    snap: &DashboardSnapshot,
+    pga: &mut Option<Option<Result<Vec<PgaUser>, String>>>,
+    wants: &mut Wants,
+) {
     section(ui, "Memory", |ui| {
         let Some(m) = &snap.memory else {
             ui.weak("—");
@@ -637,16 +673,58 @@ fn memory(ui: &mut Ui, snap: &DashboardSnapshot) {
         } else {
             m.pga_inuse / m.pga_allocated.max(1.0)
         };
-        style::usage_bar(
+        if style::link_bar(
             ui,
             frac as f32,
             Palette::ORANGE,
             format!("{} in use", bytes(m.pga_inuse)),
-        );
+            "Show the sessions using the most",
+        ) {
+            if pga.is_some() {
+                *pga = None;
+            } else {
+                *pga = Some(None);
+                wants.push(Want::PgaUsers);
+            }
+        }
+        if let Some(users) = pga {
+            ui.indent("pga-users", |ui| match users {
+                None => {
+                    ui.spinner();
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(ui.visuals().error_fg_color, e);
+                }
+                Some(Ok(users)) => {
+                    for u in users {
+                        let text = format!(
+                            "{} of {}  sid {} · {} · {}",
+                            bytes(u.used),
+                            bytes(u.allocated),
+                            u.sid,
+                            u.user.as_deref().unwrap_or("(background)"),
+                            u.program.as_deref().unwrap_or("")
+                        );
+                        if ui.link(text).on_hover_text("Show the session").clicked() {
+                            wants.push(Want::OpenDetail {
+                                sid: u.sid,
+                                serial: u.serial,
+                                tab: Some(DetailTab::Overview),
+                            });
+                        }
+                    }
+                }
+            });
+        }
     });
 }
 
-fn tablespaces(ui: &mut Ui, snap: &DashboardSnapshot) {
+fn tablespaces(
+    ui: &mut Ui,
+    snap: &DashboardSnapshot,
+    shown: &mut Option<(String, Option<Result<TablespaceDetail, String>>)>,
+    wants: &mut Wants,
+) {
     section(ui, "Tablespaces", |ui| {
         if snap.tablespaces.is_empty() {
             ui.weak("—");
@@ -654,10 +732,23 @@ fn tablespaces(ui: &mut Ui, snap: &DashboardSnapshot) {
         }
         for t in &snap.tablespaces {
             ui.horizontal(|ui| {
-                ui.add_sized(
-                    [150.0, 16.0],
-                    egui::Label::new(RichText::new(&t.name).monospace()).truncate(),
-                );
+                let open = shown.as_ref().is_some_and(|(n, _)| *n == t.name);
+                let name = ui
+                    .add_sized(
+                        [150.0, 16.0],
+                        egui::Link::new(RichText::new(&t.name).monospace()),
+                    )
+                    .on_hover_text("Its files and largest segments, or who uses it");
+                if name.clicked() {
+                    if open {
+                        *shown = None;
+                    } else {
+                        *shown = Some((t.name.clone(), None));
+                        wants.push(Want::Tablespace {
+                            name: t.name.clone(),
+                        });
+                    }
+                }
                 let color = if t.used_pct >= 90.0 {
                     Palette::RED
                 } else if t.used_pct >= 75.0 {
@@ -677,9 +768,73 @@ fn tablespaces(ui: &mut Ui, snap: &DashboardSnapshot) {
                     ),
                 );
             });
+            if let Some((name, data)) = shown.as_ref()
+                && *name == t.name
+            {
+                ui.indent(("tablespace", name), |ui| {
+                    tablespace(ui, data.as_ref(), wants)
+                });
+            }
             ui.add_space(2.0);
         }
     });
+}
+
+/// A tablespace's files, and its largest segments or who uses it.
+fn tablespace(ui: &mut Ui, data: Option<&Result<TablespaceDetail, String>>, wants: &mut Wants) {
+    let d = match data {
+        None => {
+            ui.spinner();
+            return;
+        }
+        Some(Err(e)) => {
+            ui.colored_label(ui.visuals().error_fg_color, e);
+            return;
+        }
+        Some(Ok(d)) => d,
+    };
+    for f in &d.files {
+        let grows = if f.autoextensible {
+            format!(", grows to {}", bytes(f.max_bytes))
+        } else {
+            String::new()
+        };
+        ui.label(
+            RichText::new(format!("{}  {}{grows}", f.name, bytes(f.bytes)))
+                .monospace()
+                .small(),
+        );
+    }
+    if d.temporary {
+        if d.temp_users.is_empty() {
+            ui.weak("No session uses it now");
+        }
+        for (sid, serial, user, segment, b) in &d.temp_users {
+            let text = format!(
+                "{}  sid {sid} · {} · {}",
+                bytes(*b),
+                user.as_deref().unwrap_or("(background)"),
+                segment.to_lowercase()
+            );
+            if ui.link(text).on_hover_text("Show the session").clicked() {
+                wants.push(Want::OpenDetail {
+                    sid: *sid,
+                    serial: *serial,
+                    tab: Some(DetailTab::Overview),
+                });
+            }
+        }
+    } else {
+        let largest = d.segments.first().map_or(1.0, |s| s.2).max(1.0);
+        for (name, kind, b) in &d.segments {
+            style::usage_bar(
+                ui,
+                (*b / largest) as f32,
+                Palette::BLUE,
+                format!("{}  {name} · {}", bytes(*b), kind.to_lowercase()),
+            );
+        }
+    }
 }
 
 fn top_sql(ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
@@ -973,6 +1128,18 @@ mod tests {
                 rows: 10,
                 text: "select 1 from dual".into(),
             }],
+            tablespaces: vec![crate::queries::Tablespace {
+                name: "USERS".into(),
+                used_pct: 50.0,
+                used_bytes: 5e6,
+                max_bytes: 1e7,
+            }],
+            memory: Some(crate::queries::Memory {
+                sga: vec![("buffer cache".into(), 1e8)],
+                pga_allocated: 2e7,
+                pga_inuse: 1e7,
+                pga_target: 4e7,
+            }),
             ..DashboardSnapshot::default()
         }
     }
@@ -984,6 +1151,8 @@ mod tests {
             Want::OpenDetail { sid, serial, tab } => format!("details {sid},{serial} {tab:?}"),
             Want::OpenSqlDetail { sql_id } => format!("sql {sql_id}"),
             Want::EventHistogram { event } => format!("histogram {event}"),
+            Want::Tablespace { name } => format!("tablespace {name}"),
+            Want::PgaUsers => "pga users".into(),
             _ => "other".into(),
         }
     }
@@ -1052,5 +1221,7 @@ mod tests {
             [r#"sessions Some(Event("log file sync"))"#]
         );
         assert_eq!(click("Histogram"), ["histogram log file sync"]);
+        assert_eq!(click("USERS"), ["tablespace USERS"]);
+        assert_eq!(click("in use"), ["pga users"]);
     }
 }

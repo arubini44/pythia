@@ -500,6 +500,137 @@ pub fn dashboard_snapshot(conn: &Connection) -> DashboardSnapshot {
     s
 }
 
+/// What a tablespace holds: its files, and its largest segments or, for a
+/// temporary one, the sessions using it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TablespaceDetail {
+    pub temporary: bool,
+    pub files: Vec<DataFile>,
+    /// `OWNER.NAME`, segment type, bytes; largest first.
+    pub segments: Vec<(String, String, f64)>,
+    /// sid, serial#, user, segment type (SORT, HASH, …), bytes.
+    pub temp_users: Vec<(i64, i64, Option<String>, String, f64)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataFile {
+    pub name: String,
+    pub bytes: f64,
+    /// What it may grow to (0 when it doesn't).
+    pub max_bytes: f64,
+    pub autoextensible: bool,
+}
+
+pub fn tablespace_detail(conn: &Connection, name: &str) -> Result<TablespaceDetail> {
+    let contents: Option<String> = query(
+        conn,
+        "select contents from dba_tablespaces where tablespace_name = :1",
+        &[&name],
+        |r| get(r, 0),
+    )?
+    .into_iter()
+    .next();
+    let temporary = contents.as_deref() == Some("TEMPORARY");
+    let files = if temporary {
+        "dba_temp_files"
+    } else {
+        "dba_data_files"
+    };
+    let mut d = TablespaceDetail {
+        temporary,
+        files: query(
+            conn,
+            &format!(
+                "select file_name, bytes, maxbytes, autoextensible from {files} \
+                  where tablespace_name = :1 order by file_id"
+            ),
+            &[&name],
+            |r| {
+                Ok(DataFile {
+                    name: get(r, 0)?,
+                    bytes: get::<Option<f64>>(r, 1)?.unwrap_or(0.0),
+                    max_bytes: get::<Option<f64>>(r, 2)?.unwrap_or(0.0),
+                    autoextensible: get::<Option<String>>(r, 3)?.as_deref() == Some("YES"),
+                })
+            },
+        )?,
+        ..TablespaceDetail::default()
+    };
+    if temporary {
+        d.temp_users = query(
+            conn,
+            "select s.sid, s.serial#, s.username, u.segtype, u.blocks * t.block_size \
+               from v$tempseg_usage u \
+               join v$session s on s.saddr = u.session_addr \
+               join dba_tablespaces t on t.tablespace_name = u.tablespace \
+              where u.tablespace = :1 order by 5 desc",
+            &[&name],
+            |r| {
+                Ok((
+                    get(r, 0)?,
+                    get(r, 1)?,
+                    get(r, 2)?,
+                    get::<Option<String>>(r, 3)?.unwrap_or_default(),
+                    get::<Option<f64>>(r, 4)?.unwrap_or(0.0),
+                ))
+            },
+        )?;
+    } else {
+        d.segments = query(
+            conn,
+            &compat::first_rows(
+                "select owner || '.' || segment_name, segment_type, bytes from dba_segments \
+                  where tablespace_name = :1 order by bytes desc",
+                10,
+            ),
+            &[&name],
+            |r| {
+                Ok((
+                    get(r, 0)?,
+                    get::<Option<String>>(r, 1)?.unwrap_or_default(),
+                    get::<Option<f64>>(r, 2)?.unwrap_or(0.0),
+                ))
+            },
+        )?;
+    }
+    Ok(d)
+}
+
+/// A session and its PGA, in bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PgaUser {
+    pub sid: i64,
+    pub serial: i64,
+    pub user: Option<String>,
+    pub program: Option<String>,
+    pub used: f64,
+    pub allocated: f64,
+}
+
+/// The sessions using the most PGA.
+pub fn pga_users(conn: &Connection) -> Result<Vec<PgaUser>> {
+    query(
+        conn,
+        &compat::first_rows(
+            "select s.sid, s.serial#, s.username, s.program, p.pga_used_mem, p.pga_alloc_mem \
+               from v$session s join v$process p on p.addr = s.paddr \
+              order by p.pga_alloc_mem desc",
+            10,
+        ),
+        &[],
+        |r| {
+            Ok(PgaUser {
+                sid: get(r, 0)?,
+                serial: get(r, 1)?,
+                user: get(r, 2)?,
+                program: get(r, 3)?,
+                used: get::<Option<f64>>(r, 4)?.unwrap_or(0.0),
+                allocated: get::<Option<f64>>(r, 5)?.unwrap_or(0.0),
+            })
+        },
+    )
+}
+
 /// A wait event's totals since startup (`V$SYSTEM_EVENT`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SystemEvent {

@@ -882,3 +882,28 @@ fn management_pack_history() {
         eprintln!("Tuning Pack not enabled, skipping SQL Monitor");
     }
 }
+
+/// Tablespaces: files and largest segments, or for a temporary one its
+/// files; the sessions using the most PGA (#74).
+#[test]
+fn tablespace_and_pga_drill_down() {
+    let Some(conn) = dba() else { return };
+    let sysaux = queries::tablespace_detail(&conn, "SYSAUX").unwrap();
+    assert!(!sysaux.temporary);
+    assert!(
+        !sysaux.files.is_empty() && !sysaux.segments.is_empty(),
+        "{sysaux:?}"
+    );
+    assert!(sysaux.segments.windows(2).all(|w| w[0].2 >= w[1].2));
+    let temp: String = conn
+        .query_row_as(
+            "select tablespace_name from dba_tablespaces where contents = 'TEMPORARY' and rownum = 1",
+            &[],
+        )
+        .unwrap();
+    let temp = queries::tablespace_detail(&conn, &temp).unwrap();
+    assert!(temp.temporary && !temp.files.is_empty(), "{temp:?}");
+    let users = queries::pga_users(&conn).unwrap();
+    assert!(!users.is_empty());
+    assert!(users.windows(2).all(|w| w[0].allocated >= w[1].allocated));
+}
