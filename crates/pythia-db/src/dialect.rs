@@ -102,9 +102,10 @@ impl Dialect {
                     | Feature::SshTunnel
                     | Feature::Dashboard
             ),
-            DbKind::Postgres | DbKind::SqlServer => {
-                matches!(feature, Feature::ExplainPlan | Feature::Completion)
-            }
+            DbKind::Postgres | DbKind::SqlServer => matches!(
+                feature,
+                Feature::ExplainPlan | Feature::Completion | Feature::Dashboard
+            ),
         }
     }
 
@@ -275,9 +276,9 @@ mod tests {
             assert!(!dialect.supports(Feature::ServerOutput));
             assert!(!dialect.supports(Feature::Monitor));
         }
-        // No dashboard and no tunnel for these two yet.
+        // A dashboard (#92), no tunnel yet.
         for dialect in [Dialect::POSTGRES, Dialect::SQLSERVER] {
-            assert!(!dialect.supports(Feature::Dashboard));
+            assert!(dialect.supports(Feature::Dashboard));
             assert!(!dialect.supports(Feature::SshTunnel));
         }
         assert_eq!(Dialect::default(), Dialect::ORACLE);

@@ -52,6 +52,8 @@ services:
   #   PYTHIA_TEST_POSTGRES=pythia/pythia@localhost:5432/pythia cargo test -p pythia-db
   postgres:
     image: docker.io/library/postgres:18
+    # pg_stat_statements for the dashboard's top statements.
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
     ports:
       - "${PYTHIA_POSTGRES_PORT:-5432}:5432"
     environment:

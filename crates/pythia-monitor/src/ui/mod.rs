@@ -26,8 +26,10 @@ mod detail;
 mod history;
 mod mysql;
 mod mysql_thread;
+mod postgres;
 mod sessions;
 mod sql_detail;
+mod sqlserver;
 pub mod style;
 mod trace;
 
@@ -45,8 +47,10 @@ pub use dashboard::{DashboardView, Refresh};
 pub use detail::SessionDetailView;
 pub use mysql::MySqlDashboardView;
 pub use mysql_thread::ThreadDetailView;
+pub use postgres::PostgresDashboardView;
 pub use sessions::{FieldFilter, SessionsView};
 pub use sql_detail::SqlDetailView;
+pub use sqlserver::SqlServerDashboardView;
 pub use trace::TraceView;
 
 /// Identifies a request inside one [`Monitor`].
@@ -126,6 +130,13 @@ pub(crate) enum Want {
     Dashboard,
     /// With table statistics or without.
     MySqlDashboard {
+        storage: bool,
+    },
+    /// Likewise.
+    PostgresDashboard {
+        storage: bool,
+    },
+    SqlServerDashboard {
         storage: bool,
     },
     Sessions {
@@ -269,6 +280,8 @@ enum Job {
     Capabilities,
     Dashboard,
     MySqlDashboard,
+    PostgresDashboard,
+    SqlServerDashboard,
     Sessions,
     Detail(i64, i64),
     SqlDetail(String),
@@ -302,7 +315,8 @@ impl Wants {
 }
 
 pub struct Monitor {
-    /// The connection's database: MySQL has the dashboard only.
+    /// The connection's database: MySQL, PostgreSQL and SQL Server have
+    /// their dashboard only.
     dialect: Dialect,
     tab: MonitorTab,
     show_tabs: bool,
@@ -310,6 +324,8 @@ pub struct Monitor {
     caps_pending: bool,
     pub dashboard: DashboardView,
     pub mysql: MySqlDashboardView,
+    pub postgres: PostgresDashboardView,
+    pub sqlserver: SqlServerDashboardView,
     pub sessions: SessionsView,
     pub awr: AwrView,
     pub trace: TraceView,
@@ -341,6 +357,8 @@ impl Monitor {
             caps_pending: false,
             dashboard: DashboardView::default(),
             mysql: MySqlDashboardView::default(),
+            postgres: PostgresDashboardView::default(),
+            sqlserver: SqlServerDashboardView::default(),
             sessions: SessionsView::default(),
             awr: AwrView::default(),
             trace: TraceView::default(),
@@ -360,14 +378,15 @@ impl Monitor {
         self.analyze = on;
     }
 
-    /// The connection's database. A MySQL connection gets its dashboard,
-    /// whatever the tab.
+    /// The connection's database. A MySQL, PostgreSQL or SQL Server
+    /// connection gets its dashboard, whatever the tab.
     pub fn set_dialect(&mut self, dialect: Dialect) {
         self.dialect = dialect;
     }
 
-    fn is_mysql(&self) -> bool {
-        self.dialect.kind() == DbKind::MySql
+    /// The database has its dashboard (and what opens from it) only.
+    fn dashboard_only(&self) -> bool {
+        self.dialect.kind() != DbKind::Oracle
     }
 
     /// Hide the tab bar to host a single view as its own document.
@@ -421,7 +440,7 @@ impl Monitor {
         };
         let mut out = MonitorOutput::default();
 
-        if self.is_mysql() {
+        if self.dashboard_only() {
             // The dashboard, and the threads opened from it.
             if !self.details.is_empty() {
                 ui.horizontal(|ui| {
@@ -435,7 +454,11 @@ impl Monitor {
                     Some(DetailView::Thread(d)) => d.ui(ui, &mut wants),
                     _ => self.tab = MonitorTab::Dashboard,
                 },
-                _ => self.mysql.ui(ui, now, &mut wants),
+                _ => match self.dialect.kind() {
+                    DbKind::Postgres => self.postgres.ui(ui, now, &mut wants),
+                    DbKind::SqlServer => self.sqlserver.ui(ui, now, &mut wants),
+                    _ => self.mysql.ui(ui, now, &mut wants),
+                },
             }
             self.handle(wants, &mut out);
             return out;
@@ -575,7 +598,7 @@ impl Monitor {
         }
         if let Some(i) = close {
             self.details.remove(i);
-            let back = if self.is_mysql() {
+            let back = if self.dashboard_only() {
                 MonitorTab::Dashboard
             } else {
                 MonitorTab::Sessions
@@ -612,6 +635,22 @@ impl Monitor {
                 token: self.token(Job::MySqlDashboard),
                 task: MonitorTask::Client(Box::new(move |c| {
                     boxed(Ok(crate::mysql::snapshot(c, storage)))
+                })),
+            });
+        }
+        if let Want::PostgresDashboard { storage } = want {
+            return Some(MonitorRequest {
+                token: self.token(Job::PostgresDashboard),
+                task: MonitorTask::Client(Box::new(move |c| {
+                    boxed(Ok(crate::postgres::snapshot(c, storage)))
+                })),
+            });
+        }
+        if let Want::SqlServerDashboard { storage } = want {
+            return Some(MonitorRequest {
+                token: self.token(Job::SqlServerDashboard),
+                task: MonitorTask::Client(Box::new(move |c| {
+                    boxed(Ok(crate::sqlserver::snapshot(c, storage)))
                 })),
             });
         }
@@ -804,7 +843,9 @@ impl Monitor {
             | Want::OpenThread { .. }
             | Want::ThreadDetail { .. }
             | Want::KillThread { .. }
-            | Want::MySqlDashboard { .. } => return None,
+            | Want::MySqlDashboard { .. }
+            | Want::PostgresDashboard { .. }
+            | Want::SqlServerDashboard { .. } => return None,
         };
         Some(MonitorRequest {
             token: self.token(job),
@@ -835,6 +876,8 @@ impl Monitor {
             }
             Job::Dashboard => self.dashboard.on_snapshot(take(result), now),
             Job::MySqlDashboard => self.mysql.on_snapshot(take(result), now),
+            Job::PostgresDashboard => self.postgres.on_snapshot(take(result), now),
+            Job::SqlServerDashboard => self.sqlserver.on_snapshot(take(result), now),
             Job::Sessions => self.sessions.on_sessions(take(result)),
             Job::Detail(sid, serial) => {
                 let result = take(result);

@@ -1,6 +1,7 @@
 //! Shared visual building blocks: wait class colors, cards, number formats.
 
 use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke, Ui};
+use egui_extras::{Column, TableBuilder};
 
 /// Wait class colors, following Oracle Enterprise Manager conventions.
 pub fn wait_class_color(class: &str) -> Color32 {
@@ -404,6 +405,74 @@ pub fn unavailable(ui: &mut Ui, title: &str, reason: &str) {
         ui.add_space(6.0);
         ui.label(RichText::new(reason).color(ui.visuals().weak_text_color()));
     });
+}
+
+/// A plain table: (title, width, right-aligned) columns, the last one
+/// taking the rest. Its cells show their full text on hover. The cells of
+/// the `links` columns are ids (a thread, a session), links saying
+/// `link_hover`: returns the one clicked.
+pub(crate) fn text_table(
+    ui: &mut Ui,
+    id: &str,
+    columns: &[(&str, f32, bool)],
+    rows: &[Vec<String>],
+    links: &[usize],
+    link_hover: &str,
+) -> Option<i64> {
+    let mut clicked = None;
+    let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+    let mut builder = TableBuilder::new(ui)
+        .id_salt(id)
+        .striped(true)
+        .vscroll(false)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+    let last = columns.len().saturating_sub(1);
+    for (i, (_, width, _)) in columns.iter().enumerate() {
+        builder = builder.column(if i == last {
+            Column::remainder().clip(true)
+        } else {
+            Column::exact(*width).clip(true)
+        });
+    }
+    builder
+        .header(h, |mut r| {
+            for (title, ..) in columns {
+                r.col(|ui| {
+                    ui.strong(*title);
+                });
+            }
+        })
+        .body(|body| {
+            body.rows(h, rows.len(), |mut row| {
+                let cells = &rows[row.index()];
+                for (i, (_, _, right)) in columns.iter().enumerate() {
+                    let text = cells.get(i).map_or("", String::as_str);
+                    row.col(|ui| {
+                        let label = if i == last {
+                            RichText::new(text.replace('\n', " ")).monospace()
+                        } else {
+                            RichText::new(text)
+                        };
+                        let layout = if *right {
+                            egui::Layout::right_to_left(egui::Align::Center)
+                        } else {
+                            egui::Layout::left_to_right(egui::Align::Center)
+                        };
+                        ui.with_layout(layout, |ui| {
+                            if links.contains(&i) && !text.is_empty() {
+                                if ui.link(label).on_hover_text(link_hover).clicked() {
+                                    clicked = text.parse().ok();
+                                }
+                            } else {
+                                ui.add(egui::Label::new(label).truncate())
+                                    .on_hover_text(text);
+                            }
+                        });
+                    });
+                }
+            });
+        });
+    clicked
 }
 
 #[cfg(test)]

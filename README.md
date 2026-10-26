@@ -109,6 +109,8 @@ for Linux, Windows and macOS.
 - MySQL: a dashboard of its own; its threads open their details
   (statement and plan, transaction, locks, the thread they wait for) and
   can be killed.
+- PostgreSQL and SQL Server: a dashboard each, from their statistics
+  views and DMVs.
 
 ![Monitoring dashboard](docs/screenshots/monitor-dashboard.png)
 
@@ -221,6 +223,28 @@ for Linux, Windows and macOS.
   SQL Server) and object views with the DDL. Transactions work as with
   Oracle; on PostgreSQL a failing statement doesn't abort the transaction,
   and notices (`RAISE NOTICE`) show as messages.
+- PostgreSQL's monitoring dashboard (Monitor → Dashboard): findings first
+  (who blocks whom, sessions idle in transaction, connections near the
+  limit, cache hit ratio, deadlocks, replication lag and inactive slots,
+  transaction ID wraparound, tables with many dead rows, checkpoints
+  forced by WAL volume), then KPIs and trends from `pg_stat_database`,
+  active sessions by wait event, connections by user, application, client
+  and database, running statements, open transactions, replication, the
+  largest databases and tables, and top statements from
+  `pg_stat_statements` (when it is loaded). Other users' statements need
+  `pg_read_all_stats` (or `pg_monitor`).
+- SQL Server's monitoring dashboard: findings first (blocking and who
+  blocks, a sleeping session with an open transaction named as such, a
+  log nearly full, memory grants pending, low page life expectancy,
+  connections near the limit, deadlocks, buffer cache hit ratio, a high
+  share of compilations, long transactions and requests), then KPIs and
+  trends from the performance counters, running requests by wait class,
+  sessions by login, host, program and database, blocking, open
+  transactions with their log use, top waits since the refresh before,
+  database and table sizes, and top statements from the plan cache. Most
+  of it needs `VIEW SERVER STATE` (`VIEW SERVER PERFORMANCE STATE` on
+  2022); without it the dashboard shows the login's own sessions and says
+  so.
 - Scripts split the database's way: PostgreSQL's dollar-quoted routine
   bodies stay whole and `::` casts aren't bind variables; on SQL Server,
   `GO` on a line of its own ends a batch, routines and scripts with
@@ -339,8 +363,9 @@ PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 | `PYTHIA_TEST_MYSQL` | MySQL tests, e.g. `pythia/pythia@localhost:3306/pythia` for `docker compose up -d mysql` |
 | `PYTHIA_TEST_MYSQL_DBA` | MySQL dashboard tests that need privileges, e.g. `root/mysql@localhost:3306/pythia` |
 | `PYTHIA_TEST_SSH`, `PYTHIA_TEST_MYSQL_VIA_SSH` | SSH tunnel tests: `pythia:pythia@localhost:2222` and `pythia/pythia@mysql:3306/pythia` for `docker compose up -d mysql ssh` |
-| `PYTHIA_TEST_POSTGRES` | PostgreSQL tests, e.g. `pythia/pythia@localhost:5432/pythia` for `docker compose up -d postgres` |
+| `PYTHIA_TEST_POSTGRES` | PostgreSQL tests (a superuser), e.g. `pythia/pythia@localhost:5432/pythia` for `docker compose up -d postgres`, which loads `pg_stat_statements` |
 | `PYTHIA_TEST_MSSQL` | SQL Server tests, e.g. `pythia/pythia@localhost:1433/pythia?trust` for `docker compose up -d mssql mssql-init` |
+| `PYTHIA_TEST_MSSQL_DBA` | SQL Server dashboard tests that need VIEW SERVER STATE, e.g. `sa/Pythia-2026@localhost:1433/pythia?trust` |
 | `PYTHIA_TEST_DB_DBA` | monitor, compare and debugger tests (`system/oracle@…`) |
 | `PYTHIA_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local Podman container; with Docker on Linux, the compose network's gateway from `docker network inspect pythia_default`) |
 | `PYTHIA_SCREENSHOT_DIR` | renders the real UI offscreen into PNGs (`cargo test -p pythia-app screenshots`) |

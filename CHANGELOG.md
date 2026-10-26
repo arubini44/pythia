@@ -12,6 +12,19 @@ All notable changes to Pythia are documented here. The format follows
   tunnel and the dashboard (#36). Scripts split the database's way:
   dollar-quoted routine bodies and `::` casts on PostgreSQL, `GO` batches
   and `BEGIN … END` blocks on SQL Server.
+- PostgreSQL and SQL Server: a monitoring dashboard each (Monitor →
+  Dashboard), like MySQL's: findings first, KPI tiles and trend charts from
+  the server's counters, what runs and waits now, connections by user,
+  application or program, client and database, lock waits and blocking
+  with the blocker's statement (or that it sits idle in a transaction),
+  open transactions, storage and top statements with *Analyze*. On
+  PostgreSQL from `pg_stat_activity`, `pg_stat_database`, `pg_locks`, the
+  replication views and `pg_stat_statements`, with findings for idle
+  transactions, replication lag and inactive slots, transaction ID
+  wraparound and dead rows. On SQL Server from the DMVs and performance
+  counters, with top waits since the refresh before, log use and page
+  life expectancy. Without `pg_read_all_stats` or `VIEW SERVER STATE` the
+  dashboard shows what it can and says what's missing (#92).
 
 ### Fixed
 - Editing another user no longer needs SELECT_CATALOG_ROLE: `ALTER USER`

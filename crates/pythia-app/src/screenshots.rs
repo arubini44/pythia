@@ -4369,6 +4369,67 @@ fn mysql_dashboard() {
     save(&mut h, "mysql-dashboard");
 }
 
+/// The PostgreSQL dashboard (`PYTHIA_TEST_POSTGRES`, #92): server KPIs,
+/// trends, findings, sessions, storage and top statements.
+#[test]
+fn postgres_dashboard() {
+    use crate::commands::Command;
+    let Some(spec) = std::env::var("PYTHIA_TEST_POSTGRES").ok() else {
+        return;
+    };
+    let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+    let (username, password) = credentials.split_once('/').unwrap();
+    let profile = ConnectionProfile {
+        name: "orders".into(),
+        kind: pythia_config::DbKind::Postgres,
+        username: username.into(),
+        connect_string: connect_string.into(),
+        color: Some([0x14, 0xb8, 0xa6]),
+        ..Default::default()
+    };
+    // Tall enough for all of it.
+    let mut h = sized_harness(egui::vec2(1440.0, 2100.0));
+    h.state_mut().test_connect(profile, password.into());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_command(Command::MonitorDashboard);
+
+    // Three snapshots: rates from the second on, a chart from the third.
+    let wait_for = |h: &mut Ui, what: &str, done: &dyn Fn(&mut Ui) -> bool| {
+        let start = Instant::now();
+        while !done(h) {
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "timed out waiting for {what}"
+            );
+            h.step();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    };
+    wait_for(&mut h, "the dashboard", &|h| {
+        h.query_by_label("Cache hit ratio").is_some()
+    });
+    // Refreshing now until the charts have two samples.
+    let start = Instant::now();
+    while h.query_all_by_label("Collecting samples…").next().is_some() {
+        assert!(start.elapsed() < Duration::from_secs(60), "no charts");
+        std::thread::sleep(Duration::from_millis(600));
+        h.get_by_label("⟳").click();
+        h.run_steps(3);
+    }
+    for label in [
+        "Connections",
+        "Commits / s",
+        "Transaction ID age",
+        "Largest databases",
+        "Running statements, longest first",
+        "Top statements by total time (since the statistics were reset)",
+    ] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("Dashboard"));
+    save(&mut h, "postgres-dashboard");
+}
+
 /// A MySQL connection without a database (#81): the toolbar, status bar
 /// and object browser say so; picking one in the browser makes it the
 /// database of the open SQL windows and of new ones.
@@ -4637,10 +4698,12 @@ impl OtherDatabase<'_> {
             app.test_transaction_state() == Err("No transaction")
         });
 
-        // Oracle-only menus are gone; a shortcut to one explains.
-        for menu in ["Debug", "Monitor", "Reports"] {
+        // Oracle-only menus are gone; a shortcut to one explains. Monitor
+        // has the dashboard (#92).
+        for menu in ["Debug", "Reports"] {
             assert!(h.query_by_label(menu).is_none(), "{menu}");
         }
+        assert!(h.query_by_label("Monitor").is_some());
         h.state_mut().test_command(Command::MonitorSessions);
         assert_eq!(
             h.state().test_log().last().cloned(),
@@ -4823,4 +4886,60 @@ select id, customer, total, @limit as limit from app_orders where total < @limit
         run: true,
     });
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// The SQL Server dashboard (`PYTHIA_TEST_MSSQL_DBA`, a login with VIEW
+/// SERVER STATE): server KPIs, trends, waits and storage on the
+/// connection's own session.
+#[test]
+fn sqlserver_dashboard() {
+    use crate::commands::Command;
+    let Some(spec) = std::env::var("PYTHIA_TEST_MSSQL_DBA").ok() else {
+        return;
+    };
+    let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+    let (username, password) = credentials.split_once('/').unwrap();
+    let profile = ConnectionProfile {
+        name: "warehouse".into(),
+        kind: pythia_config::DbKind::SqlServer,
+        username: username.into(),
+        connect_string: connect_string.into(),
+        color: Some([0xe1, 0x1d, 0x48]),
+        ..Default::default()
+    };
+    // Tall enough for all of it.
+    let mut h = sized_harness(egui::vec2(1440.0, 2200.0));
+    h.state_mut().test_connect(profile, password.into());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_command(Command::MonitorDashboard);
+
+    let start = Instant::now();
+    while h.query_by_label("Page life expectancy").is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "timed out waiting for the dashboard"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    // Refreshing now until the charts have two samples.
+    let start = Instant::now();
+    while h.query_all_by_label("Collecting samples…").next().is_some() {
+        assert!(start.elapsed() < Duration::from_secs(60), "no charts");
+        std::thread::sleep(Duration::from_millis(600));
+        h.get_by_label("⟳").click();
+        h.run_steps(3);
+    }
+    for label in [
+        "Connections",
+        "Batch requests / s",
+        "Buffer cache hit ratio",
+        "Top waits (since the refresh before)",
+        "Largest databases",
+        "Running requests, longest first",
+    ] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("Dashboard"));
+    save(&mut h, "sqlserver-dashboard");
 }
