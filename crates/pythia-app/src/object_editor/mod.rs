@@ -2069,12 +2069,12 @@ mod tests {
         assert_eq!(loaded.roles, user.roles, "admin option and default roles");
         assert_eq!(loaded.privileges, user.privileges);
         assert_eq!(loaded.objects, user.objects);
-        assert!(!loaded.locked && !loaded.expire);
+        assert!(loaded.locked == Some(false) && !loaded.expire);
         // Nothing to do on the loaded user.
         assert_eq!(account::statements(Some(&loaded), &loaded), Ok(Vec::new()));
 
         let mut edited = loaded.clone();
-        edited.locked = true;
+        edited.locked = Some(true);
         edited.quotas.retain(|(t, _)| ident(t) == tablespace);
         edited.quotas[0].1 = "unlimited".into();
         edited.privileges.insert("CREATE TABLE".into(), false);
@@ -2084,7 +2084,7 @@ mod tests {
         edited.objects.insert(object("SELECT"), false);
         run(account::statements(Some(&loaded), &edited).unwrap());
         let reloaded = account::load_user(&conn, "PYTHIA_OB_USER").unwrap();
-        assert!(reloaded.locked);
+        assert_eq!(reloaded.locked, Some(true));
         assert_eq!(reloaded.quotas.len(), 1);
         assert_eq!(reloaded.quotas[0].1, "unlimited");
         assert_eq!(reloaded.privileges, edited.privileges);
@@ -2095,6 +2095,94 @@ mod tests {
             Ok(Vec::new())
         );
         conn.execute(cleanup, &[]).unwrap();
+    }
+
+    /// Another user and a role, read and changed by an account with ALTER
+    /// USER and the GRANT ANY privileges but without SELECT_CATALOG_ROLE:
+    /// first with AUDIT_ADMIN, which reads DBA_USERS (not the grants), then
+    /// without any DBA view (#89).
+    #[test]
+    fn edits_accounts_without_dba_views() {
+        let Some((dba, spec)) = connect("PYTHIA_TEST_DB_DBA") else {
+            return;
+        };
+        let _accounts = ACCOUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let db = spec.rsplit_once('@').unwrap().1.to_owned();
+        let cleanup = "begin
+               for u in (select username from dba_users
+                          where username in ('PYTHIA_OB_LIMITED', 'PYTHIA_OB_TARGET')) loop
+                 execute immediate 'drop user ' || u.username || ' cascade';
+               end loop;
+               for r in (select role from dba_roles where role = 'PYTHIA_OB_TROLE') loop
+                 execute immediate 'drop role pythia_ob_trole';
+               end loop;
+             end;";
+        dba.execute(cleanup, &[]).unwrap();
+        for sql in [
+            "create user pythia_ob_limited identified by \"Pythia_ob_2\"",
+            "grant create session, alter user, grant any role, grant any privilege \
+             to pythia_ob_limited",
+            "grant audit_admin to pythia_ob_limited",
+            "create role pythia_ob_trole",
+            "grant create view to pythia_ob_trole",
+            "create user pythia_ob_target identified by \"Pythia_ob_3\"",
+            "grant create session, create table to pythia_ob_target",
+            "grant pythia_ob_trole to pythia_ob_target",
+        ] {
+            dba.execute(sql, &[])
+                .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        }
+        let limited = Connection::connect("pythia_ob_limited", "Pythia_ob_2", &db).unwrap();
+
+        // DBA_USERS (AUDIT_ADMIN): the attributes, but not the grants.
+        let loaded = account::load_user(&limited, "PYTHIA_OB_TARGET").unwrap();
+        assert!(!loaded.unread.attributes);
+        assert_eq!(loaded.locked, Some(false));
+        assert!(loaded.unread.roles && loaded.unread.privileges && loaded.unread.quotas);
+        assert!(loaded.unread.objects);
+        assert!(loaded.roles.is_empty() && loaded.privileges.is_empty());
+        assert_eq!(account::statements(Some(&loaded), &loaded), Ok(Vec::new()));
+
+        // No DBA view at all: the user is still found, and the form works.
+        dba.execute("revoke audit_admin from pythia_ob_limited", &[])
+            .unwrap();
+        drop(limited);
+        let limited = Connection::connect("pythia_ob_limited", "Pythia_ob_2", &db).unwrap();
+        let loaded = account::load_user(&limited, "PYTHIA_OB_TARGET").unwrap();
+        assert!(loaded.unread.attributes && loaded.unread.roles);
+        assert_eq!(loaded.locked, None);
+        let missing = account::load_user(&limited, "PYTHIA_OB_NOBODY").unwrap_err();
+        assert!(missing.message.contains("not found"), "{}", missing.message);
+        let mut edited = loaded.clone();
+        edited.locked = Some(true);
+        edited.privileges.insert("CREATE VIEW".into(), false);
+        edited
+            .roles
+            .insert("CONNECT".into(), account::RoleGrant::default());
+        let statements = account::statements(Some(&loaded), &edited).unwrap();
+        assert!(
+            statements
+                .iter()
+                .all(|s| !s.starts_with("revoke") && !s.contains("default role")),
+            "{statements:?}"
+        );
+        apply(&limited, &statements, None).unwrap_or_else(|e| {
+            panic!("{}: {}", e.statement, e.error);
+        });
+        // As the DBA sees it: changed, and nothing it had was taken away.
+        let now = account::load_user(&dba, "PYTHIA_OB_TARGET").unwrap();
+        assert_eq!(now.locked, Some(true));
+        for p in ["CREATE SESSION", "CREATE TABLE", "CREATE VIEW"] {
+            assert!(now.privileges.contains_key(p), "{p}: {:?}", now.privileges);
+        }
+        assert!(now.roles.contains_key("PYTHIA_OB_TROLE") && now.roles.contains_key("CONNECT"));
+
+        // A role not enabled in the session: its grants are unknown, not none.
+        let role = account::load_role(&limited, "PYTHIA_OB_TROLE").unwrap();
+        assert!(role.unread.privileges && role.unread.roles);
+        assert!(role.privileges.is_empty());
+        drop(limited);
+        dba.execute(cleanup, &[]).unwrap();
     }
 
     /// Directories through the directory form's SQL, and grants on them

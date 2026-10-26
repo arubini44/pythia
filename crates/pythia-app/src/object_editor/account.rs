@@ -2,7 +2,9 @@
 //! and account state; the roles and system privileges granted (with admin
 //! option, and a user's default roles) and the object privileges. New ones
 //! are created, existing ones altered, grants granted or revoked. Reading
-//! another user needs the DBA views (`SELECT_CATALOG_ROLE`).
+//! another user needs the DBA views (`SELECT_CATALOG_ROLE`); without them
+//! the form opens with what it can read, as altering and granting need
+//! none of them (#89).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -45,6 +47,27 @@ impl Default for RoleGrant {
 /// An object privilege: owner (empty for a directory), object, privilege.
 pub type ObjectPrivilege = (String, String, String);
 
+/// What the session can't read of an existing user or role (another one,
+/// without the DBA views). The form leaves it as it is: empty fields stay
+/// unchanged, what's added is granted, and nothing unseen is revoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Unread {
+    /// Tablespaces, profile, account status, authentication (`DBA_USERS`).
+    pub attributes: bool,
+    pub quotas: bool,
+    pub roles: bool,
+    pub privileges: bool,
+    /// Only the object privileges the session granted, or on its own
+    /// objects, are known (`ALL_TAB_PRIVS`).
+    pub objects: bool,
+}
+
+impl Unread {
+    pub fn any(self) -> bool {
+        self.attributes || self.quotas || self.roles || self.privileges || self.objects
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AccountDef {
     pub role: bool,
@@ -57,7 +80,9 @@ pub struct AccountDef {
     /// Quotas: tablespace (as typed) and `unlimited` or a size (`100M`).
     pub quotas: Vec<(String, String)>,
     pub profile: String,
-    pub locked: bool,
+    /// `None`: as it is (a new account is unlocked, an unread one keeps
+    /// its state).
+    pub locked: Option<bool>,
     /// The password must be changed at the next login.
     pub expire: bool,
     pub roles: BTreeMap<String, RoleGrant>,
@@ -65,6 +90,7 @@ pub struct AccountDef {
     pub privileges: BTreeMap<String, bool>,
     /// Object privileges, with grant option or not.
     pub objects: BTreeMap<ObjectPrivilege, bool>,
+    pub unread: Unread,
 }
 
 impl AccountDef {
@@ -112,43 +138,60 @@ const OBJECT_PRIVILEGES: &[&str] = &[
     "WRITE",
 ];
 
+/// The session may not read the view (ORA-00942, ORA-01031).
+fn no_access(e: &pythia_db::oracle::Error) -> bool {
+    matches!(e.db_error().map(|d| d.code()), Some(942 | 1031))
+}
+
 /// Rows from the DBA view, or (for the session's own user or roles) from
-/// the USER_/ROLE_ one.
+/// the USER_/ROLE_ one; `None` when the session may read neither.
 fn rows<T: RowValue>(
     conn: &Connection,
     dba: &str,
     own: Option<&str>,
     binds: &[&dyn pythia_db::oracle::sql_type::ToSql],
-) -> Result<Vec<T>, DbError> {
+) -> Result<Option<Vec<T>>, DbError> {
     let read = |sql: &str, binds: &[&dyn pythia_db::oracle::sql_type::ToSql]| {
         conn.query_as::<T>(sql, binds)?
             .collect::<Result<Vec<T>, _>>()
     };
-    read(dba, binds).or_else(|e| match own {
-        Some(sql) => read(sql, binds).map_err(DbError::from),
-        None => Err(DbError::new(format!(
-            "{} (reading users and roles needs SELECT_CATALOG_ROLE)",
-            DbError::from(e).message
-        ))),
-    })
+    match (read(dba, binds), own) {
+        (Ok(rows), _) => Ok(Some(rows)),
+        (Err(_), Some(sql)) => Ok(Some(read(sql, binds)?)),
+        (Err(e), None) if no_access(&e) => Ok(None),
+        (Err(e), None) => Err(e.into()),
+    }
 }
 
 /// Object privileges by grantee; a privilege on a directory has no owner.
+/// Without the DBA view (and not the session's own): those in
+/// `ALL_TAB_PRIVS`, which may be only some, and `true`.
 fn object_privileges(
     conn: &Connection,
     dba: &str,
     own: Option<&str>,
     binds: &[&dyn pythia_db::oracle::sql_type::ToSql],
-) -> Result<BTreeMap<ObjectPrivilege, bool>, DbError> {
+) -> Result<(BTreeMap<ObjectPrivilege, bool>, bool), DbError> {
     let directories: BTreeSet<String> =
         names(conn, "select directory_name from all_directories", &[])
             .unwrap_or_default()
             .into_iter()
             .collect();
+    let (found, partial) = match rows::<(String, String, String, String)>(conn, dba, own, binds)? {
+        Some(found) => (found, false),
+        None => {
+            let visible = rows(
+                conn,
+                "select table_schema, table_name, privilege, grantable from all_tab_privs
+                  where grantee = :1",
+                None,
+                binds,
+            )?;
+            (visible.unwrap_or_default(), true)
+        }
+    };
     let mut out = BTreeMap::new();
-    for (owner, object, privilege, grantable) in
-        rows::<(String, String, String, String)>(conn, dba, own, binds)?
-    {
+    for (owner, object, privilege, grantable) in found {
         // `INHERIT PRIVILEGES` is granted on a user, not an object.
         if privilege.starts_with("INHERIT") {
             continue;
@@ -160,7 +203,7 @@ fn object_privileges(
         };
         out.insert((owner, object, privilege), grantable == "YES");
     }
-    Ok(out)
+    Ok((out, partial))
 }
 
 pub fn load_user(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
@@ -173,6 +216,7 @@ pub fn load_user(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
                from dba_users where username = :1",
             &[&name],
         )
+        .map(Some)
         .or_else(|e| {
             if me == name {
                 conn.query_row_as(
@@ -181,18 +225,40 @@ pub fn load_user(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
                        from user_users where username = :1",
                     &[&name],
                 )
+                .map(Some)
+            } else if no_access(&e) {
+                // The user exists; how it's set up is unknown.
+                conn.query_row_as::<String>(
+                    "select username from all_users where username = :1",
+                    &[&name],
+                )
+                .map(|_| None)
             } else {
                 Err(e)
             }
         })
-        .map_err(|e| match e.db_error().map(|d| d.code()) {
-            Some(1403) => DbError::new(format!("User {name} not found")),
-            Some(942) => DbError::new(
-                "Reading another user needs SELECT_CATALOG_ROLE (DBA_USERS)".to_owned(),
-            ),
-            _ => e.into(),
+        .map_err(|e| {
+            if e.kind() == pythia_db::oracle::ErrorKind::NoDataFound {
+                DbError::new(format!("User {name} not found"))
+            } else {
+                e.into()
+            }
         })?;
-    let (default_tablespace, temporary_tablespace, profile, status, auth) = row;
+    let mut unread = Unread {
+        attributes: row.is_none(),
+        ..Unread::default()
+    };
+    let (default_tablespace, temporary_tablespace, profile, locked, expire, auth) = match row {
+        Some((default_tablespace, temporary_tablespace, profile, status, auth)) => (
+            quote_ident(&default_tablespace),
+            quote_ident(&temporary_tablespace),
+            quote_ident(&profile),
+            Some(status.contains("LOCKED")),
+            status.contains("EXPIRED"),
+            auth,
+        ),
+        None => Default::default(),
+    };
     let roles = rows::<(String, String, String)>(
         conn,
         "select granted_role, admin_option, default_role from dba_role_privs
@@ -217,7 +283,7 @@ pub fn load_user(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
               where :1 is not null and max_bytes <> 0 order by tablespace_name"),
         &[&name],
     )?;
-    let objects = object_privileges(
+    let (objects, partial) = object_privileges(
         conn,
         "select owner, table_name, privilege, grantable from dba_tab_privs where grantee = :1",
         own(
@@ -226,6 +292,10 @@ pub fn load_user(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
         ),
         &[&name],
     )?;
+    unread.roles = roles.is_none();
+    unread.privileges = privileges.is_none();
+    unread.quotas = quotas.is_none();
+    unread.objects = partial;
     Ok(AccountDef {
         role: false,
         name: quote_ident(name),
@@ -235,16 +305,18 @@ pub fn load_user(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
             _ => Auth::Password,
         },
         password: String::new(),
-        default_tablespace: quote_ident(&default_tablespace),
-        temporary_tablespace: quote_ident(&temporary_tablespace),
+        default_tablespace,
+        temporary_tablespace,
         quotas: quotas
+            .unwrap_or_default()
             .into_iter()
             .map(|(ts, bytes)| (quote_ident(&ts), size_text(bytes)))
             .collect(),
-        profile: quote_ident(&profile),
-        locked: status.contains("LOCKED"),
-        expire: status.contains("EXPIRED"),
+        profile,
+        locked,
+        expire,
         roles: roles
+            .unwrap_or_default()
             .into_iter()
             .map(|(role, admin, default)| {
                 (
@@ -257,10 +329,12 @@ pub fn load_user(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
             })
             .collect(),
         privileges: privileges
+            .unwrap_or_default()
             .into_iter()
             .map(|(p, admin)| (p, admin == "YES"))
             .collect(),
         objects,
+        unread,
     })
 }
 
@@ -273,27 +347,41 @@ pub fn load_role(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         .map(|rows| rows.into_iter().next().flatten())
         .unwrap_or(None);
+    // The ROLE_ views show only the roles enabled in this session.
+    let enabled = names(
+        conn,
+        "select role from session_roles where role = :1",
+        &[&name],
+    )
+    .is_ok_and(|r| !r.is_empty());
+    let own = |sql| enabled.then_some(sql);
     let roles = rows::<(String, String)>(
         conn,
         "select granted_role, admin_option from dba_role_privs where grantee = :1",
-        Some("select granted_role, admin_option from role_role_privs where role = :1"),
+        own("select granted_role, admin_option from role_role_privs where role = :1"),
         &[&name],
     )?;
     let privileges = rows::<(String, String)>(
         conn,
         "select privilege, admin_option from dba_sys_privs where grantee = :1",
-        Some("select privilege, admin_option from role_sys_privs where role = :1"),
+        own("select privilege, admin_option from role_sys_privs where role = :1"),
         &[&name],
     )?;
-    let objects = object_privileges(
+    let (objects, partial) = object_privileges(
         conn,
         "select owner, table_name, privilege, grantable from dba_tab_privs where grantee = :1",
-        Some(
+        own(
             "select owner, table_name, privilege, grantable from role_tab_privs
               where role = :1 and column_name is null",
         ),
         &[&name],
     )?;
+    let unread = Unread {
+        roles: roles.is_none(),
+        privileges: privileges.is_none(),
+        objects: partial,
+        ..Unread::default()
+    };
     Ok(AccountDef {
         role: true,
         name: quote_ident(name),
@@ -303,6 +391,7 @@ pub fn load_role(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
             _ => Auth::None,
         },
         roles: roles
+            .unwrap_or_default()
             .into_iter()
             .map(|(role, admin)| {
                 (
@@ -315,10 +404,12 @@ pub fn load_role(conn: &Connection, name: &str) -> Result<AccountDef, DbError> {
             })
             .collect(),
         privileges: privileges
+            .unwrap_or_default()
             .into_iter()
             .map(|(p, admin)| (p, admin == "YES"))
             .collect(),
         objects,
+        unread,
         ..AccountDef::default()
     })
 }
@@ -607,8 +698,15 @@ pub fn statements(original: Option<&AccountDef>, def: &AccountDef) -> Result<Vec
         if def.expire && !before.expire {
             clauses.push("password expire".into());
         }
-        if def.locked != before.locked {
-            clauses.push(if def.locked {
+        // A new account is unlocked unless it's locked; an existing one's
+        // state is set when it changes, or (unread) when one was picked.
+        let lock = match (original, def.locked) {
+            (None, Some(true)) => Some(true),
+            (Some(_), Some(now)) if before.locked != Some(now) => Some(now),
+            _ => None,
+        };
+        if let Some(lock) = lock {
+            clauses.push(if lock {
                 "account lock".into()
             } else {
                 "account unlock".into()
@@ -650,7 +748,8 @@ pub fn statements(original: Option<&AccountDef>, def: &AccountDef) -> Result<Vec
 /// user's granted roles are all default; a role granted later may not be,
 /// so the statement follows any grant.
 fn default_roles(original: Option<&AccountDef>, def: &AccountDef, name: &str) -> Option<String> {
-    if def.roles.is_empty() {
+    // Unseen roles: the statement would change them too.
+    if def.roles.is_empty() || def.unread.roles {
         return None;
     }
     let defaults: BTreeSet<&String> = def
@@ -768,12 +867,19 @@ fn roles_ui(ui: &mut Ui, def: &mut AccountDef, choices: &[String]) {
             def.roles.insert(role, RoleGrant::default());
         }
     });
-    if def.roles.is_empty() {
+    let unread = def.unread.roles;
+    if unread {
+        ui.weak("The granted roles can't be read; roles added here are granted.");
+    } else if def.roles.is_empty() {
         ui.weak("none");
+    }
+    if def.roles.is_empty() {
         return;
     }
     let mut remove = None;
-    let user = !def.role;
+    // Unseen roles: whether one added is enabled at login is the user's
+    // default role setting's to say.
+    let user = !def.role && !unread;
     egui::Grid::new("roles")
         .num_columns(4)
         .spacing([10.0, 2.0])
@@ -808,8 +914,14 @@ fn roles_ui(ui: &mut Ui, def: &mut AccountDef, choices: &[String]) {
     }
 }
 
-/// Granted system privileges with their admin option.
-fn privileges_ui(ui: &mut Ui, privileges: &mut BTreeMap<String, bool>, choices: &[String]) {
+/// Granted system privileges with their admin option; `unread`: the
+/// granted ones are unknown.
+fn privileges_ui(
+    ui: &mut Ui,
+    privileges: &mut BTreeMap<String, bool>,
+    choices: &[String],
+    unread: bool,
+) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("System privileges").strong());
         let open: Vec<String> = choices
@@ -827,8 +939,12 @@ fn privileges_ui(ui: &mut Ui, privileges: &mut BTreeMap<String, bool>, choices: 
         .max_height(200.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            if privileges.is_empty() {
+            if unread {
+                ui.weak("The granted privileges can't be read; privileges added here are granted.");
+            } else if privileges.is_empty() {
                 ui.weak("none");
+            }
+            if privileges.is_empty() {
                 return;
             }
             egui::Grid::new("privileges-grid")
@@ -878,8 +994,16 @@ fn objects_ui(ui: &mut Ui, def: &mut AccountDef, lists: &mut Lists) {
     ui.label(RichText::new("Object privileges").strong());
     let user = !def.role;
     let mut remove = None;
+    if def.unread.objects {
+        ui.weak(
+            "Only the privileges this session granted, or on its own objects, can be read; \
+             others stay as they are.",
+        );
+    }
     if def.objects.is_empty() {
-        ui.weak("none");
+        if !def.unread.objects {
+            ui.weak("none");
+        }
     } else {
         egui::Grid::new("object-privileges")
             .striped(true)
@@ -978,6 +1102,19 @@ pub fn ui(ui: &mut Ui, def: &mut AccountDef, original: Option<&AccountDef>, list
         ui.colored_label(ui.visuals().warn_fg_color, missing);
         ui.add_space(4.0);
     }
+    if def.unread.any() {
+        let what = if def.role { "role" } else { "user" };
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Without SELECT_CATALOG_ROLE (or SELECT ANY DICTIONARY), not all of this {what} \
+                 can be read. What's left empty stays as it is, what's added is granted, and \
+                 nothing that isn't shown is revoked."
+            ),
+        );
+        ui.add_space(4.0);
+    }
+    let unread = def.unread;
     form_grid(ui, "account", |ui| {
         name_field(ui, &mut def.name, existing);
         form_row(ui, "Authentication", |ui| {
@@ -1022,7 +1159,11 @@ pub fn ui(ui: &mut Ui, def: &mut AccountDef, original: Option<&AccountDef>, list
             form_row(ui, label, |ui| {
                 ui.add(
                     egui::TextEdit::singleline(value)
-                        .hint_text("database default")
+                        .hint_text(if unread.attributes {
+                            "unchanged"
+                        } else {
+                            "database default"
+                        })
                         .desired_width(200.0),
                 );
                 if let Some(ts) = picker(ui, label, items) {
@@ -1045,7 +1186,11 @@ pub fn ui(ui: &mut Ui, def: &mut AccountDef, original: Option<&AccountDef>, list
         form_row(ui, "Profile", |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut def.profile)
-                    .hint_text("DEFAULT")
+                    .hint_text(if unread.attributes {
+                        "unchanged"
+                    } else {
+                        "DEFAULT"
+                    })
                     .desired_width(200.0),
             );
             if let Some(p) = picker(ui, "profile", &lists.profiles) {
@@ -1053,14 +1198,30 @@ pub fn ui(ui: &mut Ui, def: &mut AccountDef, original: Option<&AccountDef>, list
             }
         });
         form_row(ui, "Account", |ui| {
-            ui.checkbox(&mut def.locked, "locked")
-                .on_hover_text("Nobody can log in until it's unlocked");
+            if unread.attributes {
+                // Its state is unknown: leave it, or set it.
+                ui.radio_value(&mut def.locked, None, "as it is");
+                ui.radio_value(&mut def.locked, Some(true), "locked");
+                ui.radio_value(&mut def.locked, Some(false), "unlocked");
+            } else {
+                let mut locked = def.locked == Some(true);
+                if ui
+                    .checkbox(&mut locked, "locked")
+                    .on_hover_text("Nobody can log in until it's unlocked")
+                    .changed()
+                {
+                    def.locked = Some(locked);
+                }
+            }
         });
     });
     if !def.role {
         ui.add_space(8.0);
         ui.label(RichText::new("Quotas").strong())
             .on_hover_text("Space the user's objects may take per tablespace");
+        if unread.quotas {
+            ui.weak("The quotas can't be read; quotas added here are set.");
+        }
         quotas_ui(ui, &mut def.quotas, &lists.tablespaces);
     }
     ui.add_space(8.0);
@@ -1068,7 +1229,12 @@ pub fn ui(ui: &mut Ui, def: &mut AccountDef, original: Option<&AccountDef>, list
     let privileges = lists.privileges.clone();
     ui.columns(2, |columns| {
         roles_ui(&mut columns[0], def, &roles);
-        privileges_ui(&mut columns[1], &mut def.privileges, &privileges);
+        privileges_ui(
+            &mut columns[1],
+            &mut def.privileges,
+            &privileges,
+            unread.privileges,
+        );
     });
     ui.add_space(8.0);
     objects_ui(ui, def, lists);
@@ -1156,7 +1322,7 @@ mod tests {
         };
         let mut def = original.clone();
         assert_eq!(statements(Some(&original), &def), Ok(Vec::new()));
-        def.locked = true;
+        def.locked = Some(true);
         def.quotas = vec![quota("users", "unlimited")];
         def.privileges.insert("CREATE TABLE".into(), false);
         def.privileges.insert("CREATE VIEW".into(), true);
@@ -1189,6 +1355,47 @@ mod tests {
             statements(Some(&original), &def).unwrap(),
             ["grant RESOURCE to APP", "alter user APP default role all"]
         );
+    }
+
+    /// Another user without the DBA views (#89): nothing is known, so
+    /// only what's set is altered and only what's added is granted.
+    #[test]
+    fn alters_unread_users() {
+        let original = AccountDef {
+            name: "APP".into(),
+            unread: Unread {
+                attributes: true,
+                quotas: true,
+                roles: true,
+                privileges: true,
+                objects: true,
+            },
+            ..AccountDef::default()
+        };
+        let mut def = original.clone();
+        assert_eq!(statements(Some(&original), &def), Ok(Vec::new()));
+        def.locked = Some(false);
+        def.profile = "app_profile".into();
+        def.quotas = vec![quota("users", "100M")];
+        def.roles.insert(
+            "CONNECT".into(),
+            RoleGrant {
+                admin: false,
+                default: false,
+            },
+        );
+        def.privileges.insert("CREATE VIEW".into(), false);
+        assert_eq!(
+            statements(Some(&original), &def).unwrap(),
+            [
+                "alter user APP\n  quota 100M on USERS\n  profile APP_PROFILE\n  account unlock",
+                "grant create view to APP",
+                // No DEFAULT ROLE: it would change the roles not shown too.
+                "grant CONNECT to APP",
+            ]
+        );
+        def.locked = Some(true);
+        assert!(statements(Some(&original), &def).unwrap()[0].ends_with("account lock"));
     }
 
     #[test]

@@ -63,6 +63,20 @@ fn with_objects<T>(sql: &str, mut f: impl FnMut(&str) -> Result<T>) -> Result<T>
     }
 }
 
+/// Runs a statement with `{sql_text}` in `sql`: the statement's text from
+/// `V$SQL`, or (when only `V$SESSION` is granted) none, so sessions still
+/// show without it (#90).
+fn with_sql_text<T>(sql: &str, mut f: impl FnMut(&str) -> Result<T>) -> Result<T> {
+    let from_sql = "(select substr(q.sql_text, 1, 300) from v$sql q \
+                    where q.sql_id = s.sql_id and rownum = 1)";
+    match f(&sql.replace("{sql_text}", from_sql)) {
+        Err(e) if is_privilege_error(&e) => {
+            f(&sql.replace("{sql_text}", "cast(null as varchar2(300))"))
+        }
+        r => r,
+    }
+}
+
 /// As [`with_objects`], for `{procedures}`.
 fn with_procedures<T>(sql: &str, mut f: impl FnMut(&str) -> Result<T>) -> Result<T> {
     match f(&sql.replace("{procedures}", "dba_procedures")) {
@@ -85,7 +99,8 @@ pub struct InstanceInfo {
     pub log_mode: String,
     pub cdb: bool,
     pub container: String,
-    pub cpus: i64,
+    /// `None` without `V$OSSTAT`.
+    pub cpus: Option<i64>,
 }
 
 pub fn instance_info(conn: &Connection) -> Result<InstanceInfo> {
@@ -105,8 +120,7 @@ pub fn instance_info(conn: &Connection) -> Result<InstanceInfo> {
             "select i.instance_name, i.host_name, {version}, \
                     to_char(i.startup_time, 'YYYY-MM-DD HH24:MI:SS'), \
                     round((sysdate - i.startup_time) * 86400), \
-                    d.name, d.database_role, d.log_mode, {container}, \
-                    (select value from v$osstat where stat_name = 'NUM_CPUS') \
+                    d.name, d.database_role, d.log_mode, {container} \
                from v$instance i cross join v$database d"
         ),
         &[],
@@ -122,7 +136,14 @@ pub fn instance_info(conn: &Connection) -> Result<InstanceInfo> {
         log_mode: get(&row, 7)?,
         cdb: get::<String>(&row, 8)? == "YES",
         container: get(&row, 9)?,
-        cpus: get::<Option<i64>>(&row, 10)?.unwrap_or(1),
+        // Often not granted with the views above (#90).
+        cpus: conn
+            .query_row_as::<Option<i64>>(
+                "select value from v$osstat where stat_name = 'NUM_CPUS'",
+                &[],
+            )
+            .ok()
+            .flatten(),
     })
 }
 
@@ -943,7 +964,7 @@ select s.sid, s.serial#, s.username, s.status, s.osuser, s.machine, s.program, s
        case when s.row_wait_obj# > 0 then o.owner || '.' || o.object_name end, \
        case when s.row_wait_obj# > 0 and s.event like 'enq: TX%' and o.data_object_id is not null then \
          rowidtochar(dbms_rowid.rowid_create(1, o.data_object_id, s.row_wait_file#, s.row_wait_block#, s.row_wait_row#)) end, \
-       (select substr(q.sql_text, 1, 300) from v$sql q where q.sql_id = s.sql_id and rownum = 1), \
+       {sql_text}, \
        case when s.sid = sys_context('USERENV', 'SID') then 1 else 0 end, \
        case when s.sql_trace = 'ENABLED' then 1 else 0 end, \
        (select b.serial# from v$session b where b.sid = s.blocking_session), \
@@ -995,7 +1016,9 @@ pub fn sessions(conn: &Connection, filter: SessionFilter) -> Result<Vec<SessionR
     } else {
         format!("{SESSION_SELECT} where s.type = 'USER' order by s.sid")
     };
-    with_objects(&sql, |sql| query(conn, sql, &[], session_row))
+    with_objects(&sql, |sql| {
+        with_sql_text(sql, |sql| query(conn, sql, &[], session_row))
+    })
 }
 
 /// A session and the sessions it blocks.
@@ -1368,9 +1391,11 @@ pub fn session_details(
         "Session",
         (|| {
             let sql = format!("{SESSION_SELECT} where s.sid = :1 and s.serial# = :2");
-            d.session = with_objects(&sql, |sql| query(conn, sql, &[&sid, &serial], session_row))?
-                .into_iter()
-                .next();
+            d.session = with_objects(&sql, |sql| {
+                with_sql_text(sql, |sql| query(conn, sql, &[&sid, &serial], session_row))
+            })?
+            .into_iter()
+            .next();
             Ok(())
         })(),
     );

@@ -47,6 +47,72 @@ fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+/// Accounts with some `V$` grants but no SELECT_CATALOG_ROLE (#90): with
+/// `V$SESSION` but not `V$SQL` (GSMADMIN_ROLE) the sessions show without
+/// their SQL text; without `V$OSSTAT` (DV_SECANALYST) the instance shows
+/// without its CPU count.
+#[test]
+fn sessions_and_instance_with_few_grants() {
+    let Some(dba) = dba() else { return };
+    let spec = std::env::var("PYTHIA_TEST_DB_DBA").unwrap();
+    let db = spec.rsplit_once('@').unwrap().1;
+    let cleanup = "begin
+           for u in (select username from dba_users
+                      where username in ('PYTHIA_MON_SESSIONS', 'PYTHIA_MON_INSTANCE')) loop
+             execute immediate 'drop user ' || u.username || ' cascade';
+           end loop;
+         end;";
+    dba.execute(cleanup, &[]).unwrap();
+    // Some releases lack one of the roles: that part is skipped.
+    let account = |name: &str, role: &str| -> Option<Connection> {
+        dba.execute(
+            &format!("create user {name} identified by \"Pythia_mon_1\""),
+            &[],
+        )
+        .unwrap();
+        dba.execute(&format!("grant create session to {name}"), &[])
+            .unwrap();
+        if let Err(e) = dba.execute(&format!("grant {role} to {name}"), &[]) {
+            eprintln!("{role}: {e}, skipping");
+            return None;
+        }
+        Some(Connection::connect(name, "Pythia_mon_1", db).unwrap())
+    };
+    let readable = |c: &Connection, view: &str| {
+        c.query_row_as::<i64>(&format!("select count(*) from {view} where 1 = 0"), &[])
+            .is_ok()
+    };
+
+    if let Some(c) = account("pythia_mon_sessions", "gsmadmin_role") {
+        assert!(readable(&c, "v$session") && !readable(&c, "v$sql"));
+        let me = sid(&c);
+        let rows = queries::sessions(&c, SessionFilter::default()).unwrap();
+        let mine = rows
+            .iter()
+            .find(|r| r.sid == me)
+            .expect("own session listed");
+        assert!(mine.sql_text.is_none());
+        queries::blocking_tree(&c).unwrap();
+        let detail = queries::session_details(&c, mine.sid, mine.serial, &[DetailTab::Overview]);
+        assert!(detail.session.is_some(), "{:?}", detail.errors);
+        drop(c);
+    }
+    if let Some(c) = account("pythia_mon_instance", "dv_secanalyst") {
+        assert!(!readable(&c, "v$osstat"));
+        let inst = queries::instance_info(&c).unwrap();
+        assert!(inst.cpus.is_none() && !inst.instance.is_empty());
+        let snap = queries::dashboard_snapshot(&c);
+        assert!(snap.instance.is_some());
+        assert!(
+            !snap.errors.iter().any(|(name, _)| *name == "Instance"),
+            "{:?}",
+            snap.errors
+        );
+        drop(c);
+    }
+    dba.execute(cleanup, &[]).unwrap();
+}
+
 #[test]
 fn capabilities_dba_and_app_user() {
     let Some(conn) = dba() else { return };
@@ -100,7 +166,7 @@ fn dashboard_snapshot() {
     let a = queries::dashboard_snapshot(&conn);
     assert!(a.errors.is_empty(), "{:?}", a.errors);
     let inst = a.instance.as_ref().unwrap();
-    assert!(inst.cpus >= 1 && inst.uptime_secs > 0);
+    assert!(inst.cpus.is_some_and(|n| n >= 1) && inst.uptime_secs > 0);
     assert!(a.sessions.unwrap().total > 0);
     assert!(a.open_cursors.unwrap() > 0);
     assert!(!a.tablespaces.is_empty());
