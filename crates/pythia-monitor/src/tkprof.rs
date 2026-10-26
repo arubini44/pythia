@@ -610,8 +610,10 @@ pub fn parse(trace: &str) -> Report {
                     report.statements[i].binds = values;
                 }
             }
-            "CLOSE" => {
-                // Cursor numbers are reused after close.
+            // A hard close (type=0) frees the cursor number for another
+            // statement. Any other type keeps the cursor cached: its next
+            // PARSE, EXEC and FETCH come without a PARSING IN CURSOR.
+            "CLOSE" if kv(body).get("type").is_none_or(|t| *t == "0") => {
                 cursors.remove(cursor);
             }
             _ => {}
@@ -844,6 +846,37 @@ select * from nothere
 
 EXEC #999:c=5,e=6,p=0,cr=0,cu=0,mis=0,r=0,dep=0,og=1,plh=0,tim=207
 ";
+
+    /// A cursor in the session cursor cache (CLOSE type 1 to 3) runs again
+    /// without its text being repeated (#79).
+    #[test]
+    fn cached_cursor_runs_again_without_its_text() {
+        let mut trace = String::from(
+            "PARSING IN CURSOR #7 len=18 dep=0 uid=9 oct=3 lid=9 tim=1 hv=1 ad='a' sqlid='cached1'\n\
+             select 1 from dual\n\
+             END OF STMT\n",
+        );
+        for close in [1, 3, 0] {
+            trace.push_str(&format!(
+                "PARSE #7:c=0,e=1,p=0,cr=0,cu=0,mis=0,r=0,dep=0,og=1,plh=1,tim=2\n\
+                 EXEC #7:c=0,e=1,p=0,cr=0,cu=0,mis=0,r=0,dep=0,og=1,plh=1,tim=3\n\
+                 FETCH #7:c=0,e=1,p=0,cr=1,cu=0,mis=0,r=1,dep=0,og=1,plh=1,tim=4\n\
+                 CLOSE #7:c=0,e=1,dep=0,type={close},tim=5\n"
+            ));
+        }
+        // A hard close frees the number: lines after it aren't the
+        // statement's.
+        trace.push_str("EXEC #7:c=0,e=1,p=0,cr=0,cu=0,mis=0,r=0,dep=0,og=1,plh=1,tim=6\n");
+        let r = parse(&trace);
+        let s = r
+            .statements
+            .iter()
+            .find(|s| s.sql_id.as_deref() == Some("cached1"))
+            .unwrap();
+        assert_eq!(s.call(CallKind::Parse).count, 3);
+        assert_eq!(s.call(CallKind::Execute).count, 3);
+        assert_eq!(s.call(CallKind::Fetch).rows, 3);
+    }
 
     #[test]
     fn aggregates_statements() {

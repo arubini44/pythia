@@ -6,6 +6,11 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Trace analyzer: statements run again through a cached cursor are counted
+  each time. Executions, fetches and rows after the first were dropped
+  once the session cached the cursor (#79).
+
 ## [0.4.1] - 2026-10-26
 
 ### Added
