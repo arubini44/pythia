@@ -214,6 +214,18 @@ impl SettingsDialog {
         self.section = Section::Formatter;
     }
 
+    /// Shows the `i`th page; false past the last.
+    #[cfg(test)]
+    pub fn show_page(&mut self, i: usize) -> bool {
+        match Section::ALL.get(i) {
+            Some(section) => {
+                self.section = *section;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Formatter settings learned from `from` (e.g. "the SQL window"), to
     /// show for applying; `None` if there was nothing to learn from.
     pub fn learned(&mut self, from: String, options: Option<pythia_plsql::FormatOptions>) {
@@ -234,13 +246,17 @@ impl SettingsDialog {
         let before = settings.clone();
         let mut open = true;
         let mut learn = None;
+        let screen = ctx.content_rect();
         egui::Window::new("Settings")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_size([780.0, 600.0])
+            // Fits the screen, so the title bar and its close button stay
+            // visible: a taller page scrolls (#62).
+            .max_height((screen.height() - 48.0).max(240.0))
             .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
+            .default_pos(screen.center())
             .show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.vertical(|ui| {
@@ -253,19 +269,22 @@ impl SettingsDialog {
                     ui.vertical(|ui| {
                         ui.heading(self.section.label());
                         ui.add_space(8.0);
-                        match self.section {
-                            Section::Appearance => appearance(ui, settings),
-                            Section::Editor => editor(ui, settings),
-                            Section::CodeAssist => code_assist(ui, settings),
-                            Section::Query => query(ui, settings),
-                            Section::Formatter => {
-                                learn = formatter(ui, settings, &mut self.format);
-                            }
-                            Section::Keyboard => keyboard(ui, settings, &mut self.keys),
-                            Section::Debugger => debugger(ui, settings),
-                            Section::InvalidObjects => invalid_objects(ui, settings),
-                            Section::Ai => ai(ui, settings, &mut self.ai),
-                        }
+                        egui::ScrollArea::vertical()
+                            .id_salt(("settings-page", self.section.label()))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| match self.section {
+                                Section::Appearance => appearance(ui, settings),
+                                Section::Editor => editor(ui, settings),
+                                Section::CodeAssist => code_assist(ui, settings),
+                                Section::Query => query(ui, settings),
+                                Section::Formatter => {
+                                    learn = formatter(ui, settings, &mut self.format);
+                                }
+                                Section::Keyboard => keyboard(ui, settings, &mut self.keys),
+                                Section::Debugger => debugger(ui, settings),
+                                Section::InvalidObjects => invalid_objects(ui, settings),
+                                Section::Ai => ai(ui, settings, &mut self.ai),
+                            });
                     });
                 });
             });

@@ -3949,6 +3949,31 @@ fn mysql_through_ssh() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every Settings page fits Pythia's default window: the close button stays
+/// on screen however tall the page is (#62), and closes the dialog.
+#[test]
+fn settings_pages_fit_the_window() {
+    let mut h = sized_harness(egui::vec2(1280.0, 800.0));
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+    let mut page = 0;
+    while h.state_mut().test_settings_page(page) {
+        h.run_steps(4);
+        let close = h.get_by_label("Close window").rect();
+        assert!(
+            screen.contains_rect(close),
+            "page {page}: close button at {close:?}"
+        );
+        page += 1;
+    }
+    assert!(page > 5, "{page} pages");
+    h.state_mut().test_settings(true);
+    h.run_steps(4);
+    save(&mut h, "settings-formatter-small-window");
+    h.get_by_label("Close window").click();
+    h.run_steps(2);
+    assert!(!h.state().test_settings_open());
+}
+
 /// The MySQL dashboard (`PYTHIA_TEST_MYSQL`): server KPIs, trends and
 /// findings on the connection's own session, and what the user would need
 /// to see more.
