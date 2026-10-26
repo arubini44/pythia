@@ -6,6 +6,8 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-26
+
 ### Added
 - Monitor: the dashboard leads to what it counts. The *Sessions* tile opens
   the session list, *Blocked sessions* the blocking tree; a wait class in
@@ -581,7 +583,8 @@ First release.
 - Scheduler jobs window: run, stop, enable, disable, drop, run history.
 - Saved user reports with parameters.
 
-[Unreleased]: https://github.com/ortic/pythia/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/ortic/pythia/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ortic/pythia/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/ortic/pythia/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ortic/pythia/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ortic/pythia/compare/v0.2.0...v0.3.0
