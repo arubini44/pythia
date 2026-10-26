@@ -288,6 +288,14 @@ impl Browser {
         }
     }
 
+    /// Picks a schema (a database on MySQL) as the picker does.
+    #[cfg(test)]
+    pub fn pick_schema(&mut self, schema: &str) -> Effects {
+        let mut effects = Effects::default();
+        self.set_schema(schema.to_owned(), &mut effects);
+        effects
+    }
+
     #[cfg_attr(not(test), expect(dead_code, reason = "used by screenshot tests"))]
     pub fn is_loading(&self) -> bool {
         !self.pending.is_empty()
@@ -297,6 +305,10 @@ impl Browser {
     fn set_schema(&mut self, schema: String, effects: &mut Effects) {
         if self.schema.as_ref() == Some(&schema) {
             return;
+        }
+        // On MySQL the database picked here is the one statements run in.
+        if self.dialect == Dialect::MYSQL {
+            effects.database = Some(schema.clone());
         }
         self.schema = Some(schema);
         self.expanded.retain(|n| matches!(n, Node::Folder(..)));
@@ -780,7 +792,11 @@ impl Browser {
             let schema = self.schema.clone().unwrap_or_default();
             let mut chosen = None;
             egui::ComboBox::from_id_salt("browser-schema")
-                .selected_text(&schema)
+                .selected_text(if schema.is_empty() {
+                    "No database"
+                } else {
+                    &schema
+                })
                 .height(400.0)
                 .show_ui(ui, |ui| match &self.schemas {
                     Some(Loaded::Ready(list)) => {
@@ -860,6 +876,17 @@ impl Browser {
         ui.add_space(2.0);
 
         let owner = self.schema.clone().unwrap_or_default();
+        if owner.is_empty() && self.dialect == Dialect::MYSQL {
+            // A connection without a database (none in its address or
+            // profile): statements need one too.
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                ui.weak("No database selected");
+                ui.add_space(4.0);
+                ui.weak("Pick one above: the object browser shows it, and SQL windows run in it.");
+            });
+            return effects;
+        }
         let rows = self.rows(&owner);
         let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         let mut toggles = Vec::new();

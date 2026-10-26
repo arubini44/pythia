@@ -21,6 +21,24 @@ All notable changes to Pythia are documented here. The format follows
   of sitting in a 22 px gray frame, which leaves more room for code. The
   rows above it (connection picker, Compile…) have a strip of their own,
   like the results below (#86).
+- One connection for the whole app: with several connections open, the
+  toolbar, object browser, status bar, new SQL windows and the open SQL
+  windows all use the *active connection*, so a statement no longer runs on
+  another database than the object browser shows. Connecting, the object
+  browser's connection picker and the toolbar's connection menu switch it;
+  SQL windows with a transaction or a running statement ask first (commit
+  or roll back). Other connections stay open, to switch back to. Program
+  windows and object views keep their connection and name it in their tab
+  when it isn't the active one. Disconnecting the active connection hands
+  over to another open one. With *Switch connection per window* on, SQL
+  windows keep their own connections as before and the object browser
+  follows the focused window (#80).
+- MySQL: the database picked in the object browser is the connection's
+  database: the open SQL windows switch to it (after what they're running)
+  and new ones start in it, instead of failing with "No database selected"
+  when the connection's address and profile name none. The toolbar and
+  status bar show the current database, or "No database", and the object
+  browser asks to pick one (#81).
 
 ### Fixed
 - Windows: `pythia.exe` carries Pythia's icon and version, so the taskbar,
@@ -55,6 +73,10 @@ All notable changes to Pythia are documented here. The format follows
 - MySQL: the object browser's database picker no longer lists a `PUBLIC`
   database; only Oracle has one, for public synonyms and database links
   (#83).
+- After disconnecting one of several connections, Execute in a SQL window
+  that was on it runs on the connection the toolbar shows instead of
+  opening the Connect dialog: its windows are no longer bound to the closed
+  connection (#84).
 
 ## [0.4.1] - 2026-10-26
 

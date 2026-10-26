@@ -159,11 +159,18 @@ for Linux, Windows and macOS.
   status bar always shows pending transactions; production connections are
   marked red and ask before commit; read-only connections; passwords live
   in the OS keychain.
+- One connection for the whole app: with several open, the toolbar, object
+  browser, status bar, new windows and SQL windows all use the active one.
+  Connecting or picking another moves the SQL windows there (asking first
+  about open transactions); program windows keep their connection, named
+  in their tab. *Settings → Query → Switch connection per window* gives
+  each SQL window a connection of its own instead.
 
 **MySQL (experimental)**
 - Connect to MySQL (tested with 9.4; MariaDB not yet) with *Type: MySQL* and `host:3306/database`
   (`?tls` for TLS, `?tls=skip-verify` for self-signed certificates); no
-  client library needed.
+  client library needed. The database picked in the object browser is the
+  one SQL windows run in; the toolbar and status bar show it.
 - *Connect through SSH* forwards the connection over an SSH server, like
   `ssh -L` or HeidiSQL's SSH tunnel; the database address is then as the
   SSH server sees it (often `localhost:3306/database`). Log in with a

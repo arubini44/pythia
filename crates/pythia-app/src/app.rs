@@ -83,6 +83,14 @@ pub struct PythiaApp {
     last_profile: Option<ConnectionProfile>,
     /// Connection the connect dialog is currently opening.
     connecting: Option<String>,
+    /// The active connection: the toolbar, object browser, status bar, new
+    /// windows and SQL windows use it, unless windows switch connections on
+    /// their own (Settings → Query). Program windows and object views keep
+    /// the connection they were opened on.
+    active: Option<String>,
+    /// `Settings::switch_window_connection` as of the last frame: turning it
+    /// off brings the SQL windows back to one connection.
+    windows_switched: bool,
     /// SSH host keys trusted in Pythia.
     known_hosts: PathBuf,
 
@@ -180,6 +188,8 @@ impl PythiaApp {
             routes: HashMap::new(),
             last_profile: None,
             connecting: None,
+            active: None,
+            windows_switched: false,
             known_hosts,
             history,
             user_reports,
@@ -409,12 +419,126 @@ impl PythiaApp {
 
     /// The connection new documents and commands use when nothing is focused.
     fn current_connection(&self) -> Option<String> {
-        self.focused
-            .and_then(|id| self.docs.get(&id))
-            .and_then(|d| d.connection.clone())
-            .filter(|c| self.conns.get(c).is_some())
-            .or_else(|| self.browser.connection.clone())
-            .or_else(|| self.conns.open.keys().next().cloned())
+        let open = |c: &String| self.conns.get(c).is_some();
+        let current = if self.settings.switch_window_connection {
+            // The focused window's.
+            self.focused
+                .and_then(|id| self.docs.get(&id))
+                .and_then(|d| d.connection.clone())
+                .filter(open)
+                .or_else(|| self.browser.connection.clone())
+        } else {
+            self.active.clone().filter(open)
+        };
+        current.or_else(|| self.conns.open.keys().next().cloned())
+    }
+
+    /// Makes `name` the active connection: the object browser shows it and
+    /// the SQL windows move to it, each with a new session. Windows with a
+    /// transaction or a running statement are asked about first. With
+    /// windows switching connections on their own, only the browser moves.
+    fn activate(&mut self, name: String) {
+        if self.conns.get(&name).is_none() {
+            return;
+        }
+        if self.settings.switch_window_connection {
+            self.attach_browser(name);
+            return;
+        }
+        let asked: Vec<DocId> = self
+            .moving_windows(&name)
+            .into_iter()
+            .filter(|id| self.has_pending_tx(*id) || self.docs[id].is_busy())
+            .collect();
+        if asked.is_empty() {
+            self.switch_to(name, None);
+            return;
+        }
+        let names: Vec<String> = asked
+            .iter()
+            .filter_map(|id| self.docs.get(id))
+            .map(Document::title)
+            .collect();
+        let windows = match names.as_slice() {
+            [one] => format!("{one} has"),
+            many => format!("{} have", many.join(", ")),
+        };
+        self.confirm = Some(Confirm {
+            action: ConfirmAction::Activate(name.clone()),
+            title: format!("Switch to {name}"),
+            text: format!(
+                "{windows} a transaction or a running statement. The SQL windows move to \
+                 {name}: their transactions end once what's running has finished."
+            ),
+            yes: "Commit and switch",
+            other: Some("Roll back and switch"),
+        });
+    }
+
+    /// SQL windows not on `name`.
+    fn moving_windows(&self, name: &str) -> Vec<DocId> {
+        self.docs
+            .iter()
+            .filter(|(_, d)| {
+                matches!(d.kind, DocKind::Sql(_)) && d.connection.as_deref() != Some(name)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Switches the active connection to `name`, committing (`Some(true)`)
+    /// or rolling back the transactions of the windows that move.
+    fn switch_to(&mut self, name: String, end: Option<bool>) {
+        self.active = Some(name.clone());
+        self.attach_browser(name.clone());
+        for id in self.moving_windows(&name) {
+            match end {
+                Some(commit) => self.conns.end_doc(id, commit),
+                None => self.conns.close_doc(id),
+            }
+            let Some(doc) = self.docs.get_mut(&id) else {
+                continue;
+            };
+            if let DocKind::Sql(w) = &mut doc.kind {
+                w.state.running = None;
+                w.state.fetching = None;
+                w.state.queue.clear();
+            }
+            doc.connection = Some(name.clone());
+            let effects = doc.on_attach();
+            self.apply(Some(id), effects);
+        }
+    }
+
+    /// Makes `database` the connection's (MySQL): its sessions run in it and
+    /// completion looks there.
+    fn use_database(&mut self, connection: &str, database: &str) {
+        let Some(conn) = self.conns.get_mut(connection) else {
+            return;
+        };
+        conn.use_database(database, &self.notify);
+        self.catalogs.insert(
+            connection.to_owned(),
+            pythia_lsp_core::CatalogCache::new(database.to_owned())
+                .with_names(pythia_lsp_core::NameStyle::AsStored),
+        );
+        self.catalog_requested.retain(|(c, _)| c != connection);
+        self.log(format!("{connection}: database {database}"));
+    }
+
+    /// Shows a connection in the object browser.
+    fn attach_browser(&mut self, connection: String) {
+        if self.browser.connection.as_deref() == Some(connection.as_str()) {
+            return;
+        }
+        let schema = self
+            .conns
+            .get(&connection)
+            .map(|c| c.current_schema())
+            .unwrap_or_default();
+        let dialect = self.dialect_of(Some(&connection));
+        let effects = self.browser.attach(connection, schema, dialect);
+        self.apply_browser(effects);
     }
 
     /// The current connection's database (Oracle without a connection):
@@ -509,6 +633,18 @@ impl PythiaApp {
         } = &request
         {
             self.browser.marks.touch(connection, object.clone());
+        }
+        // A SQL window for another connection: the app moves there.
+        if let OpenRequest::Sql { connection, .. }
+        | OpenRequest::Debug { connection, .. }
+        | OpenRequest::File {
+            connection: Some(connection),
+            ..
+        } = &request
+            && !self.settings.switch_window_connection
+            && self.active.as_ref() != Some(connection)
+        {
+            self.activate(connection.clone());
         }
         match request {
             OpenRequest::File { path, connection } => self.open_file(path, connection),
@@ -707,16 +843,7 @@ impl PythiaApp {
                     w.goto_line(object_type, line);
                 }
             }
-            OpenRequest::Browse { connection } => {
-                let schema = self
-                    .conns
-                    .get(&connection)
-                    .map(|c| c.current_schema())
-                    .unwrap_or_default();
-                let dialect = self.dialect_of(Some(&connection));
-                let effects = self.browser.attach(connection.clone(), schema, dialect);
-                self.apply_browser(effects);
-            }
+            OpenRequest::Browse { connection } => self.activate(connection),
         }
     }
 
@@ -1205,7 +1332,10 @@ impl PythiaApp {
     /// browser, attached to the editor's connection if it shows another.
     fn object_action(&mut self, connection: String, action: crate::browser::ObjectAction) {
         if self.browser.connection.as_deref() != Some(connection.as_str()) {
-            self.open(OpenRequest::Browse { connection });
+            // The action needs the browser there now, even if switching the
+            // windows asks first.
+            self.attach_browser(connection.clone());
+            self.activate(connection);
         }
         if matches!(action, crate::browser::ObjectAction::Reveal(_)) {
             self.open_tab(Tab::Browser);
@@ -1798,8 +1928,12 @@ impl PythiaApp {
             open,
             log,
             invalid_changed,
+            database,
             ..
         } = effects;
+        if let (Some(name), Some(database)) = (&connection, database) {
+            self.use_database(name, &database);
+        }
         if let Some(name) = connection {
             for (target, request) in requests {
                 match (target, request_key(&request), self.conns.get_mut(&name)) {
@@ -2627,11 +2761,6 @@ impl PythiaApp {
             self.log(format!("Disconnected from {name}"));
         }
         self.browser.detach(name);
-        if self.browser.connection.is_none()
-            && let Some(other) = self.conns.open.keys().next().cloned()
-        {
-            self.open(OpenRequest::Browse { connection: other });
-        }
         for doc in self
             .docs
             .values_mut()
@@ -2641,7 +2770,22 @@ impl PythiaApp {
                 w.state.running = None;
                 w.state.fetching = None;
                 w.state.queue.clear();
+                // Unbound, it runs on the connection the toolbar shows,
+                // instead of asking to connect again.
+                doc.connection = None;
             }
+        }
+        // Another open connection becomes the active one; or, without
+        // windows on connections of their own, the windows that were on this
+        // one follow the active connection.
+        if self.browser.connection.is_none()
+            && let Some(other) = self.conns.open.keys().next().cloned()
+        {
+            self.open(OpenRequest::Browse { connection: other });
+        } else if !self.settings.switch_window_connection
+            && let Some(active) = self.active.clone()
+        {
+            self.activate(active);
         }
     }
 
@@ -2717,11 +2861,15 @@ impl PythiaApp {
     fn main_event(&mut self, name: &str, event: DbEvent) {
         match event {
             DbEvent::Connected(server) => {
+                let schema = match (server.dialect.kind(), server.current_schema.as_str()) {
+                    (pythia_db::DbKind::MySql, "") => "no database".to_owned(),
+                    (pythia_db::DbKind::MySql, db) => format!("database {db}"),
+                    (_, schema) => format!("schema {schema}"),
+                };
                 let line = format!(
-                    "Connected to {name} ({} {}, schema {})",
+                    "Connected to {name} ({} {}, {schema})",
                     server.dialect.name(),
                     server.version,
-                    server.current_schema
                 );
                 let schema = server.current_schema.clone();
                 let names = match server.dialect.kind() {
@@ -2741,12 +2889,15 @@ impl PythiaApp {
                 if self.connecting.as_deref() == Some(name) {
                     self.connecting = None;
                     self.connect_dialog.connected();
-                    let dialect = self.dialect_of(Some(name));
-                    let effects = self.browser.attach(name.to_owned(), schema, dialect);
-                    self.apply_browser(effects);
-                    // Bind unbound windows to the first connection.
-                    for doc in self.docs.values_mut().filter(|d| d.connection.is_none()) {
-                        doc.connection = Some(name.to_owned());
+                    if self.settings.switch_window_connection {
+                        self.attach_browser(name.to_owned());
+                        // Bind unbound windows to the first connection.
+                        for doc in self.docs.values_mut().filter(|d| d.connection.is_none()) {
+                            doc.connection = Some(name.to_owned());
+                        }
+                    } else {
+                        // The new connection is the active one.
+                        self.activate(name.to_owned());
                     }
                     let reload: Vec<DocId> = self
                         .docs
@@ -3129,7 +3280,7 @@ impl PythiaApp {
     /// The toolbar. Buttons follow the focused window and its session, and
     /// say why they're disabled. Returns a connection picked for the
     /// focused window.
-    fn toolbar(&self, ui: &mut Ui, commands: &mut Vec<Command>) -> Option<(DocId, String)> {
+    fn toolbar(&self, ui: &mut Ui, commands: &mut Vec<Command>) -> Option<ConnectionChoice> {
         let focused_id = self.focused;
         let focused = focused_id.and_then(|id| self.docs.get(&id));
         let running = focused.is_some_and(Document::is_busy);
@@ -3152,7 +3303,7 @@ impl PythiaApp {
                 Err("Not connected")
             }
         };
-        let mut rebind = None;
+        let mut choice = None;
         let dialect = self.dialect();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -3220,11 +3371,7 @@ impl PythiaApp {
                     let name = conn.name();
                     let color =
                         connection_color(&conn.profile).unwrap_or(ui.visuals().text_color());
-                    let (icon, label) = if conn.profile.production {
-                        (Icon::Production, format!("{name}  PRODUCTION"))
-                    } else {
-                        (Icon::Database, name.clone())
-                    };
+                    let (icon, label) = connection_label(conn);
                     let title = (
                         icon.image(ui),
                         RichText::new(format!("{label}  ⏷")).color(color),
@@ -3245,7 +3392,22 @@ impl PythiaApp {
                                         "Commit or roll back this window's transaction first",
                                     );
                                     if item.clicked() && *other != name {
-                                        rebind = Some((id, other.clone()));
+                                        choice = Some(ConnectionChoice::Window(id, other.clone()));
+                                    }
+                                }
+                                ui.separator();
+                            } else if !self.settings.switch_window_connection
+                                && self.conns.open.len() > 1
+                            {
+                                // The app's connection: SQL windows and the
+                                // object browser move with it.
+                                ui.weak("Active connection");
+                                let active = self.active.as_deref();
+                                for other in self.conns.open.keys() {
+                                    let on = active == Some(other.as_str());
+                                    if ui.add(egui::Button::selectable(on, other)).clicked() && !on
+                                    {
+                                        choice = Some(ConnectionChoice::Active(other.clone()));
                                     }
                                 }
                                 ui.separator();
@@ -3263,9 +3425,7 @@ impl PythiaApp {
                         })
                         .0;
                     let hover = match conn.server() {
-                        Some(server) => {
-                            format!("{}\nSchema {}", server.banner, server.current_schema)
-                        }
+                        Some(server) => connection_hover(conn.dialect(), server),
                         None => format!("Connecting to {name}…"),
                     };
                     response.on_hover_text(hover);
@@ -3410,7 +3570,7 @@ impl PythiaApp {
                 ));
             });
         });
-        rebind
+        choice
     }
 
     fn status_bar(&self, ui: &mut Ui, commands: &mut Vec<Command>) {
@@ -3430,13 +3590,9 @@ impl PythiaApp {
                             ui.label(format!("Connecting to {name}…"));
                         }
                         Some(server) => {
-                            let (icon, text) = if conn.profile.production {
-                                (Icon::Production, format!("{name}  PRODUCTION"))
-                            } else {
-                                (Icon::Database, name)
-                            };
+                            let (icon, text) = connection_label(conn);
                             icon_label(ui, icon, RichText::new(text).color(color))
-                                .on_hover_text(format!("{}\nSchema {}", server.banner, server.current_schema));
+                                .on_hover_text(connection_hover(conn.dialect(), server));
                         }
                     }
                     let session = focused.and_then(|(id, _)| conn.docs.get(&id));
@@ -3800,6 +3956,16 @@ impl PythiaApp {
                     self.conns.end_doc(id, answer == Answer::Yes);
                     self.remove_window(id);
                 }
+            } else if let ConfirmAction::Activate(name) = &action {
+                match answer {
+                    Answer::Cancel => {
+                        // The browser may have gone ahead (an object action).
+                        if let Some(active) = self.active.clone() {
+                            self.attach_browser(active);
+                        }
+                    }
+                    _ => self.switch_to(name.clone(), Some(answer == Answer::Yes)),
+                }
             } else if answer == Answer::Yes {
                 match action {
                     ConfirmAction::Commit => self.end_transaction(true),
@@ -3812,7 +3978,7 @@ impl PythiaApp {
                         self.quit_confirmed = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
-                    ConfirmAction::CloseWindows(_) => {}
+                    ConfirmAction::CloseWindows(_) | ConfirmAction::Activate(_) => {}
                 }
             }
         }
@@ -3896,7 +4062,7 @@ impl eframe::App for PythiaApp {
                 None => self.connect_dialog.show(self.last_profile.as_ref()),
             }
         }
-        let toolbar_rebind = egui::Panel::top("toolbar")
+        let toolbar_choice = egui::Panel::top("toolbar")
             .frame(theme::toolbar_frame(ui.style()))
             .show(ui, |ui| self.toolbar(ui, &mut commands))
             .inner;
@@ -3904,8 +4070,28 @@ impl eframe::App for PythiaApp {
             .frame(theme::status_frame(ui.style()))
             .show(ui, |ui| self.status_bar(ui, &mut commands));
 
+        let before = self.focused;
         if let Some((_, Tab::Doc(id))) = self.dock.find_active_focused() {
             self.focused = Some(*id);
+        }
+        let switched = self.settings.switch_window_connection;
+        if std::mem::replace(&mut self.windows_switched, switched)
+            && !switched
+            && let Some(connection) = self.browser.connection.clone()
+        {
+            self.activate(connection);
+        }
+        // Windows on connections of their own: the object browser shows the
+        // focused window's.
+        if self.focused != before
+            && self.settings.switch_window_connection
+            && let Some(connection) = self
+                .focused
+                .and_then(|id| self.docs.get(&id))
+                .and_then(|d| d.connection.clone())
+                .filter(|c| self.conns.get(c).is_some())
+        {
+            self.attach_browser(connection);
         }
         let connections: Vec<String> = self.conns.open.keys().cloned().collect();
         let colors: HashMap<String, Color32> = self
@@ -3974,6 +4160,7 @@ impl eframe::App for PythiaApp {
             close_asked: Vec::new(),
             rebind: Vec::new(),
             pending_tx: &pending_tx,
+            active: self.active.as_deref(),
         };
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -3996,8 +4183,13 @@ impl eframe::App for PythiaApp {
         } = viewer;
         // From the debugger panel, e.g. a call stack frame's source.
         self.debug_actions(debug_actions);
-        for (id, connection) in rebind.into_iter().chain(toolbar_rebind) {
+        for (id, connection) in rebind {
             self.rebind(id, connection);
+        }
+        match toolbar_choice {
+            Some(ConnectionChoice::Window(id, connection)) => self.rebind(id, connection),
+            Some(ConnectionChoice::Active(connection)) => self.activate(connection),
+            None => {}
         }
         for id in closed {
             self.close_doc(id);
@@ -4081,6 +4273,32 @@ impl PythiaApp {
         if let Some(id) = self.focused {
             self.rebind(id, connection.to_owned());
         }
+    }
+
+    /// The active connection, and the one the object browser shows.
+    pub fn test_active_connection(&self) -> (Option<String>, Option<String>) {
+        (self.active.clone(), self.browser.connection.clone())
+    }
+
+    /// Picks a schema (database) in the object browser's picker.
+    pub fn test_pick_schema(&mut self, schema: &str) {
+        let effects = self.browser.pick_schema(schema);
+        self.apply_browser(effects);
+    }
+
+    /// The tab title of the window whose title starts with `prefix`.
+    pub fn test_tab_title(&self, prefix: &str) -> Option<String> {
+        let doc = self.docs.values().find(|d| d.title().starts_with(prefix))?;
+        let elsewhere = elsewhere(doc, self.active.as_deref(), &self.settings);
+        Some(doc.tab_title(None, elsewhere).text().to_owned())
+    }
+
+    /// The connection of each window, by title.
+    pub fn test_window_connections(&self) -> Vec<(String, Option<String>)> {
+        self.docs
+            .values()
+            .map(|d| (d.title(), d.connection.clone()))
+            .collect()
     }
 
     pub fn test_focused_connection(&self) -> Option<String> {
@@ -4497,6 +4715,47 @@ impl PythiaApp {
     }
 }
 
+/// A connection as the toolbar and status bar show it: with its database on
+/// MySQL ("No database" without one), and marked when it's production.
+fn connection_label(conn: &Connection) -> (Icon, String) {
+    let name = match conn.database_label() {
+        Some(database) => format!("{} · {database}", conn.name()),
+        None => conn.name(),
+    };
+    if conn.profile.production {
+        (Icon::Production, format!("{name}  PRODUCTION"))
+    } else {
+        (Icon::Database, name)
+    }
+}
+
+/// The server and the current schema (database on MySQL).
+fn connection_hover(dialect: Dialect, server: &pythia_db::ServerInfo) -> String {
+    let current = match (dialect == Dialect::MYSQL, server.current_schema.as_str()) {
+        (true, "") => "No database".to_owned(),
+        (true, db) => format!("Database {db}"),
+        (false, schema) => format!("Schema {schema}"),
+    };
+    format!("{}\n{current}", server.banner)
+}
+
+/// The connection a window's tab names: one other than the active
+/// connection, where a program window or object view was kept, unless
+/// windows switch connections on their own.
+fn elsewhere<'a>(doc: &'a Document, active: Option<&str>, settings: &Settings) -> Option<&'a str> {
+    doc.connection
+        .as_deref()
+        .filter(|c| !settings.switch_window_connection && active != Some(*c))
+}
+
+/// A connection picked in the toolbar's connection menu.
+enum ConnectionChoice {
+    /// For the focused SQL window (windows switch connections on their own).
+    Window(DocId, String),
+    /// The active connection.
+    Active(String),
+}
+
 struct Viewer<'a> {
     docs: &'a mut BTreeMap<DocId, Document>,
     browser: &'a mut Browser,
@@ -4527,6 +4786,8 @@ struct Viewer<'a> {
     rebind: Vec<(DocId, String)>,
     /// Documents whose session has a pending transaction.
     pending_tx: &'a HashSet<DocId>,
+    /// The active connection.
+    active: Option<&'a str>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -4550,7 +4811,8 @@ impl TabViewer for Viewer<'_> {
                         .as_ref()
                         .and_then(|c| self.colors.get(c))
                         .copied();
-                    doc.tab_title(color).into()
+                    let elsewhere = elsewhere(doc, self.active, self.settings);
+                    doc.tab_title(color, elsewhere).into()
                 }
                 None => "?".into(),
             },

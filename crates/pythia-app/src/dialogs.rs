@@ -1367,6 +1367,9 @@ pub enum ConfirmAction {
     /// Close windows with an open transaction: committed (yes) or rolled
     /// back (other) first.
     CloseWindows(Vec<DocId>),
+    /// Make this the active connection, committing (yes) or rolling back
+    /// (other) the transactions of the SQL windows that move.
+    Activate(String),
 }
 
 pub struct Confirm {
