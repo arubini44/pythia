@@ -38,9 +38,9 @@ use crate::queries::{self, Capabilities};
 
 pub use awr::AwrView;
 pub use dashboard::{DashboardView, Refresh};
-pub use detail::SessionDetailView;
+pub use detail::{DetailTab, SessionDetailView};
 pub use mysql::MySqlDashboardView;
-pub use sessions::SessionsView;
+pub use sessions::{FieldFilter, SessionsView};
 pub use trace::TraceView;
 
 /// Identifies a request inside one [`Monitor`].
@@ -127,6 +127,16 @@ pub(crate) enum Want {
         sid: i64,
         serial: i64,
     },
+    /// Disconnect once its transaction has ended.
+    Disconnect {
+        sid: i64,
+        serial: i64,
+    },
+    /// A session's open transaction, for the kill dialog.
+    Transaction {
+        sid: i64,
+        serial: i64,
+    },
     Trace {
         sid: i64,
         serial: i64,
@@ -157,12 +167,15 @@ pub(crate) enum Want {
     },
     /// Switch to the blocking tree (handled by the driver, no task).
     ShowBlocking,
-    /// Switch to the session list.
-    ShowSessions,
-    /// Open a session detail tab (handled by the driver, no task).
+    /// Switch to the session list, filtered to one user, program, machine
+    /// or wait class.
+    ShowSessions(Option<FieldFilter>),
+    /// Open a session detail tab, on one of its tabs (handled by the
+    /// driver, no task).
     OpenDetail {
         sid: i64,
         serial: i64,
+        tab: Option<DetailTab>,
     },
     /// Hand to the host's assistant (no task).
     Analyze(Analysis),
@@ -176,6 +189,7 @@ enum Job {
     Sessions,
     Detail(i64, i64),
     Control(String),
+    Transaction(i64, i64),
     AwrSnapshots,
     Report { html: bool, title: String },
     CreateSnapshot,
@@ -280,7 +294,11 @@ impl Monitor {
 
     /// Opens (or focuses) the detail tab of a session.
     pub fn open_session(&mut self, sid: i64, serial: i64) {
-        self.deferred.push(Want::OpenDetail { sid, serial });
+        self.deferred.push(Want::OpenDetail {
+            sid,
+            serial,
+            tab: None,
+        });
     }
 
     pub fn capabilities(&self) -> Option<&Capabilities> {
@@ -392,8 +410,9 @@ impl Monitor {
                 out.actions.push(MonitorAction::Analyze(analysis));
                 continue;
             }
-            if let Want::ShowSessions = want {
+            if let Want::ShowSessions(filter) = want {
                 self.tab = MonitorTab::Sessions;
+                self.sessions.show_table(filter);
                 continue;
             }
             if let Want::ShowBlocking = want {
@@ -401,7 +420,7 @@ impl Monitor {
                 self.sessions.show_blocking();
                 continue;
             }
-            if let Want::OpenDetail { sid, serial } = want {
+            if let Want::OpenDetail { sid, serial, tab } = want {
                 let idx = match self
                     .details
                     .iter()
@@ -413,6 +432,9 @@ impl Monitor {
                         self.details.len() - 1
                     }
                 };
+                if let Some(tab) = tab {
+                    self.details[idx].show_tab(tab);
+                }
                 self.tab = MonitorTab::Detail(idx);
                 continue;
             }
@@ -481,6 +503,16 @@ impl Monitor {
                 Job::Control(format!("SQL of session {sid},{serial} cancelled")),
                 Box::new(move |c| boxed(queries::cancel_sql(c, sid, serial))),
             ),
+            Want::Disconnect { sid, serial } => (
+                Job::Control(format!(
+                    "Session {sid},{serial} disconnects once its transaction ends"
+                )),
+                Box::new(move |c| boxed(queries::disconnect_session(c, sid, serial))),
+            ),
+            Want::Transaction { sid, serial } => (
+                Job::Transaction(sid, serial),
+                Box::new(move |c| boxed(queries::transaction(c, sid, serial))),
+            ),
             Want::Trace { sid, serial, on } => (
                 Job::Control(format!(
                     "SQL trace {} for session {sid},{serial}",
@@ -536,7 +568,7 @@ impl Monitor {
             ),
             Want::OpenDetail { .. }
             | Want::ShowBlocking
-            | Want::ShowSessions
+            | Want::ShowSessions(_)
             | Want::Analyze(_)
             | Want::MySqlDashboard { .. } => return None,
         };
@@ -580,10 +612,25 @@ impl Monitor {
                     d.on_detail(result);
                 }
             }
+            Job::Transaction(sid, serial) => {
+                let result = take::<Option<queries::Transaction>>(result)
+                    .map_err(|e| queries::explain_error(&e));
+                self.sessions.on_transaction(sid, serial, &result);
+                for d in self
+                    .details
+                    .iter_mut()
+                    .filter(|d| d.sid == sid && d.serial == serial)
+                {
+                    d.on_transaction(&result);
+                }
+            }
             Job::Control(message) => match take::<()>(result) {
                 Ok(()) => {
                     self.toast(message, false, now);
                     self.sessions.refresh_now();
+                    for d in &mut self.details {
+                        d.refresh();
+                    }
                 }
                 Err(e) => self.toast(queries::explain_error(&e), true, now),
             },

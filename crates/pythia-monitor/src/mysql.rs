@@ -707,6 +707,7 @@ pub fn insights(snap: &MySqlSnapshot, rates: Option<&Counters>) -> Vec<Insight> 
             severity,
             text,
             target: None,
+            session: None,
         })
     };
 

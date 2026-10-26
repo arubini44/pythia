@@ -4,12 +4,14 @@ use egui::{RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 use pythia_db::DbError;
 
+use super::sessions::{KillConfirm, RowAction, kill_dialog, session_actions};
 use super::style::{self, Palette, duration, section};
 use super::{Analysis, Want, Wants};
-use crate::queries::{Capabilities, SessionDetail, explain_error};
+use crate::queries::{Capabilities, SessionDetail, Transaction, explain_error};
 
+/// The tabs of session details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Tab {
+pub enum DetailTab {
     #[default]
     Sql,
     Plan,
@@ -22,7 +24,7 @@ enum Tab {
 pub struct SessionDetailView {
     pub sid: i64,
     pub serial: i64,
-    tab: Tab,
+    tab: DetailTab,
     detail: Option<SessionDetail>,
     error: Option<String>,
     loading: bool,
@@ -30,6 +32,8 @@ pub struct SessionDetailView {
     stat_filter: String,
     /// The open cursor whose statement is shown below the list.
     cursor: Option<usize>,
+    /// Asking before a kill.
+    confirm: Option<KillConfirm>,
 }
 
 impl SessionDetailView {
@@ -37,13 +41,44 @@ impl SessionDetailView {
         Self {
             sid,
             serial,
-            tab: Tab::default(),
+            tab: DetailTab::default(),
             detail: None,
             error: None,
             loading: false,
             requested: false,
             stat_filter: String::new(),
             cursor: None,
+            confirm: None,
+        }
+    }
+
+    /// A copy with the same details, for a test harness of its own.
+    #[cfg(test)]
+    fn clone_for_test(&self) -> Self {
+        let mut view = Self::new(self.sid, self.serial);
+        view.requested = self.requested;
+        view.detail = self.detail.clone();
+        view
+    }
+
+    /// Shows one of the tabs (e.g. the open cursors of a session the
+    /// dashboard lists for them).
+    pub fn show_tab(&mut self, tab: DetailTab) {
+        self.tab = tab;
+    }
+
+    /// Reads the details again with the next frame (after a kill, a cancel
+    /// or a trace change).
+    pub(crate) fn refresh(&mut self) {
+        if !self.loading {
+            self.requested = false;
+        }
+    }
+
+    /// The transaction the kill dialog asked for.
+    pub(crate) fn on_transaction(&mut self, result: &Result<Option<Transaction>, String>) {
+        if let Some(k) = &mut self.confirm {
+            k.on_transaction(self.sid, self.serial, result);
         }
     }
 
@@ -67,7 +102,7 @@ impl SessionDetailView {
         }
     }
 
-    pub(crate) fn ui(&mut self, ui: &mut Ui, _caps: Option<&Capabilities>, wants: &mut Wants) {
+    pub(crate) fn ui(&mut self, ui: &mut Ui, caps: Option<&Capabilities>, wants: &mut Wants) {
         if !self.requested {
             self.requested = true;
             self.loading = true;
@@ -76,6 +111,7 @@ impl SessionDetailView {
                 serial: self.serial,
             });
         }
+        let mut actions = Vec::new();
         ui.horizontal(|ui| {
             let s = self.detail.as_ref().and_then(|d| d.session.as_ref());
             match s {
@@ -116,6 +152,11 @@ impl SessionDetailView {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(s) = self.detail.as_ref().and_then(|d| d.session.as_ref()) {
+                    ui.menu_button("Session ⏷", |ui| session_actions(ui, s, caps, &mut actions))
+                        .response
+                        .on_hover_text("Cancel its SQL, kill or disconnect it, trace it");
+                }
                 if ui.button("⟳").on_hover_text("Refresh").clicked() && !self.loading {
                     self.loading = true;
                     wants.push(Want::Detail {
@@ -147,11 +188,23 @@ impl SessionDetailView {
                     ui.weak(format!("for {}", duration(s.wait_secs)));
                 }
                 if let Some(b) = s.blocking_session {
-                    ui.label(
-                        RichText::new(format!("blocked by {b}"))
-                            .color(Palette::RED)
-                            .strong(),
-                    );
+                    let text = RichText::new(format!("blocked by {b}"))
+                        .color(Palette::RED)
+                        .strong();
+                    match s.blocking_serial {
+                        Some(serial) => {
+                            if ui.link(text).on_hover_text("Show its details").clicked() {
+                                actions.push(RowAction::Want(Want::OpenDetail {
+                                    sid: b,
+                                    serial,
+                                    tab: None,
+                                }));
+                            }
+                        }
+                        None => {
+                            ui.label(text);
+                        }
+                    }
                 }
                 if let Some(o) = &s.wait_object {
                     ui.weak(format!("object {o}"));
@@ -161,14 +214,37 @@ impl SessionDetailView {
                 }
             });
         }
+        if let Some(d) = self.detail.as_ref().filter(|d| !d.blocks.is_empty()) {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Blocks").color(Palette::RED).strong());
+                for (sid, serial, user) in &d.blocks {
+                    let who = user.as_deref().unwrap_or("background");
+                    if ui
+                        .link(format!("{sid} ({who})"))
+                        .on_hover_text("Show its details")
+                        .clicked()
+                    {
+                        actions.push(RowAction::Want(Want::OpenDetail {
+                            sid: *sid,
+                            serial: *serial,
+                            tab: None,
+                        }));
+                    }
+                }
+            });
+        }
+        for a in actions {
+            a.apply(&mut self.confirm, wants);
+        }
+        kill_dialog(ui.ctx(), &mut self.confirm, wants);
         ui.horizontal(|ui| {
             for (t, label) in [
-                (Tab::Sql, "SQL"),
-                (Tab::Plan, "Plan"),
-                (Tab::Waits, "Wait history"),
-                (Tab::Stats, "Statistics"),
-                (Tab::Cursors, "Open cursors"),
-                (Tab::Locks, "Locks"),
+                (DetailTab::Sql, "SQL"),
+                (DetailTab::Plan, "Plan"),
+                (DetailTab::Waits, "Wait history"),
+                (DetailTab::Stats, "Statistics"),
+                (DetailTab::Cursors, "Open cursors"),
+                (DetailTab::Locks, "Locks"),
             ] {
                 ui.selectable_value(&mut self.tab, t, label);
             }
@@ -185,7 +261,7 @@ impl SessionDetailView {
         style::section_errors(ui, &d.errors);
         let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         match self.tab {
-            Tab::Sql => {
+            DetailTab::Sql => {
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| {
@@ -208,7 +284,7 @@ impl SessionDetailView {
                         });
                     });
             }
-            Tab::Plan => {
+            DetailTab::Plan => {
                 egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                     if d.plan.is_empty() {
                         ui.weak(
@@ -218,7 +294,7 @@ impl SessionDetailView {
                     ui.label(RichText::new(d.plan.join("\n")).monospace());
                 });
             }
-            Tab::Waits => {
+            DetailTab::Waits => {
                 table(
                     ui,
                     "detail-waits",
@@ -242,7 +318,7 @@ impl SessionDetailView {
                     },
                 );
             }
-            Tab::Stats => {
+            DetailTab::Stats => {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.stat_filter)
                         .hint_text("Filter statistics…"),
@@ -270,7 +346,7 @@ impl SessionDetailView {
                     },
                 );
             }
-            Tab::Cursors => {
+            DetailTab::Cursors => {
                 // The selected cursor's whole statement below the list.
                 egui::Panel::bottom(egui::Id::new(("detail-cursor-text", self.sid)))
                     .resizable(true)
@@ -342,7 +418,7 @@ impl SessionDetailView {
                     self.cursor = clicked;
                 }
             }
-            Tab::Locks => {
+            DetailTab::Locks => {
                 table(
                     ui,
                     "detail-locks",
@@ -529,6 +605,51 @@ mod tests {
 
     use super::*;
     use crate::queries::{OpenCursor, SessionRow};
+    use crate::ui::Want;
+
+    /// The header links to the session it waits for and to those waiting
+    /// for it (#74).
+    #[test]
+    fn blocking_links() {
+        let mut view = SessionDetailView::new(42, 7);
+        view.requested = true;
+        view.on_detail(Ok(SessionDetail {
+            session: Some(SessionRow {
+                sid: 42,
+                serial: 7,
+                status: "ACTIVE".into(),
+                event: Some("enq: TX - row lock contention".into()),
+                blocking_session: Some(21),
+                blocking_serial: Some(4),
+                ..SessionRow::default()
+            }),
+            blocks: vec![(55, 8, Some("HR".into()))],
+            ..SessionDetail::default()
+        }));
+        let opened = |label: &str| {
+            let mut harness = Harness::builder()
+                .with_size(egui::vec2(900.0, 500.0))
+                .build_ui_state(
+                    |ui, (view, wants): &mut (SessionDetailView, Wants)| view.ui(ui, None, wants),
+                    (view.clone_for_test(), Wants::default()),
+                );
+            harness.run_steps(2);
+            harness.get_by_label(label).click();
+            harness.run_steps(2);
+            harness
+                .state()
+                .1
+                .list
+                .iter()
+                .filter_map(|w| match w {
+                    Want::OpenDetail { sid, serial, .. } => Some((*sid, *serial)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(opened("blocked by 21"), [(21, 4)]);
+        assert_eq!(opened("55 (HR)"), [(55, 8)]);
+    }
 
     /// Clicking an open cursor shows its whole statement below the list
     /// (#73).
@@ -541,7 +662,7 @@ mod tests {
             cursor_type: Some("OPEN".into()),
         };
         let mut view = SessionDetailView::new(42, 7);
-        view.tab = Tab::Cursors;
+        view.tab = DetailTab::Cursors;
         // Loaded already: no request, no spinner.
         view.requested = true;
         view.on_detail(Ok(SessionDetail {

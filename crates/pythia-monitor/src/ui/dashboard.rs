@@ -8,7 +8,7 @@ use egui_plot::{HLine, Legend, Line, Plot, PlotPoints};
 use pythia_db::DbError;
 
 use super::style::{self, Kpi, Palette, bytes, compact, duration, section};
-use super::{Analysis, Want, Wants, refresh_selector};
+use super::{Analysis, DetailTab, FieldFilter, Want, Wants, refresh_selector};
 use crate::insights::{Insight, Severity, Target, insights};
 use crate::queries::{Counters, DashboardSnapshot, Rates, TopSql, explain_error};
 
@@ -196,20 +196,44 @@ impl DashboardView {
                     wants,
                 );
                 ui.add_space(8.0);
-                self.kpis(ui, snap);
+                self.kpis(ui, snap, wants);
                 ui.add_space(8.0);
                 self.charts(ui, snap);
                 ui.add_space(8.0);
-                activity(ui, snap);
+                activity(ui, snap, wants);
                 ui.add_space(8.0);
+                let mut field = None;
                 ui.columns(3, |cols| {
-                    top_list(&mut cols[0], "Sessions by user", &snap.by_user);
-                    top_list(&mut cols[1], "Sessions by program", &snap.by_program);
-                    top_list(&mut cols[2], "Sessions by machine", &snap.by_machine);
+                    let hint = Some("Show these sessions");
+                    let by = [
+                        (
+                            &snap.by_user,
+                            "Sessions by user",
+                            FieldFilter::User as fn(String) -> FieldFilter,
+                        ),
+                        (
+                            &snap.by_program,
+                            "Sessions by program",
+                            FieldFilter::Program,
+                        ),
+                        (
+                            &snap.by_machine,
+                            "Sessions by machine",
+                            FieldFilter::Machine,
+                        ),
+                    ];
+                    for (col, (rows, title, filter)) in cols.iter_mut().zip(by) {
+                        if let Some(name) = top_list(col, title, rows, hint) {
+                            field = Some(filter(name));
+                        }
+                    }
                 });
+                if let Some(field) = field {
+                    wants.push(Want::ShowSessions(Some(field)));
+                }
                 ui.add_space(8.0);
                 ui.columns(2, |cols| {
-                    cursors(&mut cols[0], snap);
+                    cursors(&mut cols[0], snap, wants);
                     memory(&mut cols[1], snap);
                 });
                 ui.add_space(8.0);
@@ -218,14 +242,14 @@ impl DashboardView {
                 top_sql(ui, snap, wants);
                 if !snap.long_ops.is_empty() {
                     ui.add_space(8.0);
-                    long_ops(ui, snap);
+                    long_ops(ui, snap, wants);
                 }
                 ui.add_space(8.0);
                 style::section_errors(ui, &snap.errors);
             });
     }
 
-    fn kpis(&self, ui: &mut Ui, snap: &DashboardSnapshot) {
+    fn kpis(&self, ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
         let r = self.rates;
         let cpus = snap.instance.as_ref().map_or(1, |i| i.cpus.max(1)) as f64;
         let rate = |f: fn(&Rates) -> f64| r.map_or("…".to_owned(), |r| compact(f(&r)));
@@ -233,12 +257,14 @@ impl DashboardView {
         if let Some(s) = snap.sessions {
             tiles.push(
                 Kpi::new("Sessions", format!("{} / {}", s.active, s.user))
-                    .detail(format!("active / user · {} background", s.background)),
+                    .detail(format!("active / user · {} background", s.background))
+                    .link("Show the sessions"),
             );
             tiles.push(
                 Kpi::new("Blocked sessions", s.blocked.to_string())
                     .detail("waiting on a lock")
-                    .color((s.blocked > 0).then_some(Palette::RED)),
+                    .color((s.blocked > 0).then_some(Palette::RED))
+                    .link("Show the blocking tree"),
             );
         }
         let aas = r.map_or(0.0, |r| r.aas);
@@ -283,7 +309,11 @@ impl DashboardView {
                 .detail(format!("{} rollbacks / s", rate(|r| r.rollbacks))),
         );
         tiles.push(Kpi::new("Hard parses / s", rate(|r| r.hard_parses)));
-        style::kpi_grid(ui, &tiles, 160.0);
+        match style::kpi_grid(ui, &tiles, 160.0).map(|i| tiles[i].caption.as_str()) {
+            Some("Sessions") => wants.push(Want::ShowSessions(None)),
+            Some("Blocked sessions") => wants.push(Want::ShowBlocking),
+            _ => {}
+        }
     }
 
     fn charts(&self, ui: &mut Ui, snap: &DashboardSnapshot) {
@@ -368,7 +398,7 @@ impl DashboardView {
     }
 }
 
-fn activity(ui: &mut Ui, snap: &DashboardSnapshot) {
+fn activity(ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
     section(ui, "Active sessions by wait class (now)", |ui| {
         if snap.activity.is_empty() {
             ui.weak("No active user sessions besides this one.");
@@ -379,24 +409,44 @@ fn activity(ui: &mut Ui, snap: &DashboardSnapshot) {
             .iter()
             .map(|(c, n)| (c.clone(), *n as f64, style::wait_class_color(c)))
             .collect();
-        style::stacked_bar(ui, &segments);
+        if let Some(i) = style::stacked_bar(ui, &segments, Some("Show these sessions")) {
+            let class = segments[i].0.clone();
+            wants.push(Want::ShowSessions(Some(FieldFilter::WaitClass(class))));
+        }
     });
 }
 
-pub(super) fn top_list(ui: &mut Ui, title: &str, rows: &[(String, i64)]) {
+/// Counts per name as bars, largest first. With a `hint`, the bars are
+/// links: returns the name clicked.
+pub(super) fn top_list(
+    ui: &mut Ui,
+    title: &str,
+    rows: &[(String, i64)],
+    hint: Option<&str>,
+) -> Option<String> {
     section(ui, title, |ui| {
         if rows.is_empty() {
             ui.weak("—");
         }
         let max = rows.iter().map(|r| r.1).max().unwrap_or(1).max(1) as f32;
+        let mut clicked = None;
         for (name, n) in rows {
-            style::usage_bar(ui, *n as f32 / max, Palette::BLUE, format!("{n}  {name}"));
+            let (fraction, text) = (*n as f32 / max, format!("{n}  {name}"));
+            match hint {
+                Some(hint) => {
+                    if style::link_bar(ui, fraction, Palette::BLUE, text, hint) {
+                        clicked = Some(name.clone());
+                    }
+                }
+                None => style::usage_bar(ui, fraction, Palette::BLUE, text),
+            }
             ui.add_space(2.0);
         }
-    });
+        clicked
+    })
 }
 
-fn cursors(ui: &mut Ui, snap: &DashboardSnapshot) {
+fn cursors(ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
     section(ui, "Most open cursors", |ui| {
         if snap.cursor_holders.is_empty() {
             ui.weak("—");
@@ -426,12 +476,19 @@ fn cursors(ui: &mut Ui, snap: &DashboardSnapshot) {
             } else {
                 Palette::TEAL
             };
-            style::usage_bar(
+            if style::link_bar(
                 ui,
                 frac,
                 color,
                 format!("{}  sid {} · {who} · {program}", c.open, c.sid),
-            );
+                "Show the session's open cursors",
+            ) {
+                wants.push(Want::OpenDetail {
+                    sid: c.sid,
+                    serial: c.serial,
+                    tab: Some(DetailTab::Cursors),
+                });
+            }
             ui.add_space(2.0);
         }
     });
@@ -632,7 +689,7 @@ fn top_sql_analysis(s: &TopSql) -> Analysis {
     }
 }
 
-fn long_ops(ui: &mut Ui, snap: &DashboardSnapshot) {
+fn long_ops(ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
     section(ui, "Long operations", |ui| {
         for op in &snap.long_ops {
             let frac = if op.totalwork > 0.0 {
@@ -644,12 +701,19 @@ fn long_ops(ui: &mut Ui, snap: &DashboardSnapshot) {
                 .remaining_s
                 .map(|s| format!(" · {} left", duration(s as f64)))
                 .unwrap_or_default();
-            ui.label(format!(
+            let text = format!(
                 "sid {} · {} {}{remaining}",
                 op.sid,
                 op.opname,
                 op.target.as_deref().unwrap_or("")
-            ));
+            );
+            if ui.link(text).on_hover_text("Show the session").clicked() {
+                wants.push(Want::OpenDetail {
+                    sid: op.sid,
+                    serial: op.serial,
+                    tab: None,
+                });
+            }
             style::usage_bar(
                 ui,
                 frac as f32,
@@ -701,8 +765,12 @@ pub(super) fn insights_strip(ui: &mut Ui, found: &[Insight], have_rates: bool, w
                         if ui.link(text).on_hover_text("Show details").clicked() {
                             wants.push(match target {
                                 Target::BlockingTree => Want::ShowBlocking,
-                                Target::Session { sid, serial } => Want::OpenDetail { sid, serial },
-                                Target::Sessions => Want::ShowSessions,
+                                Target::Session { sid, serial } => Want::OpenDetail {
+                                    sid,
+                                    serial,
+                                    tab: None,
+                                },
+                                Target::Sessions => Want::ShowSessions(None),
                             });
                         }
                     }
@@ -710,7 +778,127 @@ pub(super) fn insights_strip(ui: &mut Ui, found: &[Insight], have_rates: bool, w
                         ui.label(text);
                     }
                 }
+                if let Some((sid, serial)) = i.session
+                    && ui
+                        .small_button("Details")
+                        .on_hover_text("Show the session")
+                        .clicked()
+                {
+                    wants.push(Want::OpenDetail {
+                        sid,
+                        serial,
+                        tab: None,
+                    });
+                }
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+    use crate::queries::{Blocker, CursorHolder, LongOp, SessionCounts};
+
+    fn snapshot() -> DashboardSnapshot {
+        DashboardSnapshot {
+            sessions: Some(SessionCounts {
+                total: 40,
+                user: 12,
+                active: 3,
+                inactive: 9,
+                background: 28,
+                blocked: 1,
+            }),
+            blockers: vec![Blocker {
+                sid: 21,
+                serial: 4,
+                username: Some("SCOTT".into()),
+                status: "INACTIVE".into(),
+                blocked: 1,
+                max_wait: 30.0,
+            }],
+            by_user: vec![("SCOTT".into(), 5), ("HR".into(), 2)],
+            by_program: vec![("sqlplus".into(), 3)],
+            by_machine: vec![("host1".into(), 7)],
+            activity: vec![("User I/O".into(), 2), ("CPU".into(), 1)],
+            open_cursors_limit: Some(300),
+            cursor_holders: vec![CursorHolder {
+                sid: 33,
+                serial: 9,
+                username: Some("APP".into()),
+                program: Some("java".into()),
+                open: 120,
+            }],
+            long_ops: vec![LongOp {
+                sid: 44,
+                serial: 2,
+                opname: "Table Scan".into(),
+                target: Some("APP.BIG".into()),
+                sofar: 10.0,
+                totalwork: 100.0,
+                units: Some("Blocks".into()),
+                elapsed_s: 20,
+                remaining_s: Some(180),
+                message: None,
+            }],
+            ..DashboardSnapshot::default()
+        }
+    }
+
+    fn describe(w: &Want) -> String {
+        match w {
+            Want::ShowSessions(f) => format!("sessions {f:?}"),
+            Want::ShowBlocking => "blocking tree".into(),
+            Want::OpenDetail { sid, serial, tab } => format!("details {sid},{serial} {tab:?}"),
+            _ => "other".into(),
+        }
+    }
+
+    /// What clicking the element labeled `label` asks for.
+    fn click(label: &str) -> Vec<String> {
+        let mut view = DashboardView::default();
+        view.on_snapshot(Ok(snapshot()), 0.0);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1400.0, 2400.0))
+            .build_ui_state(
+                |ui, (view, wants): &mut (DashboardView, Wants)| view.ui(ui, 0.0, wants),
+                (view, Wants::default()),
+            );
+        harness.run_steps(2);
+        harness.state_mut().1.list.clear();
+        harness.get_by_label_contains(label).click();
+        harness.run_steps(2);
+        harness
+            .state()
+            .1
+            .list
+            .iter()
+            .map(describe)
+            .filter(|w| w != "other")
+            .collect()
+    }
+
+    /// Tiles, bars and rows lead to the sessions behind them (#74).
+    #[test]
+    fn drill_down_links() {
+        assert_eq!(click("active / user"), ["sessions None"]);
+        assert_eq!(click("waiting on a lock"), ["blocking tree"]);
+        assert_eq!(click("5  SCOTT"), [r#"sessions Some(User("SCOTT"))"#]);
+        assert_eq!(
+            click("3  sqlplus"),
+            [r#"sessions Some(Program("sqlplus"))"#]
+        );
+        assert_eq!(click("7  host1"), [r#"sessions Some(Machine("host1"))"#]);
+        assert_eq!(
+            click("User I/O 2"),
+            [r#"sessions Some(WaitClass("User I/O"))"#]
+        );
+        assert_eq!(click("120  sid 33"), ["details 33,9 Some(Cursors)"]);
+        assert_eq!(click("sid 44 · Table Scan"), ["details 44,2 None"]);
+        assert_eq!(click("Details"), ["details 21,4 None"]);
+    }
 }

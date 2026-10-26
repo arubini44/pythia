@@ -7,6 +7,17 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Monitor: the dashboard leads to what it counts. The *Sessions* tile opens
+  the session list, *Blocked sessions* the blocking tree; a wait class in
+  *Active sessions by wait class* and the bars of *Sessions by user /
+  program / machine* open the session list filtered to them (a chip shows
+  the filter); a *Most open cursors* row opens that session's open cursors,
+  a long operation its session, and a blocking finding has a *Details*
+  link to the blocker. Session details offer the session list's actions in
+  their header (*Session ⏷*): cancel its SQL, kill it, the new *Disconnect
+  after transaction*, and SQL trace on or off as it is now. *Blocked by*
+  and the sessions it blocks are links, and the kill dialog says how much
+  of an open transaction it rolls back (#74).
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
 - **Debug…** next to **Test…** on procedures, functions and package

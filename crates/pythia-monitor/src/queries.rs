@@ -656,6 +656,10 @@ pub struct SessionRow {
     pub sql_text: Option<String>,
     /// The monitoring session itself.
     pub is_self: bool,
+    /// SQL trace is on (`V$SESSION.SQL_TRACE`).
+    pub sql_trace: bool,
+    /// Serial# of the session it waits for, to open its details.
+    pub blocking_serial: Option<i64>,
 }
 
 impl SessionRow {
@@ -700,7 +704,9 @@ select s.sid, s.serial#, s.username, s.status, s.osuser, s.machine, s.program, s
        case when s.row_wait_obj# > 0 and s.event like 'enq: TX%' and o.data_object_id is not null then \
          rowidtochar(dbms_rowid.rowid_create(1, o.data_object_id, s.row_wait_file#, s.row_wait_block#, s.row_wait_row#)) end, \
        (select substr(q.sql_text, 1, 300) from v$sql q where q.sql_id = s.sql_id and rownum = 1), \
-       case when s.sid = sys_context('USERENV', 'SID') then 1 else 0 end \
+       case when s.sid = sys_context('USERENV', 'SID') then 1 else 0 end, \
+       case when s.sql_trace = 'ENABLED' then 1 else 0 end, \
+       (select b.serial# from v$session b where b.sid = s.blocking_session) \
   from v$session s \
   left join {objects} o on o.object_id = s.row_wait_obj#";
 
@@ -730,6 +736,8 @@ fn session_row(r: &oracle::Row) -> Result<SessionRow> {
         wait_rowid: get(r, 21)?,
         sql_text: get(r, 22)?,
         is_self: get::<i64>(r, 23)? == 1,
+        sql_trace: get::<i64>(r, 24)? == 1,
+        blocking_serial: get(r, 25)?,
     })
 }
 
@@ -902,6 +910,9 @@ pub struct SessionDetail {
     pub stats: Vec<(String, f64)>,
     pub cursors: Vec<OpenCursor>,
     pub locks: Vec<LockRow>,
+    /// Sessions waiting for this one: sid, serial#, user.
+    pub blocks: Vec<(i64, i64, Option<String>)>,
+    pub transaction: Option<Transaction>,
     pub errors: Vec<SectionError>,
 }
 
@@ -1023,6 +1034,20 @@ pub fn session_detail(conn: &Connection, sid: i64, serial: i64) -> SessionDetail
         .map(|c| d.cursors = c),
     );
     section("Locks", locks(conn, sid).map(|l| d.locks = l));
+    section(
+        "Blocking",
+        query(
+            conn,
+            "select sid, serial#, username from v$session where blocking_session = :1 order by sid",
+            &[&sid],
+            |r| Ok((get(r, 0)?, get(r, 1)?, get(r, 2)?)),
+        )
+        .map(|b| d.blocks = b),
+    );
+    section(
+        "Transaction",
+        transaction(conn, sid, serial).map(|t| d.transaction = t),
+    );
     d.errors = errors;
     d
 }
@@ -1084,6 +1109,50 @@ pub fn kill_session(conn: &Connection, sid: i64, serial: i64, immediate: bool) -
     );
     conn.execute(&sql, &[])?;
     Ok(())
+}
+
+/// Disconnects the session once its open transaction has ended (or right
+/// away without one).
+pub fn disconnect_session(conn: &Connection, sid: i64, serial: i64) -> Result<()> {
+    // As with kill: a session busy in a call is only marked (ORA-00031).
+    let sql = format!(
+        "begin\n  execute immediate 'alter system disconnect session {} post_transaction';\n\
+         exception\n  when others then\n    if sqlcode != -31 then raise; end if;\nend;",
+        session_handle(sid, serial).replace('\'', "''"),
+    );
+    conn.execute(&sql, &[])?;
+    Ok(())
+}
+
+/// A session's open transaction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transaction {
+    pub start: String,
+    pub undo_blocks: i64,
+    /// Undo records: what a rollback has to undo.
+    pub undo_records: i64,
+    pub status: String,
+}
+
+/// The session's open transaction, if it has one.
+pub fn transaction(conn: &Connection, sid: i64, serial: i64) -> Result<Option<Transaction>> {
+    Ok(query(
+        conn,
+        "select to_char(t.start_date, 'YYYY-MM-DD HH24:MI:SS'), t.used_ublk, t.used_urec, t.status \
+           from v$transaction t join v$session s on s.taddr = t.addr \
+          where s.sid = :1 and s.serial# = :2",
+        &[&sid, &serial],
+        |r| {
+            Ok(Transaction {
+                start: get::<Option<String>>(r, 0)?.unwrap_or_default(),
+                undo_blocks: get(r, 1)?,
+                undo_records: get(r, 2)?,
+                status: get(r, 3)?,
+            })
+        },
+    )?
+    .into_iter()
+    .next())
 }
 
 /// Cancels the session's current call (Oracle 18c+).

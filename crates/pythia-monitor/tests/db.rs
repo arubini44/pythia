@@ -247,6 +247,25 @@ fn blocking_chain_cancel_and_kill() {
     // And the blocker holds the TM lock on the table.
     let a_locks = queries::locks(&conn, a_sid).unwrap();
     assert!(a_locks.iter().any(|l| l.blocking), "{a_locks:?}");
+    // The waiter knows its blocker's serial# (a link to its details); the
+    // blocker's details list both waiters and its transaction, which a
+    // kill would roll back.
+    let a_serial = root.session.serial;
+    assert_eq!(waiter.blocking_serial, Some(a_serial));
+    let a_detail = queries::session_detail(&conn, a_sid, a_serial);
+    let mut blocked: Vec<i64> = a_detail.blocks.iter().map(|b| b.0).collect();
+    blocked.sort_unstable();
+    assert_eq!(blocked, expected);
+    let tx = a_detail.transaction.expect("A's transaction");
+    assert!(tx.undo_records >= 1, "{tx:?}");
+    assert_eq!(
+        queries::transaction(&conn, a_sid, a_serial).unwrap(),
+        Some(tx)
+    );
+    assert_eq!(
+        queries::transaction(&conn, b_sid, waiter_serial(&conn, b_sid)).unwrap(),
+        None
+    );
 
     // Cancel C's statement: its update fails with ORA-01013.
     let c_serial = queries::sessions(&conn, SessionFilter::default())
@@ -295,6 +314,46 @@ fn blocking_chain_cancel_and_kill() {
         .unwrap();
 }
 
+fn waiter_serial(conn: &Connection, sid: i64) -> i64 {
+    queries::sessions(conn, SessionFilter::default())
+        .unwrap()
+        .into_iter()
+        .find(|s| s.sid == sid)
+        .unwrap()
+        .serial
+}
+
+/// Disconnect after transaction: the session stays until its transaction
+/// ends, then goes.
+#[test]
+fn disconnect_after_transaction() {
+    let Some(conn) = dba() else { return };
+    let e = open_dba();
+    let (e_sid, e_serial) = (sid(&e), serial(&e));
+    e.execute(
+        "create global temporary table pythia_mon_disc (n number) on commit delete rows",
+        &[],
+    )
+    .ok();
+    e.execute("insert into pythia_mon_disc values (1)", &[])
+        .unwrap();
+    queries::disconnect_session(&conn, e_sid, e_serial).unwrap();
+    // Still there with its transaction.
+    let n: i64 = e
+        .query_row_as("select count(*) from pythia_mon_disc", &[])
+        .unwrap();
+    assert_eq!(n, 1);
+    // Ending it ends the session (ORA-00028 on its next call).
+    e.rollback().unwrap();
+    assert!(e.query_row_as::<i64>("select 1 from dual", &[]).is_err());
+    wait_for("the session to go", || {
+        !queries::sessions(&conn, SessionFilter::default())
+            .unwrap()
+            .iter()
+            .any(|s| s.sid == e_sid && s.serial == e_serial)
+    });
+}
+
 #[test]
 fn trace_round_trip() {
     let Some(conn) = dba() else { return };
@@ -322,7 +381,17 @@ fn trace_round_trip() {
     traced
         .execute("begin null; /* orui_trace_plsql */ end;", &[])
         .unwrap();
+    let traced_now = |conn: &Connection| {
+        queries::sessions(conn, SessionFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|s| s.sid == traced_sid)
+            .unwrap()
+            .sql_trace
+    };
+    assert!(traced_now(&conn), "the session list says it's traced");
     queries::trace_self(&traced, false).unwrap();
+    assert!(!traced_now(&conn));
 
     let (dir, file) = queries::session_trace_file(&conn, traced_sid)
         .unwrap()
