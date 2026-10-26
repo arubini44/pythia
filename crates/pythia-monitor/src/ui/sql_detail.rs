@@ -415,7 +415,7 @@ fn analysis(d: &SqlDetail) -> Analysis {
     Analysis {
         title: format!("SQL {}", d.sql_id),
         sql: d.text.clone(),
-        sql_id: Some(d.sql_id.clone()).filter(|_| d.plan.is_empty()),
+        sql_id: d.plan.is_empty().then(|| d.sql_id.clone()),
         details,
         binds: d
             .binds
