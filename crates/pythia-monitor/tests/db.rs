@@ -418,6 +418,32 @@ fn open_dba() -> Connection {
     connect("PYTHIA_TEST_DB_DBA").unwrap()
 }
 
+fn serial(c: &Connection) -> i64 {
+    c.query_row_as(
+        "select serial# from v$session where sid = sys_context('USERENV', 'SID')",
+        &[],
+    )
+    .unwrap()
+}
+
+/// Details of a session that has ended don't show the session that got its
+/// SID since: the views without serial# aren't read (#75).
+#[test]
+fn session_detail_of_a_reused_sid() {
+    let Some(conn) = dba() else { return };
+    let other = open_dba();
+    let (other_sid, other_serial) = (sid(&other), serial(&other));
+    let detail = queries::session_detail(&conn, other_sid, other_serial);
+    assert!(detail.session.is_some());
+    assert!(!detail.stats.is_empty());
+    // Another serial#: the session the details were for is gone.
+    let detail = queries::session_detail(&conn, other_sid, other_serial + 1);
+    assert!(detail.session.is_none());
+    assert!(detail.stats.is_empty(), "{:?}", detail.stats);
+    assert!(detail.waits.is_empty() && detail.cursors.is_empty() && detail.locks.is_empty());
+    assert!(detail.errors.is_empty(), "{:?}", detail.errors);
+}
+
 /// Object names of locks and row lock waits on tables the monitoring user
 /// has no privileges on: ALL_OBJECTS doesn't list them, DBA_OBJECTS does
 /// (#76). Needs `PYTHIA_TEST_DB`, a user with SELECT_CATALOG_ROLE only.

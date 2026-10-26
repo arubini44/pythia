@@ -667,11 +667,28 @@ impl SessionRow {
         self.status == "ACTIVE"
     }
 
+    /// A blocker the session list doesn't have, in the blocking tree: only
+    /// its SID is known (see [`SessionRow::unknown`]).
+    pub fn is_unknown(&self) -> bool {
+        self.status == UNKNOWN
+    }
+
+    fn unknown(sid: i64) -> Self {
+        SessionRow {
+            sid,
+            status: UNKNOWN.into(),
+            ..SessionRow::default()
+        }
+    }
+
     /// `sid,serial#`, as used in `ALTER SYSTEM KILL SESSION`.
     pub fn handle(&self) -> String {
         format!("{},{}", self.sid, self.serial)
     }
 }
+
+/// Status of [`SessionRow::unknown`] (not one of `V$SESSION.STATUS`).
+const UNKNOWN: &str = "UNKNOWN";
 
 const SESSION_SELECT: &str = "\
 select s.sid, s.serial#, s.username, s.status, s.osuser, s.machine, s.program, s.module, s.action, \
@@ -795,11 +812,7 @@ pub fn build_blocking_tree(sessions: &[SessionRow]) -> Vec<BlockingNode> {
         let session = by_sid
             .get(&sid)
             .map(|s| (*s).clone())
-            .unwrap_or_else(|| SessionRow {
-                sid,
-                status: "UNKNOWN".into(),
-                ..SessionRow::default()
-            });
+            .unwrap_or_else(|| SessionRow::unknown(sid));
         let kids = children
             .get(&sid)
             .into_iter()
@@ -908,6 +921,12 @@ pub fn session_detail(conn: &Connection, sid: i64, serial: i64) -> SessionDetail
             Ok(())
         })(),
     );
+    // The other views know sessions by SID alone: once the session has
+    // ended, its SID may belong to another one.
+    if d.session.is_none() {
+        d.errors = errors;
+        return d;
+    }
     let sql_id = d.session.as_ref().and_then(|s| s.sql_id.clone());
     let prev_sql_id = d.session.as_ref().and_then(|s| s.prev_sql_id.clone());
     let full_text = |id: &str| -> Result<Option<String>> {
