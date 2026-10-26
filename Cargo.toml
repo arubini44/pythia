@@ -42,6 +42,8 @@ ropey = "1.6"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 directories = "6"
+# The Oracle homes in the Windows registry (pythia-config::tns).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 keyring = "4"

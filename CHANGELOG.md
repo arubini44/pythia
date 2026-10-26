@@ -6,6 +6,13 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Net service names: tnsnames.ora is also found where Oracle's own clients
+  find it: `TNS_ADMIN` and the Oracle homes in the Windows registry, and
+  `network/admin` of a full client (`ORACLE_HOME\bin` or `$ORACLE_HOME/lib`
+  on the library path). A name Pythia can't look up says what it searched,
+  not "no configuration directory specified" (#67).
+
 ## [0.4.0] - 2026-10-26
 
 ### Added

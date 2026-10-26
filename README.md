@@ -196,7 +196,9 @@ Pythia connects to Oracle directly, with a pure-Rust driver: **no Oracle
 client libraries are needed**. Easy Connect strings (`host:port/service`)
 work as they are; for net service names, point `TNS_ADMIN` at the directory
 with your `tnsnames.ora` (or put it into `$ORACLE_HOME/network/admin`), and
-Pythia offers the aliases when connecting.
+Pythia offers the aliases when connecting. The tnsnames.ora of an Oracle
+Client that is already installed is found the way Oracle finds it: through
+the registry on Windows (`TNS_ADMIN`, the Oracle homes) and the library path.
 
 **Database versions:** Pythia is developed against Oracle 23ai and tested
 against 18c XE and 21c XE. A few features need a newer release: the
