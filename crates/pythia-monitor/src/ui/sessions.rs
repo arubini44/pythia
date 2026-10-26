@@ -218,7 +218,7 @@ impl SessionsView {
             );
             if let Some(field) = &self.field {
                 let chip = egui::Button::new(
-                    RichText::new(format!("{}  ✕", field.label()))
+                    RichText::new(format!("{}  ×", field.label()))
                         .color(ui.visuals().hyperlink_color),
                 )
                 .small();

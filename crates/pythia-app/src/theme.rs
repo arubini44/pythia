@@ -198,6 +198,81 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
 
+    /// Every character the UI's source writes has a glyph in the fonts
+    /// Pythia installs; one without (`✕` in a chip) is drawn as a box
+    /// (#91). Comments and unit tests aren't shown, so they're skipped.
+    #[test]
+    fn ui_characters_have_glyphs() {
+        fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut h = Harness::new_ui(|ui| {
+            ui.label("Pythia");
+        });
+        super::install(&h.ctx);
+        h.run();
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        for krate in std::fs::read_dir(&crates).unwrap().flatten() {
+            let src = krate.path().join("src");
+            if src.is_dir() {
+                sources(&src, &mut files);
+            }
+        }
+        assert!(files.len() > 50, "found {} sources", files.len());
+        // The proportional family's fonts, as installed.
+        let fonts: Vec<(Vec<u8>, u32)> = h.ctx.fonts(|f| {
+            let defs = f.definitions();
+            defs.families[&egui::FontFamily::Proportional]
+                .iter()
+                .map(|name| {
+                    let data = &defs.font_data[name];
+                    (data.font.to_vec(), data.index)
+                })
+                .collect()
+        });
+        let has_glyph = |c: char| {
+            use skrifa::MetadataProvider;
+            fonts.iter().any(|(bytes, index)| {
+                skrifa::FontRef::from_index(bytes, *index)
+                    .is_ok_and(|font| font.charmap().map(c).is_some())
+            })
+        };
+        assert!(has_glyph('→') && has_glyph('×') && !has_glyph('\u{10FFFF}'));
+        let mut missing = Vec::new();
+        for file in files {
+            let name = file.file_name().unwrap().to_string_lossy();
+            if name == "screenshots.rs" || name == "test_db.rs" || name == "tests.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            let shown = text.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+            for (n, line) in shown.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for c in line.chars().filter(|c| !c.is_ascii()) {
+                    if !has_glyph(c) {
+                        missing.push(format!(
+                            "{c:?} (U+{:04X}) {}:{}",
+                            c as u32,
+                            file.display(),
+                            n + 1
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "no glyph for:\n{}", missing.join("\n"));
+    }
+
     /// Buttons without an idle frame (icon buttons) keep their size on hover.
     #[test]
     fn frameless_button_keeps_size_on_hover() {

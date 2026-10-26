@@ -32,6 +32,9 @@ All notable changes to Pythia are documented here. The format follows
   Without `V$OSSTAT` the dashboard lost its whole instance header; it
   shows without the CPU count, and the load findings that need the count
   are left out instead of judging against one CPU (#90).
+- Monitor: the session list's filter chip ends in an × rather than a box;
+  its `✕` has no glyph in Pythia's fonts. A test now checks every character
+  the UI writes against the fonts (#91).
 
 ## [0.5.0] - 2026-10-26
 
