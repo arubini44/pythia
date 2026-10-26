@@ -2898,6 +2898,129 @@ fn drag_object_into_editor() {
     );
 }
 
+/// Debug… on a subprogram's name in a program window: in the spec and in
+/// the body for what the spec declares, not for the body's private
+/// subprograms. It opens a SQL window with a block that calls the
+/// procedure and debugs it right away: the body gets debug information and
+/// the run stops on entry to the procedure, once.
+#[test]
+fn debug_from_package_spec() {
+    let (Some((profile, password)), Ok(host)) = (profile(), std::env::var("PYTHIA_DEBUG_HOST"))
+    else {
+        eprintln!("PYTHIA_TEST_DB / PYTHIA_DEBUG_HOST not set, skipping");
+        return;
+    };
+    let setup = pythia_debugger::target::setup_statements(&profile.username, &host);
+    crate::test_db::as_dba(&setup.iter().map(String::as_str).collect::<Vec<_>>());
+    let spec = std::env::var("PYTHIA_TEST_DB").unwrap();
+    let (cred, db) = spec.rsplit_once('@').unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let conn = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+    for ddl in [
+        "create or replace package pythia_entry_pkg as\n  procedure run;\nend;",
+        "create or replace package body pythia_entry_pkg as\n  \
+         function helper(p_n number) return number is\n  begin\n    return p_n * 2;\n  end;\n\n  \
+         procedure run is\n    l_total number := 0;\n  begin\n    for i in 1 .. 3 loop\n      \
+         l_total := l_total + helper(i);\n    end loop;\n  end;\nend;",
+    ] {
+        conn.execute(ddl, &[]).unwrap();
+    }
+    use pythia_debugger::{StopReason, Unit, UnitType};
+    let body = Unit::new("PYTHIA", "PYTHIA_ENTRY_PKG", UnitType::PackageBody);
+    assert!(!pythia_debugger::target::has_debug_info(&conn, &body).unwrap());
+
+    let mut h = harness(true);
+    h.state_mut().test_settings_mut().debug_host = host;
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Program {
+        connection: "pythia@FREEPDB1".into(),
+        object: ObjectRef {
+            owner: "PYTHIA".into(),
+            name: "PYTHIA_ENTRY_PKG".into(),
+            object_type: pythia_db::ObjectType::Package,
+        },
+    });
+    wait_until(&mut h, "source", |app| !app.test_focused_busy());
+    let right_click = |h: &mut Ui, word: &str| {
+        let editor = h.state_mut().test_program_editor().expect("program editor");
+        let offset = editor.text().find(word).expect(word) + 2;
+        let pos = editor.inner().offset_pos(offset).expect("drawn");
+        h.event(egui::Event::PointerMoved(pos));
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            h.step();
+        }
+    };
+    // Waits until the menu shows `label`, maybe with a shortcut (the outline
+    // is worked out shortly after the source loaded).
+    let menu_item = |h: &mut Ui, label: &str| {
+        let start = Instant::now();
+        while h.query_by_label_contains(label).is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "no menu item {label}"
+            );
+            h.step();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    };
+
+    // The body: its public procedure, not the private helper.
+    h.state_mut().test_program().active = 1;
+    h.run_steps(2);
+    right_click(&mut h, "run is");
+    menu_item(&mut h, "Debug…");
+    assert!(h.query_by_label("Test…").is_some());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    right_click(&mut h, "helper(p_n");
+    menu_item(&mut h, "Copy");
+    assert!(h.query_by_label("Debug…").is_none(), "private");
+    h.key_press(egui::Key::Escape);
+
+    // The spec: Debug… on the procedure.
+    h.state_mut().test_program().active = 0;
+    h.run_steps(2);
+    right_click(&mut h, "run;");
+    menu_item(&mut h, "Debug…");
+    save(&mut h, "debug-from-spec-menu");
+    h.get_by_label("Debug…").click();
+    wait_until(&mut h, "stop on entry", |app| {
+        app.test_debug().is_suspended()
+    });
+    let debug = h.state().test_debug();
+    assert_eq!(
+        debug.state,
+        pythia_debugger::ui::State::Suspended {
+            reason: StopReason::Entry
+        },
+        "{:?}",
+        debug.log
+    );
+    assert_eq!(debug.stack[0].location.unit, body, "{:?}", debug.stack);
+    assert_eq!(debug.stack[0].method, "RUN");
+    assert_eq!(
+        debug.stack[0].location.line,
+        Some(7),
+        "the procedure's header"
+    );
+    assert!(pythia_debugger::target::has_debug_info(&conn, &body).unwrap());
+    assert_eq!(debug.entry, Some((body.clone(), "RUN".to_owned())));
+    h.state_mut()
+        .test_debug_mut()
+        .command(pythia_debugger::DebugCommand::Resume);
+    wait_until(&mut h, "finish", |app| !app.test_debug_running());
+
+    conn.execute("drop package pythia_entry_pkg", &[]).unwrap();
+}
+
 /// Right-clicking a name in an editor offers what the object browser offers
 /// for it, without Drop; package members open at the subprogram.
 #[test]

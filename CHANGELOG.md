@@ -6,6 +6,14 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Debug…** next to **Test…** on procedures, functions and package
+  members: it opens the test block in a SQL window and debugs it right away,
+  stopping on entry to the subprogram (any overload) without a breakpoint;
+  its unit is compiled with debug information first. In a program window,
+  right-clicking a subprogram's name in the spec, or a public one in the
+  body, offers Test… and Debug… too (#71).
+
 ## [0.4.1] - 2026-10-26
 
 ### Added

@@ -523,6 +523,19 @@ impl PythiaApp {
                     self.execute(id, false);
                 }
             }
+            OpenRequest::Debug {
+                connection,
+                text,
+                entry,
+            } => {
+                let mut window = SqlWindow::new(self.new_sql_title(), text);
+                window.state.debug_entry = Some(entry);
+                // Debugs the block like Debug in the window (asking for
+                // its binds first).
+                let effects = window.debug_current();
+                let id = self.add_doc(Some(connection), DocKind::Sql(window));
+                self.apply(Some(id), effects);
+            }
             OpenRequest::Program { connection, object } => {
                 if !self.focus_existing(&connection, &object, true) {
                     self.add_doc(
@@ -1555,7 +1568,11 @@ impl PythiaApp {
         let host = Some(self.settings.debug_host.trim().to_owned())
             .filter(|h| !h.is_empty())
             .unwrap_or_else(pythia_debugger::target::default_host);
-        let actions = self.debug.start(block, host, self.notify.callback());
+        let entry = match self.docs.get(&doc).map(|d| &d.kind) {
+            Some(DocKind::Sql(w)) => w.state.debug_entry.clone(),
+            _ => None,
+        };
+        let actions = self.debug.start(block, host, entry, self.notify.callback());
         self.debug_run = Some((doc, 0));
         // Only this window shows where its block is stopped.
         for (id, d) in &mut self.docs {
@@ -1590,14 +1607,15 @@ impl PythiaApp {
                         continue;
                     };
                     let session = conn.doc_session(doc, autocommit, &self.notify);
-                    // Units with breakpoints need debug info; compile those
-                    // without on the same session so it happens before the
-                    // block runs.
+                    // Units with breakpoints, and the one to stop on entry
+                    // to, need debug info; compile those without on the
+                    // same session so it happens before the block runs.
                     let units: std::collections::BTreeSet<pythia_debugger::Unit> = self
                         .debug
                         .breakpoints
                         .iter()
                         .map(|b| b.unit.clone())
+                        .chain(self.debug.entry.iter().map(|(unit, _)| unit.clone()))
                         .collect();
                     for unit in units {
                         let task: pythia_db::TaskFn =
@@ -1952,7 +1970,7 @@ impl PythiaApp {
                         Some(DocKind::Sql(w)) => w.debug_current(),
                         _ => {
                             self.log(
-                                "Open a SQL window with a PL/SQL block (e.g. from Test…) to debug",
+                                "Open a SQL window with a PL/SQL block to debug, or right-click a procedure or function → Debug…",
                             );
                             Effects::default()
                         }
@@ -2510,7 +2528,7 @@ impl PythiaApp {
             Some(DocKind::Sql(w)) => w,
             Some(DocKind::Program(_)) => {
                 return Err(
-                    "Debugging starts from a SQL window: Test… on a procedure or function opens one with a block that calls it",
+                    "Debugging starts from a SQL window: right-click a subprogram's name → Debug… opens one with a block that calls it",
                 );
             }
             _ => return Err("Only in SQL windows"),

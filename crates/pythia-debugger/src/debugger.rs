@@ -152,6 +152,10 @@ struct Session {
     watches: Vec<String>,
     /// The JDWP request for exception events, when breaking on exceptions.
     exception_request: Option<i32>,
+    /// The subprogram to stop in once ([`DebugCommand::BreakOnEntry`]),
+    /// and its JDWP breakpoints (one per overload) once its unit is loaded.
+    entry: Option<(Unit, String)>,
+    entry_requests: Vec<i32>,
     /// The step in progress, if any.
     step: Option<Step>,
     /// Units without debug information loaded during the step into in
@@ -212,6 +216,8 @@ impl Session {
             hits: HashMap::new(),
             watches: Vec::new(),
             exception_request: None,
+            entry: None,
+            entry_requests: Vec::new(),
             step: None,
             stepped_over: Vec::new(),
             frames: Vec::new(),
@@ -293,6 +299,14 @@ impl Session {
                             self.jdwp.clear_event(jdwp::kind::EXCEPTION, request)?;
                         }
                         _ => {}
+                    }
+                    false
+                }
+                DebugCommand::BreakOnEntry { unit, subprogram } => {
+                    self.clear_entry()?;
+                    self.entry = Some((unit.clone(), subprogram));
+                    if let Some(class) = self.classes.get(&unit).copied() {
+                        self.bind_entry(class, events)?;
                     }
                     false
                 }
@@ -381,6 +395,7 @@ impl Session {
             let mut breakpoint: Option<u64> = None;
             let mut exception: Option<(u64, String)> = None;
             let mut stepped: Option<u64> = None;
+            let mut entered: Option<u64> = None;
             for event in batch {
                 debug!(?event, "debug event");
                 match event {
@@ -408,9 +423,15 @@ impl Session {
                             for bp in pending {
                                 self.bind(&bp, class, events)?;
                             }
+                            if self.entry.as_ref().is_some_and(|(u, _)| *u == unit) {
+                                self.bind_entry(class, events)?;
+                            }
                         }
                     }
                     Event::SingleStep { thread, .. } => stepped = Some(thread),
+                    Event::Breakpoint {
+                        request, thread, ..
+                    } if self.entry_requests.contains(&request) => entered = Some(thread),
                     Event::Breakpoint {
                         request,
                         thread,
@@ -438,6 +459,8 @@ impl Session {
                 Some((thread, StopReason::Breakpoint, None))
             } else if let Some((thread, text)) = exception {
                 Some((thread, StopReason::Exception, Some(text)))
+            } else if let Some(thread) = entered {
+                Some((thread, StopReason::Entry, None))
             } else if let Some(thread) = stepped {
                 (!self.step_again(thread)?).then_some((thread, StopReason::Step, None))
             } else {
@@ -447,6 +470,11 @@ impl Session {
                 // A step that ended elsewhere (at a breakpoint) must not fire
                 // later, after the user continues.
                 self.cancel_step();
+                // The entry stops once, also when a breakpoint there
+                // reported the stop.
+                if entered.is_some() {
+                    self.clear_entry()?;
+                }
                 self.suspended(thread, reason, exception, events)?;
                 flow = Flow::Stop;
             }
@@ -581,6 +609,57 @@ impl Session {
             line: Some(line as u32),
             error: None,
         });
+        Ok(())
+    }
+
+    /// Sets a JDWP breakpoint at the first line of every overload of the
+    /// entry subprogram in its loaded class.
+    fn bind_entry(&mut self, class: u64, events: &Events) -> Result<(), JdwpError> {
+        let Some((unit, subprogram)) = self.entry.clone() else {
+            return Ok(());
+        };
+        let mut found = false;
+        for method in self.jdwp.methods(class)? {
+            if !method.name.eq_ignore_ascii_case(&subprogram) {
+                continue;
+            }
+            found = true;
+            let first = self
+                .line_table(class, method.id)?
+                .into_iter()
+                .min_by_key(|(index, _)| *index);
+            let Some((index, _)) = first else {
+                continue;
+            };
+            let location = jdwp::Location {
+                type_tag: 1,
+                class,
+                method: method.id,
+                index,
+            };
+            let modifier = self.jdwp.modifier_location(&location);
+            let request =
+                self.jdwp
+                    .set_event(jdwp::kind::BREAKPOINT, jdwp::suspend::ALL, vec![modifier])?;
+            self.entry_requests.push(request);
+        }
+        if self.entry_requests.is_empty() {
+            let name = subprogram.to_lowercase();
+            events.send(DebugEvent::Error(if found {
+                format!("Can't stop in {name}: {unit} has no debug information")
+            } else {
+                format!("Can't stop in {name}: {unit} has no such subprogram")
+            }));
+        }
+        Ok(())
+    }
+
+    /// Forgets the entry subprogram and clears its breakpoints.
+    fn clear_entry(&mut self) -> Result<(), JdwpError> {
+        self.entry = None;
+        for request in std::mem::take(&mut self.entry_requests) {
+            self.jdwp.clear_event(jdwp::kind::BREAKPOINT, request)?;
+        }
         Ok(())
     }
 

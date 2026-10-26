@@ -106,6 +106,9 @@ pub struct DebugSession {
     editing: Option<(Breakpoint, String, u32)>,
     /// The block being debugged.
     block: String,
+    /// The subprogram the session stops in once, on entry: its unit and
+    /// name (see [`DebugCommand::BreakOnEntry`]).
+    pub entry: Option<(Unit, String)>,
     /// Why opaque variables have no contents, by unit and variable name.
     opaque_reasons: BTreeMap<(Unit, String), String>,
     /// Opaque variables asked about in this session (each once).
@@ -125,11 +128,13 @@ impl DebugSession {
     }
 
     /// Starts listening and asks the app to run `block` under the debugger.
-    /// `host` is how the database reaches this machine.
+    /// `host` is how the database reaches this machine; `entry` is a
+    /// subprogram to stop in when the block calls it (unit and name).
     pub fn start(
         &mut self,
         block: String,
         host: String,
+        entry: Option<(Unit, String)>,
         notify: impl Fn() + Send + 'static,
     ) -> Vec<DebugAction> {
         self.stop();
@@ -145,6 +150,7 @@ impl DebugSession {
         self.opaque_reasons.clear();
         self.opaque_asked.clear();
         self.block = block.clone();
+        self.entry = entry;
         match Debugger::listen("0.0.0.0:0", notify) {
             Ok(debugger) => {
                 for bp in self.breakpoints.difference(&self.disabled) {
@@ -161,6 +167,16 @@ impl DebugSession {
                 }
                 if self.break_on_exception {
                     debugger.send(DebugCommand::BreakOnException(true));
+                }
+                if let Some((unit, subprogram)) = &self.entry {
+                    debugger.send(DebugCommand::BreakOnEntry {
+                        unit: unit.clone(),
+                        subprogram: subprogram.clone(),
+                    });
+                    self.log.push(format!(
+                        "Stops on entry to {}",
+                        subprogram_label(unit, subprogram)
+                    ));
                 }
                 let port = debugger.port();
                 self.debugger = Some(debugger);
@@ -645,6 +661,7 @@ impl DebugSession {
                         StopReason::Breakpoint => format!("Stopped at breakpoint, {at}"),
                         StopReason::Step => format!("Stopped after step, {at}"),
                         StopReason::Pause => format!("Paused at {at}"),
+                        StopReason::Entry => format!("Stopped on entry, {at}"),
                         StopReason::Exception => format!(
                             "Exception at {at}: {}",
                             self.exception.as_deref().unwrap_or("raised")
@@ -882,6 +899,17 @@ fn unit_label(unit: &Unit) -> String {
     match unit.unit_type {
         UnitType::Block => "anonymous block".into(),
         _ => unit.name.to_lowercase(),
+    }
+}
+
+/// A subprogram of a unit, e.g. `orders_api.load_order` (a standalone
+/// procedure or function is just its name).
+fn subprogram_label(unit: &Unit, subprogram: &str) -> String {
+    match unit.unit_type {
+        UnitType::Package | UnitType::PackageBody | UnitType::Type | UnitType::TypeBody => {
+            format!("{}.{}", unit_label(unit), subprogram.to_lowercase())
+        }
+        _ => unit_label(unit),
     }
 }
 

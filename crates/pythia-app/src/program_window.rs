@@ -678,9 +678,17 @@ impl ProgramWindow {
                 }
             }
         }
-        let Some(part) = self.parts.get_mut(self.active) else {
+        // A package body's spec tells which of its subprograms are public
+        // (Test… and Debug… in the context menu); analyze it although it
+        // isn't shown.
+        let (before, rest) = self.parts.split_at_mut(self.active);
+        let Some(part) = rest.first_mut() else {
             return effects;
         };
+        let spec = before.first_mut().map(|spec| {
+            spec.assist.background(&mut spec.editor, ui);
+            &spec.assist
+        });
         if !part.errors.is_empty() {
             egui::Panel::bottom(egui::Id::new(("program-errors", cx.id)))
                 .resizable(true)
@@ -757,10 +765,21 @@ impl ProgramWindow {
                 out.hover_request = None;
             }
             effects.extend(part.assist.handle(&mut part.editor, &out, cx));
+            let subprogram = part.assist.context().filter(|_| !self.new).and_then(|c| {
+                let spec = spec.map_or(part.assist.outline(), |s| s.outline());
+                subprogram_at(
+                    &self.object,
+                    part.object_type,
+                    part.assist.outline(),
+                    spec,
+                    c.offset,
+                )
+            });
             effects.extend(crate::editor_menu::show(
                 &out.response,
                 &mut part.editor,
                 &mut part.assist,
+                subprogram,
                 cx,
             ));
             part.editor
@@ -989,6 +1008,50 @@ fn find_word(text: &str, word: &str) -> Option<usize> {
         .flatten()
 }
 
+/// The subprogram whose name is at `offset` in a part, for Test… and
+/// Debug…: the standalone procedure or function, or a subprogram of a
+/// package that its spec declares (`spec`; a block can't call private
+/// ones). Gives the object and, for a package, the member.
+fn subprogram_at(
+    object: &ObjectRef,
+    part_type: ObjectType,
+    outline: &[pythia_lsp_core::OutlineItem],
+    spec: &[pythia_lsp_core::OutlineItem],
+    offset: usize,
+) -> Option<(ObjectRef, Option<String>)> {
+    use pythia_lsp_core::{OutlineItem, OutlineKind as K};
+    let subprogram = |item: &&OutlineItem| matches!(item.kind, K::Procedure | K::Function);
+    let named = |item: &&OutlineItem| {
+        subprogram(item) && item.name_span.start <= offset && offset <= item.name_span.end
+    };
+    // The subprograms declared at the top of a package spec or body.
+    fn members(items: &[OutlineItem]) -> impl Iterator<Item = &OutlineItem> {
+        items
+            .iter()
+            .filter(|i| matches!(i.kind, K::PackageSpec | K::PackageBody))
+            .flat_map(|i| &i.children)
+    }
+    match part_type {
+        ObjectType::Procedure | ObjectType::Function => {
+            outline.iter().find(named).map(|_| (object.clone(), None))
+        }
+        ObjectType::Package | ObjectType::PackageBody => {
+            let item = members(outline).find(named)?;
+            members(spec)
+                .filter(subprogram)
+                .any(|d| d.name.eq_ignore_ascii_case(&item.name))
+                .then(|| {
+                    let package = ObjectRef {
+                        object_type: ObjectType::Package,
+                        ..object.clone()
+                    };
+                    (package, Some(item.name.to_uppercase()))
+                })
+        }
+        _ => None,
+    }
+}
+
 /// The debugger's name for a program window part.
 pub fn debug_unit(object: &ObjectRef, object_type: ObjectType) -> pythia_debugger::Unit {
     use pythia_debugger::UnitType;
@@ -1081,7 +1144,97 @@ fn markers(errors: &[CompileError]) -> Vec<Marker> {
 
 #[cfg(test)]
 mod tests {
-    use super::{enclosing_subprograms, member_span, subprograms};
+    use super::{enclosing_subprograms, member_span, subprogram_at, subprograms};
+    use crate::documents::ObjectRef;
+    use pythia_db::ObjectType;
+
+    /// Test… and Debug… on a subprogram's name: in the spec, in the body
+    /// when the spec declares it, and for a standalone function.
+    #[test]
+    fn subprogram_under_the_right_click() {
+        let spec = "create or replace package hr.emp_pkg as\n  procedure raise_salary(p_id number);\n  \
+                    g_rate number;\nend;";
+        let body = "create or replace package body hr.emp_pkg as\n  \
+                    procedure helper is begin null; end;\n  \
+                    procedure raise_salary(p_id number) is\n  begin\n    helper;\n  end;\nend;";
+        let (spec_outline, body_outline) = (
+            pythia_lsp_core::outline(spec),
+            pythia_lsp_core::outline(body),
+        );
+        let package = ObjectRef {
+            owner: "HR".into(),
+            name: "EMP_PKG".into(),
+            object_type: ObjectType::Package,
+        };
+        let at = |text: &str, word: &str| text.find(word).unwrap() + 2;
+        let member = Some((package.clone(), Some("RAISE_SALARY".to_owned())));
+        let spec_at = |offset| {
+            subprogram_at(
+                &package,
+                ObjectType::Package,
+                &spec_outline,
+                &spec_outline,
+                offset,
+            )
+        };
+        let body_at = |offset| {
+            subprogram_at(
+                &package,
+                ObjectType::PackageBody,
+                &body_outline,
+                &spec_outline,
+                offset,
+            )
+        };
+        assert_eq!(spec_at(at(spec, "raise_salary")), member);
+        // The end of the name counts (a click on its last letter's right half).
+        let end = spec.find("raise_salary").unwrap() + "raise_salary".len();
+        assert_eq!(spec_at(end), member);
+        assert_eq!(spec_at(at(spec, "p_id")), None);
+        assert_eq!(spec_at(at(spec, "g_rate")), None);
+        assert_eq!(body_at(at(body, "raise_salary")), member);
+        assert_eq!(body_at(at(body, "helper")), None, "private");
+        assert_eq!(body_at(at(body, "helper;")), None, "a call");
+        // Without the spec's outline the body offers nothing.
+        assert_eq!(
+            subprogram_at(
+                &package,
+                ObjectType::PackageBody,
+                &body_outline,
+                &[],
+                at(body, "raise_salary")
+            ),
+            None
+        );
+
+        let function = ObjectRef {
+            owner: "HR".into(),
+            name: "TWICE".into(),
+            object_type: ObjectType::Function,
+        };
+        let text = "create or replace function twice(p_n number) return number is\nbegin\n  return p_n * 2;\nend;";
+        let outline = pythia_lsp_core::outline(text);
+        assert_eq!(
+            subprogram_at(
+                &function,
+                ObjectType::Function,
+                &outline,
+                &[],
+                at(text, "twice")
+            ),
+            Some((function.clone(), None))
+        );
+        assert_eq!(
+            subprogram_at(
+                &function,
+                ObjectType::Function,
+                &outline,
+                &[],
+                at(text, "return p_n")
+            ),
+            None
+        );
+    }
 
     #[test]
     fn subprograms_around_the_caret() {

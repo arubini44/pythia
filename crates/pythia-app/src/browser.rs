@@ -169,10 +169,12 @@ enum Pending {
         object: ObjectRef,
         kind: Template,
     },
-    /// Parameters of `member` (or the standalone unit) for a test script.
+    /// Parameters of `member` (or the standalone unit) for a test script,
+    /// to debug or not.
     Test {
         object: ObjectRef,
         member: Option<String>,
+        debug: bool,
     },
     TestLink(ObjectRef),
     /// DDL for a script that replaces the object.
@@ -536,6 +538,7 @@ impl Browser {
         answer: crate::catalog::Answer,
         object: &ObjectRef,
         member: Option<&str>,
+        debug: bool,
         effects: &mut Effects,
         log: &mut Vec<String>,
     ) {
@@ -556,13 +559,30 @@ impl Browser {
             None => object.qualified(),
         };
         let text = crate::test_script::test_block(&qualified.to_lowercase(), found);
-        if let Some(connection) = self.connection.clone() {
-            effects.open.push(OpenRequest::Sql {
+        let Some(connection) = self.connection.clone() else {
+            return;
+        };
+        effects.open.push(if debug {
+            // A package's subprograms run in its body.
+            let unit_type = match object.object_type {
+                ObjectType::Package => ObjectType::PackageBody,
+                t => t,
+            };
+            OpenRequest::Debug {
+                connection,
+                text,
+                entry: (
+                    crate::program_window::debug_unit(object, unit_type),
+                    found.name.clone(),
+                ),
+            }
+        } else {
+            OpenRequest::Sql {
                 connection,
                 text,
                 run: false,
-            });
-        }
+            }
+        });
     }
 
     pub fn on_event(&mut self, event: DbEvent, log: &mut Vec<String>) -> Effects {
@@ -588,11 +608,21 @@ impl Browser {
                 self.accounts.insert(t, loaded);
                 return effects;
             }
-            if let Some(Pending::Test { object, member }) = self.pending.remove(&id) {
+            if let Some(Pending::Test {
+                object,
+                member,
+                debug,
+            }) = self.pending.remove(&id)
+            {
                 match result.map(|any| any.downcast::<crate::catalog::Answer>()) {
-                    Ok(Ok(answer)) => {
-                        self.open_test(*answer, &object, member.as_deref(), &mut effects, log)
-                    }
+                    Ok(Ok(answer)) => self.open_test(
+                        *answer,
+                        &object,
+                        member.as_deref(),
+                        debug,
+                        &mut effects,
+                        log,
+                    ),
                     Ok(Err(_)) => {}
                     Err(e) => log.push(format!("Test script: {e}")),
                 }
@@ -1310,6 +1340,11 @@ impl Browser {
                             actions.push(ObjectAction::Test(package.clone(), Some(m.name.clone())));
                             ui.close();
                         }
+                        if ui.button("Debug…").clicked() {
+                            actions
+                                .push(ObjectAction::Debug(package.clone(), Some(m.name.clone())));
+                            ui.close();
+                        }
                         if ui.button("Edit package body").clicked() {
                             let body = ObjectRef {
                                 object_type: ObjectType::PackageBody,
@@ -1628,22 +1663,40 @@ impl Browser {
                 self.pending.insert(id, Pending::TestLink(object));
                 effects.request(Target::Meta, DbRequest::Meta { id, query });
             }
-            ObjectAction::Test(object, member) => {
-                let id = request_id();
-                let request = pythia_lsp_core::CatalogRequest::Members {
-                    owner: object.owner.clone(),
-                    name: object.name.clone(),
-                };
-                self.pending.insert(id, Pending::Test { object, member });
-                effects.request(
-                    Target::Main,
-                    DbRequest::Task {
-                        id,
-                        task: crate::catalog::task(request),
-                    },
-                );
-            }
+            ObjectAction::Test(object, member) => self.request_test(object, member, false, effects),
+            ObjectAction::Debug(object, member) => self.request_test(object, member, true, effects),
         }
+    }
+
+    /// Fetches the parameters for a test block of `member` (or the
+    /// standalone unit), to open or to debug.
+    fn request_test(
+        &mut self,
+        object: ObjectRef,
+        member: Option<String>,
+        debug: bool,
+        effects: &mut Effects,
+    ) {
+        let id = request_id();
+        let request = pythia_lsp_core::CatalogRequest::Members {
+            owner: object.owner.clone(),
+            name: object.name.clone(),
+        };
+        self.pending.insert(
+            id,
+            Pending::Test {
+                object,
+                member,
+                debug,
+            },
+        );
+        effects.request(
+            Target::Main,
+            DbRequest::Task {
+                id,
+                task: crate::catalog::task(request),
+            },
+        );
     }
 
     fn drop_confirm_ui(&mut self, ctx: &egui::Context, effects: &mut Effects) {
@@ -1910,6 +1963,13 @@ pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Op
             "Test…",
             ObjectAction::Test(object.clone(), options.member.clone()),
         );
+        if options.dialect.supports(Feature::Debugger) {
+            item(
+                ui,
+                "Debug…",
+                ObjectAction::Debug(object.clone(), options.member.clone()),
+            );
+        }
     }
     item(ui, "Describe", ObjectAction::Describe(object.clone()));
     if t == ObjectType::Table && editors {
@@ -1997,6 +2057,9 @@ pub enum ObjectAction {
     CopyQualified(ObjectRef),
     Drop(ObjectRef),
     Test(ObjectRef, Option<String>),
+    /// Test… in a SQL window that debugs right away, stopping on entry to
+    /// the subprogram.
+    Debug(ObjectRef, Option<String>),
     /// Open the package at this subprogram.
     EditAt(ObjectRef, String),
     /// Show the object in the browser's tree.

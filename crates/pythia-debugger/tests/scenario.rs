@@ -966,3 +966,38 @@ fn recompiling_keeps_debug_information() {
     assert_eq!(status(&api), "VALID");
     assert!(target::has_debug_info(&conn, &api).unwrap());
 }
+
+/// Debug… on a package function: the session stops when execution first
+/// enters it, at its header with the parameters set, without a breakpoint
+/// of the user's; later calls (it recurses, and runs for every VIP order)
+/// don't stop again.
+#[test]
+fn stop_on_entry() {
+    let Some((_lock, _conn, s)) = setup() else {
+        return;
+    };
+    let pricing = Unit::new(OWNER, "DBGX_PRICING", UnitType::PackageBody);
+    let h = Harness::new();
+    h.send(DebugCommand::BreakOnEntry {
+        unit: pricing.clone(),
+        subprogram: "tiered".into(),
+    });
+    let target = run_target(h.debugger.port(), RUN);
+    let (stop, _) = h.stop_full();
+    eprintln!("{}", s.describe(&stop));
+    assert_eq!((stop.reason, &stop.unit), (StopReason::Entry, &pricing));
+    assert_eq!(methods(&stop)[..2], ["TIERED", "DISCOUNT"]);
+    assert!(
+        s.line(&stop.unit, stop.line)
+            .starts_with("function tiered("),
+        "the function's header"
+    );
+    assert_eq!(val(&stop.variables, "P_LEVEL"), Some("1"));
+    h.send(DebugCommand::StepOver);
+    let (stop, _) = h.stop_full();
+    eprintln!("{}", s.describe(&stop));
+    assert_eq!(stop.reason, StopReason::Step);
+    h.send(DebugCommand::Resume);
+    assert!(h.next_stop().is_none(), "stops once");
+    target.join().unwrap().expect("target ran to completion");
+}

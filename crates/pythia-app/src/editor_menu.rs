@@ -3,20 +3,24 @@
 //! commands.
 
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
+use pythia_db::Feature;
 use pythia_ui::icons::Icon;
 
 use crate::assist::{Assist, ContextTarget, Request};
-use crate::browser::{MenuOptions, object_menu};
+use crate::browser::{MenuOptions, ObjectAction, object_menu};
 use crate::commands::{Command, Keymap};
-use crate::documents::{DocContext, Effects};
+use crate::documents::{DocContext, Effects, ObjectRef};
 use crate::editor::Editor;
 
 /// Shows the context menu of an editor on right-click; call every frame
 /// after `Editor::ui` and `Assist::handle` with the editor's response.
+/// `subprogram` is the one whose declaration was right-clicked in a program
+/// window (object, and member of a package), to test or debug.
 pub fn show(
     response: &egui::Response,
     editor: &mut Editor,
     assist: &mut Assist,
+    subprogram: Option<(ObjectRef, Option<String>)>,
     cx: &DocContext,
 ) -> Effects {
     let mut effects = Effects::default();
@@ -75,6 +79,29 @@ pub fn show(
                 ui.separator();
             }
             Some((_, ContextTarget::Nothing)) | None => {}
+        }
+        if let (Some((object, member)), Some(connection)) = (&subprogram, &cx.connection)
+            && cx.dialect.supports(Feature::PlSql)
+        {
+            let mut action = |ui: &mut egui::Ui, label: &str, action: ObjectAction| {
+                if ui.button(label).clicked() {
+                    effects.object_actions.push((connection.clone(), action));
+                    ui.close();
+                }
+            };
+            action(
+                ui,
+                "Test…",
+                ObjectAction::Test(object.clone(), member.clone()),
+            );
+            if cx.dialect.supports(Feature::Debugger) {
+                action(
+                    ui,
+                    "Debug…",
+                    ObjectAction::Debug(object.clone(), member.clone()),
+                );
+            }
+            ui.separator();
         }
 
         let selected = editor.selection().is_some();

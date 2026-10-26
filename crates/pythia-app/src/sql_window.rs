@@ -88,6 +88,9 @@ pub struct RunState {
     /// Editor line where the debugged block starts, while this window's
     /// block is the one being debugged.
     pub debug_start: Option<usize>,
+    /// The subprogram the window was opened to debug (Debug…): its debug
+    /// runs stop on entry to it.
+    pub debug_entry: Option<(pythia_debugger::Unit, String)>,
     /// Whether Debug has a block to run, and the editor position that was
     /// worked out for.
     debuggable: Option<(EditorPosition, bool)>,
@@ -384,7 +387,7 @@ impl SqlWindow {
         };
         if !is_debuggable(&stmt) {
             self.warn(
-                "Debugging runs an anonymous block (BEGIN … END;). Use Test… on a procedure or function to create one.",
+                "Debugging runs an anonymous block (BEGIN … END;). Debug… on a procedure or function creates one and debugs it.",
             );
             self.state.bottom = BottomTab::Messages;
             return effects;
@@ -1368,6 +1371,7 @@ impl SqlWindow {
                 &out.response,
                 &mut self.editor,
                 &mut self.assist,
+                None,
                 cx,
             ));
             self.editor
