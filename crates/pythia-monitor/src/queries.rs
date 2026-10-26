@@ -2601,7 +2601,7 @@ pub fn plan_history(conn: &Connection, sql_id: &str) -> Result<Vec<PlanHistoryRo
            join dba_hist_snapshot sn \
              on sn.snap_id = s.snap_id and sn.dbid = s.dbid and sn.instance_number = s.instance_number \
           where s.sql_id = :1 \
-          order by s.snap_id, s.plan_hash_value",
+          order by sn.end_interval_time, s.plan_hash_value",
         &[&sql_id],
         |r| {
             let f = |i| -> Result<f64> { Ok(get::<Option<f64>>(r, i)?.unwrap_or(0.0)) };
@@ -2621,19 +2621,43 @@ pub fn plan_history(conn: &Connection, sql_id: &str) -> Result<Vec<PlanHistoryRo
 
 /// A plan AWR kept, from the AWR with `dbid` (a plan history row's).
 pub fn awr_plan(conn: &Connection, sql_id: &str, plan_hash: i64, dbid: i64) -> Result<Vec<String>> {
-    let sql = if compat::at_least(conn, 12, 2)? {
-        // A PDB with snapshots of its own keeps them apart from the root's.
-        "select plan_table_output from table(dbms_xplan.display_workload_repository( \
-           sql_id => :1, plan_hash_value => :2, dbid => :3, \
-           awr_location => case when sys_context('USERENV', 'CON_ID') > 2 \
-                                 and :3 = (select con_dbid from v$database) \
-                                then 'AWR_PDB' else 'AWR_ROOT' end))"
-    } else {
-        "select plan_table_output from table(dbms_xplan.display_awr(:1, :2, :3))"
+    let lines = |r: &oracle::Row| Ok(get::<Option<String>>(r, 0)?.unwrap_or_default());
+    if !compat::at_least(conn, 12, 2)? {
+        return query(
+            conn,
+            "select plan_table_output from table(dbms_xplan.display_awr(:1, :2, :3))",
+            &[&sql_id, &plan_hash, &dbid],
+            lines,
+        );
+    }
+    // A PDB with snapshots of its own keeps them apart from the root's,
+    // and its DBA_HIST views show both: look where the row's dbid says,
+    // then in the other one, which often keeps the same plan (#93).
+    let (con_id, pdb, root): (i64, i64, i64) = conn.query_row_as(
+        "select to_number(sys_context('USERENV', 'CON_ID')), con_dbid, dbid from v$database",
+        &[],
+    )?;
+    let lookup = |location: &str, dbid: i64| {
+        query(
+            conn,
+            "select plan_table_output from table(dbms_xplan.display_workload_repository( \
+               sql_id => :1, plan_hash_value => :2, dbid => :3, awr_location => :4))",
+            &[&sql_id, &plan_hash, &dbid, &location],
+            lines,
+        )
     };
-    query(conn, sql, &[&sql_id, &plan_hash, &dbid], |r| {
-        Ok(get::<Option<String>>(r, 0)?.unwrap_or_default())
-    })
+    if con_id <= 2 {
+        return lookup("AWR_ROOT", dbid);
+    }
+    let (first, other) = if dbid == pdb {
+        (("AWR_PDB", pdb), ("AWR_ROOT", root))
+    } else {
+        (("AWR_ROOT", dbid), ("AWR_PDB", pdb))
+    };
+    match lookup(first.0, first.1) {
+        Ok(plan) if !plan.is_empty() => Ok(plan),
+        _ => lookup(other.0, other.1),
+    }
 }
 
 /// An execution SQL Monitor watched (Tuning Pack): long-running, parallel
