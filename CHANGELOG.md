@@ -25,6 +25,13 @@ All notable changes to Pythia are documented here. The format follows
   A role not enabled in the session shows its grants as unknown instead
   of none, and a user that doesn't exist says so instead of *no data
   found* (#89).
+- Monitor: one view that isn't granted no longer takes down what doesn't
+  depend on it. With `V$SESSION` but not `V$SQL`, the session list, the
+  blocking tree and session details failed with *needs
+  SELECT_CATALOG_ROLE*; they show the sessions without their SQL text.
+  Without `V$OSSTAT` the dashboard lost its whole instance header; it
+  shows without the CPU count, and the load findings that need the count
+  are left out instead of judging against one CPU (#90).
 
 ## [0.5.0] - 2026-10-26
 

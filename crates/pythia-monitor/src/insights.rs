@@ -57,9 +57,17 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
             session: Some((b.sid, b.serial)),
         });
     }
-    let cpus = snap.instance.as_ref().map_or(1, |i| i.cpus.max(1)) as f64;
+    // Without the CPU count (V$OSSTAT not granted, #90) the load can't be
+    // judged.
+    let cpus = snap
+        .instance
+        .as_ref()
+        .and_then(|i| i.cpus)
+        .map(|n| n.max(1) as f64);
     if let Some(r) = rates {
-        if r.aas >= cpus {
+        if let Some(cpus) = cpus
+            && r.aas >= cpus
+        {
             out.push(Insight {
                 severity: Severity::Critical,
                 text: format!(
@@ -69,7 +77,9 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                 target: Some(Target::Sessions),
                 session: None,
             });
-        } else if r.aas >= cpus * 0.7 {
+        } else if let Some(cpus) = cpus
+            && r.aas >= cpus * 0.7
+        {
             out.push(Insight {
                 severity: Severity::Warning,
                 text: format!(
@@ -163,7 +173,7 @@ mod tests {
     fn findings_sorted_by_severity() {
         let snap = DashboardSnapshot {
             instance: Some(InstanceInfo {
-                cpus: 4,
+                cpus: Some(4),
                 ..InstanceInfo::default()
             }),
             blockers: vec![Blocker {

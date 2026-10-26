@@ -194,13 +194,13 @@ impl DashboardView {
                     } else {
                         String::new()
                     };
+                    let cpus = i.cpus.map(|n| format!(" · {n} CPUs")).unwrap_or_default();
                     ui.weak(format!(
-                        "Oracle {} · up {} · {} · {}{container} · {} CPUs",
+                        "Oracle {} · up {} · {} · {}{container}{cpus}",
                         i.version,
                         duration(i.uptime_secs as f64),
                         i.role,
                         i.log_mode,
-                        i.cpus
                     ));
                 }
                 None => {
@@ -312,7 +312,11 @@ impl DashboardView {
 
     fn kpis(&self, ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
         let r = self.rates;
-        let cpus = snap.instance.as_ref().map_or(1, |i| i.cpus.max(1)) as f64;
+        let cpus = snap
+            .instance
+            .as_ref()
+            .and_then(|i| i.cpus)
+            .map(|n| n.max(1) as f64);
         let rate = |f: fn(&Rates) -> f64| r.map_or("…".to_owned(), |r| compact(f(&r)));
         let mut tiles = Vec::new();
         if let Some(s) = snap.sessions {
@@ -334,8 +338,8 @@ impl DashboardView {
                 "Average active sessions",
                 r.map_or("…".into(), |r| format!("{:.2}", r.aas)),
             )
-            .detail(format!("{cpus:.0} CPUs available"))
-            .color(Some(style::level_color(ui, aas, cpus * 0.7, cpus))),
+            .detail(cpus.map_or("CPUs unknown".into(), |n| format!("{n:.0} CPUs available")))
+            .color(cpus.map(|n| style::level_color(ui, aas, n * 0.7, n))),
         );
         let host = r.and_then(|r| r.host_cpu_pct);
         tiles.push(
@@ -378,7 +382,11 @@ impl DashboardView {
     }
 
     fn charts(&self, ui: &mut Ui, snap: &DashboardSnapshot) {
-        let cpus = snap.instance.as_ref().map_or(1, |i| i.cpus.max(1)) as f64;
+        let cpus = snap
+            .instance
+            .as_ref()
+            .and_then(|i| i.cpus)
+            .map(|n| n.max(1) as f64);
         let series = |f: &dyn Fn(&Sample) -> Option<f64>| -> PlotPoints<'static> {
             self.history
                 .iter()
@@ -420,7 +428,9 @@ impl DashboardView {
                 p.line(
                     Line::new("DB CPU", series(&|s| Some(s.rates.db_cpu))).color(Palette::GREEN),
                 );
-                p.hline(HLine::new("CPUs", cpus).color(Palette::RED.gamma_multiply(0.6)));
+                if let Some(cpus) = cpus {
+                    p.hline(HLine::new("CPUs", cpus).color(Palette::RED.gamma_multiply(0.6)));
+                }
             });
             chart(&mut cols[1], "Host CPU %", "dash-cpu", &|p| {
                 p.line(
