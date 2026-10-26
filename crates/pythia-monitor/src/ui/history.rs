@@ -180,6 +180,10 @@ impl HistoryView {
                             Some(Err(e)) => {
                                 ui.colored_label(ui.visuals().error_fg_color, e);
                             }
+                            Some(Ok(lines)) if lines.is_empty() => {
+                                // The snapshot kept its statistics only (#93).
+                                ui.weak("AWR kept no plan for it in this snapshot.");
+                            }
                             Some(Ok(lines)) => {
                                 egui::ScrollArea::horizontal()
                                     .id_salt("awr-plan")
