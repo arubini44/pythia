@@ -52,6 +52,9 @@ All notable changes to Pythia are documented here. The format follows
 - MySQL errors read `ERROR 1046 (3D000): …` without an Oracle error number
   in front (`ORA-01046: ERROR 1046 …`) in SQL windows, program windows,
   object views and the table editor (#82).
+- MySQL: the object browser's database picker no longer lists a `PUBLIC`
+  database; only Oracle has one, for public synonyms and database links
+  (#83).
 
 ## [0.4.1] - 2026-10-26
 

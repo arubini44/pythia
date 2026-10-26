@@ -677,8 +677,11 @@ impl Browser {
         };
         match (pending, result) {
             (Pending::Schemas, Ok(Some(MetaResult::Schemas(mut s)))) => {
-                // Public synonyms and links belong to PUBLIC, which isn't a user.
-                if let Err(at) = s.binary_search_by(|u| u.as_str().cmp("PUBLIC")) {
+                // Oracle's public synonyms and links belong to PUBLIC, which
+                // isn't a user (ALL_USERS is in binary order).
+                if self.dialect == Dialect::ORACLE
+                    && let Err(at) = s.binary_search_by(|u| u.as_str().cmp("PUBLIC"))
+                {
                     s.insert(at, "PUBLIC".into());
                 }
                 self.schemas = Some(Loaded::Ready(s))
@@ -2246,6 +2249,31 @@ mod tests {
         assert!(text.contains("p_b => :p_b"), "{text}");
         let body = pythia_debugger::Unit::new("HR", "PKG", pythia_debugger::UnitType::PackageBody);
         assert_eq!(entry, Some((body, "P".to_owned())));
+    }
+
+    /// The schema list has Oracle's PUBLIC, which owns public synonyms and
+    /// links; MySQL has no such database (#83).
+    #[test]
+    fn public_schema_on_oracle_only() {
+        let schemas = |dialect: Dialect| {
+            let mut browser = Browser {
+                dialect,
+                ..Browser::default()
+            };
+            let mut effects = Effects::default();
+            browser.meta(&mut effects, Pending::Schemas, MetaQuery::Schemas);
+            let (_, DbRequest::Meta { id, .. }) = &effects.requests[0] else {
+                panic!("no schema request");
+            };
+            let result = Ok(MetaResult::Schemas(vec!["HR".into(), "SCOTT".into()]));
+            browser.on_event(DbEvent::Meta { id: *id, result }, &mut Vec::new());
+            match browser.schemas {
+                Some(Loaded::Ready(s)) => s,
+                _ => panic!("schemas not loaded"),
+            }
+        };
+        assert_eq!(schemas(Dialect::ORACLE), ["HR", "PUBLIC", "SCOTT"]);
+        assert_eq!(schemas(Dialect::MYSQL), ["HR", "SCOTT"]);
     }
 
     #[test]
