@@ -43,6 +43,9 @@ All notable changes to Pythia are documented here. The format follows
 - Trace analyzer: statements run again through a cached cursor are counted
   each time. Executions, fetches and rows after the first were dropped
   once the session cached the cursor (#79).
+- MySQL errors read `ERROR 1046 (3D000): …` without an Oracle error number
+  in front (`ORA-01046: ERROR 1046 …`) in SQL windows, program windows,
+  object views and the table editor (#82).
 
 ## [0.4.1] - 2026-10-26
 

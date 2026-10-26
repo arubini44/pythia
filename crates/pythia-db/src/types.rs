@@ -255,6 +255,8 @@ pub struct DbError {
     /// The database's error code (ORA-nnnnn, MySQL's error number), if the
     /// error came from the database.
     pub code: Option<i32>,
+    /// `code` is Oracle's: [`DbError::text`] shows it as `ORA-nnnnn`.
+    pub oracle: bool,
     pub message: String,
     /// Byte offset of the error in the statement text, if known.
     pub offset: Option<u32>,
@@ -269,6 +271,7 @@ impl DbError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             code: None,
+            oracle: false,
             message: message.into(),
             offset: None,
             lost: false,
@@ -314,6 +317,18 @@ impl DbError {
             .any(|c| self.message.contains(c))
     }
 
+    /// The message as shown to the user: an Oracle error starts with its
+    /// `ORA-nnnnn:` (the driver's message may lack it); MySQL's already
+    /// reads `ERROR nnnn (state): …`.
+    pub fn text(&self) -> String {
+        match self.code {
+            Some(code) if self.oracle && !self.message.starts_with("ORA-") => {
+                format!("ORA-{code:05}: {}", self.message)
+            }
+            _ => self.message.clone(),
+        }
+    }
+
     /// True if the Oracle client libraries could not be loaded (DPI-1047).
     pub fn is_missing_client(&self) -> bool {
         self.message.contains("DPI-1047")
@@ -336,11 +351,34 @@ impl From<crate::oracle::Error> for DbError {
                 }
                 Self {
                     code: Some(db.code()).filter(|c| *c != 0),
+                    oracle: true,
                     offset: Some(db.offset()).filter(|o| *o != 0),
                     ..Self::new(message)
                 }
             }
             None => Self::new(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oracle_error_text() {
+        let e = DbError {
+            code: Some(942),
+            oracle: true,
+            ..DbError::new("table or view does not exist")
+        };
+        assert_eq!(e.text(), "ORA-00942: table or view does not exist");
+        let e = DbError {
+            code: Some(942),
+            oracle: true,
+            ..DbError::new("ORA-00942: table or view does not exist")
+        };
+        assert_eq!(e.text(), "ORA-00942: table or view does not exist");
+        assert_eq!(DbError::new("Not connected").text(), "Not connected");
     }
 }

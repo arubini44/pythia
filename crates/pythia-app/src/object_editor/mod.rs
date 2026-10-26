@@ -458,10 +458,7 @@ impl ObjectEditor {
                 let runs = match result.map(|any| any.downcast::<Vec<String>>()) {
                     Ok(Ok(runs)) => Ok(*runs),
                     Ok(Err(_)) => Err("unexpected result".to_owned()),
-                    Err(e) => Err(format!(
-                        "The repeat interval doesn't work: {}",
-                        error_text(&e)
-                    )),
+                    Err(e) => Err(format!("The repeat interval doesn't work: {}", e.text())),
                 };
                 self.state.lists.next_runs.insert((start, repeat), runs);
                 return Effects::default();
@@ -512,11 +509,7 @@ impl ObjectEditor {
                     Err(e) => {
                         self.locate_error(&e);
                         self.state.outcome = Some((
-                            format!(
-                                "{}\n\nin: {}",
-                                error_text(&e.error),
-                                first_line(&e.statement)
-                            ),
+                            format!("{}\n\nin: {}", e.error.text(), first_line(&e.statement)),
                             false,
                         ));
                     }
@@ -1225,13 +1218,6 @@ fn apply(
         }
     }
     Ok(warnings)
-}
-
-pub fn error_text(e: &DbError) -> String {
-    match e.code {
-        Some(code) if !e.message.starts_with("ORA-") => format!("ORA-{code:05}: {}", e.message),
-        _ => e.message.clone(),
-    }
 }
 
 pub fn first_line(s: &str) -> &str {

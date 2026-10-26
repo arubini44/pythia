@@ -877,6 +877,18 @@ impl From<mysql::Error> for DbError {
 mod tests {
     use super::*;
 
+    /// MySQL's errors keep their own number, without an ORA- prefix (#82).
+    #[test]
+    fn error_text() {
+        let e = DbError::from(mysql::Error::MySqlError(mysql::MySqlError {
+            state: "3D000".into(),
+            message: "No database selected".into(),
+            code: 1046,
+        }));
+        assert_eq!(e.code, Some(1046));
+        assert_eq!(e.text(), "ERROR 1046 (3D000): No database selected");
+    }
+
     #[test]
     fn targets() {
         let t = parse_target("localhost").unwrap();
