@@ -312,7 +312,9 @@ flavor yourself: `cargo build --release --features pythia-db/thick`.
 **WSL:** under WSLg, Pythia opens its window through X11 (Xwayland), since
 WSLg's compositor crashes on Wayland windows like Pythia's
 ([microsoft/wslg#1386](https://github.com/microsoft/wslg/issues/1386)).
-`PYTHIA_WAYLAND=1` keeps Wayland.
+`PYTHIA_WAYLAND=1` keeps Wayland. Through X11 the window starts at 96 DPI
+whatever Windows' display scaling; on a scaled display, size the UI with
+Settings → UI scale (or Ctrl + / Ctrl −).
 
 ## Building from source
 
