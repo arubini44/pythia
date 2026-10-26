@@ -15,7 +15,10 @@ pub use format::{
     kept_as_written,
 };
 pub use header::{UnitHeader, unit_header};
-pub use keywords::is_keyword;
+pub use keywords::{is_keyword, is_reserved};
 pub use lexer::{Token, TokenKind, tokenize};
 pub use parser::{normalize_ident, parse, parse_tokens};
-pub use splitter::{Statement, StatementKind, split_statements, statement_at};
+pub use splitter::{
+    Statement, StatementKind, Syntax, split_statements, split_statements_in, statement_at,
+    statement_at_in,
+};

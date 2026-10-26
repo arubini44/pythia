@@ -542,16 +542,29 @@ impl Builder {
         }
     }
 
-    /// A dictionary name as it is written: Oracle's in the case the user
-    /// types unless quoted, MySQL's as stored.
+    /// A dictionary name as it is written: Oracle's and PostgreSQL's in the
+    /// case the user types unless quoted, MySQL's and SQL Server's as stored.
     fn name_text(&self, name: &str) -> String {
         match self.names {
-            NameStyle::Upper if self.quoted || needs_quotes(name) => format!("\"{name}\""),
-            NameStyle::Upper => self.cased(name),
-            NameStyle::AsStored if needs_backticks(name) => {
+            NameStyle::Upper | NameStyle::Lower if self.quoted || self.needs_quotes(name) => {
+                format!("\"{}\"", name.replace('"', "\"\""))
+            }
+            NameStyle::Upper | NameStyle::Lower => self.cased(name),
+            NameStyle::Backticks if needs_backticks(name) => {
                 format!("`{}`", name.replace('`', "``"))
             }
-            NameStyle::AsStored => name.to_owned(),
+            NameStyle::Brackets if needs_brackets(name) => {
+                format!("[{}]", name.replace(']', "]]"))
+            }
+            NameStyle::Backticks | NameStyle::Brackets => name.to_owned(),
+        }
+    }
+
+    /// Whether a stored name must be written in double quotes.
+    fn needs_quotes(&self, name: &str) -> bool {
+        match self.names {
+            NameStyle::Lower => needs_lowercase_quotes(name),
+            _ => needs_quotes(name),
         }
     }
 
@@ -611,9 +624,9 @@ impl Builder {
     ) -> Option<&mut CompletionItem> {
         let text = self.name_text(name);
         let label = match self.names {
-            NameStyle::Upper if needs_quotes(name) => text.clone(),
-            NameStyle::Upper => self.cased(name),
-            NameStyle::AsStored => name.to_owned(),
+            NameStyle::Upper | NameStyle::Lower if self.needs_quotes(name) => text.clone(),
+            NameStyle::Upper | NameStyle::Lower => self.cased(name),
+            NameStyle::Backticks | NameStyle::Brackets => name.to_owned(),
         };
         self.push(label, kind, detail, text, None, priority)
     }
@@ -708,6 +721,31 @@ fn needs_backticks(name: &str) -> bool {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'));
     !(ok_start && ok_rest) || RESERVED.contains(&name.to_ascii_uppercase().as_str())
+}
+
+/// Whether a SQL Server name must be written in square brackets.
+fn needs_brackets(name: &str) -> bool {
+    let ok_start = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '@' | '#'));
+    let ok_rest = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '#' | '$'));
+    !(ok_start && ok_rest) || pythia_plsql::is_reserved(name, pythia_plsql::Syntax::TSql)
+}
+
+/// Whether a PostgreSQL name (unquoted ones are stored in lowercase) must be
+/// written in double quotes.
+fn needs_lowercase_quotes(name: &str) -> bool {
+    let ok_start = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+    let ok_rest = name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '$'));
+    !(ok_start && ok_rest) || pythia_plsql::is_reserved(name, pythia_plsql::Syntax::Postgres)
 }
 
 /// Whether a stored name must be written in double quotes.
@@ -1170,5 +1208,18 @@ mod tests {
         assert!(needs_quotes("A B"));
         assert!(needs_quotes("SELECT"));
         assert!(!needs_quotes("EMP$1#"));
+        assert!(!needs_lowercase_quotes("public"));
+        assert!(needs_lowercase_quotes("Emp"));
+        assert!(needs_lowercase_quotes("order"));
+        assert!(!needs_brackets("Emp_2"));
+        assert!(needs_brackets("my table"));
+        assert!(needs_brackets("Order"));
+
+        let opts = CompletionOptions::default();
+        let text = |names, name| Builder::new("", false, &opts, names).name_text(name);
+        assert_eq!(text(NameStyle::Lower, "Emp"), "\"Emp\"");
+        assert_eq!(text(NameStyle::Brackets, "a]b"), "[a]]b]");
+        assert_eq!(text(NameStyle::Brackets, "Emp"), "Emp");
+        assert_eq!(text(NameStyle::Backticks, "order"), "`order`");
     }
 }

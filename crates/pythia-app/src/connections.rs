@@ -400,15 +400,24 @@ fn init_sql(profile: &ConnectionProfile, database: Option<&str>) -> Vec<String> 
     if !schema.is_empty() {
         let dialect = Dialect::from(profile.kind);
         let schema = dialect.quote_ident(&dialect.dictionary_name(schema));
-        out.push(match profile.kind {
-            DbKind::Oracle => format!("alter session set current_schema = {schema}"),
-            DbKind::MySql => format!("use {schema}"),
-        });
+        match profile.kind {
+            DbKind::Oracle => out.push(format!("alter session set current_schema = {schema}")),
+            DbKind::MySql => out.push(format!("use {schema}")),
+            DbKind::Postgres => out.push(format!("set search_path to {schema}")),
+            // The default schema is the database user's.
+            DbKind::SqlServer => {}
+        }
     }
     let script = &profile.login_script;
-    for statement in pythia_plsql::split_statements(script) {
-        if statement.kind != pythia_plsql::StatementKind::SqlPlus {
-            out.push(statement.text(script).to_owned());
+    let syntax = Dialect::from(profile.kind).syntax();
+    for statement in pythia_plsql::split_statements_in(script, syntax) {
+        let text = statement.text(script);
+        // SQL*Plus commands mean nothing to a session; on other databases
+        // most of them are SQL (MySQL's `SET`).
+        let client = statement.kind == pythia_plsql::StatementKind::SqlPlus
+            && (profile.kind == DbKind::Oracle || crate::sql_window::client_command(text));
+        if !client {
+            out.push(text.to_owned());
         }
     }
     out

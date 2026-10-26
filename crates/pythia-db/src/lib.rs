@@ -1,4 +1,5 @@
-//! Database connectivity (Oracle, MySQL), directly or through SSH.
+//! Database connectivity (Oracle, MySQL, PostgreSQL, SQL Server), directly
+//! or through SSH.
 //!
 //! Each [`Session`] owns a worker thread with one database connection. The UI
 //! never touches the connection directly: it sends [`DbRequest`]s and polls
@@ -12,10 +13,15 @@
 pub mod compat;
 mod dialect;
 mod meta;
+mod mssql_meta;
+mod mssql_session;
 mod mysql_meta;
 mod mysql_session;
+mod pg_meta;
+mod pg_session;
 pub mod recompile;
 mod session;
+mod sql_text;
 pub mod ssh;
 mod types;
 

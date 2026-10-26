@@ -7,6 +7,7 @@
 //! hidden instead of failing.
 
 pub use pythia_config::DbKind;
+use pythia_plsql::Syntax;
 
 use crate::meta::{Detail, ObjectType};
 
@@ -75,6 +76,8 @@ impl From<DbKind> for Dialect {
 impl Dialect {
     pub const ORACLE: Dialect = Dialect(DbKind::Oracle);
     pub const MYSQL: Dialect = Dialect(DbKind::MySql);
+    pub const POSTGRES: Dialect = Dialect(DbKind::Postgres);
+    pub const SQLSERVER: Dialect = Dialect(DbKind::SqlServer);
 
     pub fn kind(self) -> DbKind {
         self.0
@@ -99,6 +102,18 @@ impl Dialect {
                     | Feature::SshTunnel
                     | Feature::Dashboard
             ),
+            DbKind::Postgres | DbKind::SqlServer => {
+                matches!(feature, Feature::ExplainPlan | Feature::Completion)
+            }
+        }
+    }
+
+    /// How the database's scripts end their statements.
+    pub fn syntax(self) -> Syntax {
+        match self.0 {
+            DbKind::Oracle | DbKind::MySql => Syntax::Oracle,
+            DbKind::Postgres => Syntax::Postgres,
+            DbKind::SqlServer => Syntax::TSql,
         }
     }
 
@@ -113,56 +128,107 @@ impl Dialect {
                 ObjectType::Function,
                 ObjectType::Trigger,
             ],
+            DbKind::Postgres => &[
+                ObjectType::Table,
+                ObjectType::View,
+                ObjectType::MaterializedView,
+                ObjectType::Procedure,
+                ObjectType::Function,
+                ObjectType::Trigger,
+                ObjectType::Sequence,
+            ],
+            DbKind::SqlServer => &[
+                ObjectType::Table,
+                ObjectType::View,
+                ObjectType::Procedure,
+                ObjectType::Function,
+                ObjectType::Trigger,
+                ObjectType::Sequence,
+                ObjectType::Synonym,
+            ],
         }
     }
 
     /// Tabs of an object view besides columns and source.
     pub fn details(self, object_type: ObjectType) -> &'static [Detail] {
+        const TABLE: &[Detail] = &[
+            Detail::Indexes,
+            Detail::Constraints,
+            Detail::Triggers,
+            Detail::Grants,
+            Detail::UsedBy,
+        ];
         match (self.0, object_type) {
             (_, ObjectType::DatabaseLink) => Detail::LINK,
             (DbKind::Oracle, ObjectType::Table) => Detail::TABLE,
             (DbKind::Oracle, _) => Detail::CODE,
-            (DbKind::MySql, ObjectType::Table) => &[
-                Detail::Indexes,
-                Detail::Constraints,
-                Detail::Triggers,
-                Detail::Grants,
-                Detail::UsedBy,
-            ],
+            (_, ObjectType::Table) => TABLE,
             (DbKind::MySql, ObjectType::View) => &[Detail::Uses],
             (DbKind::MySql, _) => &[],
+            (DbKind::Postgres, ObjectType::View | ObjectType::MaterializedView) => {
+                &[Detail::Uses, Detail::UsedBy, Detail::Grants]
+            }
+            (DbKind::Postgres, ObjectType::Function | ObjectType::Procedure) => &[Detail::Grants],
+            (DbKind::Postgres, _) => &[],
+            (
+                DbKind::SqlServer,
+                ObjectType::View | ObjectType::Procedure | ObjectType::Function,
+            ) => Detail::CODE,
+            (DbKind::SqlServer, ObjectType::Trigger) => &[Detail::Uses],
+            (DbKind::SqlServer, _) => &[],
         }
     }
 
     /// Quotes an identifier only if the database would need it. Oracle folds
-    /// unquoted names to uppercase; MySQL keeps their case.
+    /// unquoted names to uppercase, PostgreSQL to lowercase; MySQL and SQL
+    /// Server keep their case.
     pub fn quote_ident(self, name: &str) -> String {
+        let reserved = match self.0 {
+            DbKind::Postgres | DbKind::SqlServer => pythia_plsql::is_reserved(name, self.syntax()),
+            DbKind::Oracle | DbKind::MySql => pythia_plsql::is_keyword(name),
+        };
+        let plain = |start: fn(char) -> bool, rest: fn(char) -> bool| {
+            name.chars().next().is_some_and(start) && name.chars().all(rest) && !reserved
+        };
         match self.0 {
             DbKind::Oracle => {
-                let plain = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || "_$#".contains(c))
-                    && !pythia_plsql::is_keyword(name);
-                if plain {
+                if plain(
+                    |c| c.is_ascii_uppercase(),
+                    |c| c.is_ascii_uppercase() || c.is_ascii_digit() || "_$#".contains(c),
+                ) {
                     name.to_owned()
                 } else {
                     format!("\"{}\"", name.replace('"', "\"\""))
                 }
             }
             DbKind::MySql => {
-                let plain = name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "_$".contains(c))
-                    && !pythia_plsql::is_keyword(name);
-                if plain {
+                if plain(
+                    |c| c.is_ascii_alphabetic() || c == '_',
+                    |c| c.is_ascii_alphanumeric() || "_$".contains(c),
+                ) {
                     name.to_owned()
                 } else {
                     format!("`{}`", name.replace('`', "``"))
+                }
+            }
+            DbKind::Postgres => {
+                if plain(
+                    |c| c.is_ascii_lowercase() || c == '_',
+                    |c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_$".contains(c),
+                ) {
+                    name.to_owned()
+                } else {
+                    format!("\"{}\"", name.replace('"', "\"\""))
+                }
+            }
+            DbKind::SqlServer => {
+                if plain(
+                    |c| c.is_ascii_alphabetic() || "_@#".contains(c),
+                    |c| c.is_ascii_alphanumeric() || "_@#$".contains(c),
+                ) {
+                    name.to_owned()
+                } else {
+                    format!("[{}]", name.replace(']', "]]"))
                 }
             }
         }
@@ -174,12 +240,13 @@ impl Dialect {
     }
 
     /// How the dictionary stores an unquoted name the user typed: Oracle
-    /// folds it to uppercase, MySQL keeps it (and compares names without
-    /// case where it matters).
+    /// folds it to uppercase, PostgreSQL to lowercase; MySQL and SQL Server
+    /// keep it (and compare names without case where it matters).
     pub fn dictionary_name(self, name: &str) -> String {
         match self.0 {
             DbKind::Oracle => name.to_uppercase(),
-            DbKind::MySql => name.to_owned(),
+            DbKind::Postgres => name.to_lowercase(),
+            DbKind::MySql | DbKind::SqlServer => name.to_owned(),
         }
     }
 }
@@ -202,9 +269,17 @@ mod tests {
         for feature in [Feature::ExplainPlan, Feature::Dashboard, Feature::SshTunnel] {
             assert!(Dialect::MYSQL.supports(feature));
         }
-        assert!(!Dialect::MYSQL.supports(Feature::Debugger));
-        assert!(!Dialect::MYSQL.supports(Feature::ServerOutput));
-        assert!(!Dialect::MYSQL.supports(Feature::Monitor));
+        for dialect in [Dialect::MYSQL, Dialect::POSTGRES, Dialect::SQLSERVER] {
+            assert!(dialect.supports(Feature::ExplainPlan));
+            assert!(!dialect.supports(Feature::Debugger));
+            assert!(!dialect.supports(Feature::ServerOutput));
+            assert!(!dialect.supports(Feature::Monitor));
+        }
+        // No dashboard and no tunnel for these two yet.
+        for dialect in [Dialect::POSTGRES, Dialect::SQLSERVER] {
+            assert!(!dialect.supports(Feature::Dashboard));
+            assert!(!dialect.supports(Feature::SshTunnel));
+        }
         assert_eq!(Dialect::default(), Dialect::ORACLE);
     }
 
@@ -222,5 +297,15 @@ mod tests {
         assert_eq!(mysql.quote_ident("a`b"), "`a``b`");
         assert_eq!(mysql.quote_ident("2fa"), "`2fa`");
         assert_eq!(mysql.qualified("pythia", "emp"), "pythia.emp");
+        let postgres = Dialect::POSTGRES;
+        assert_eq!(postgres.quote_ident("emp_2"), "emp_2");
+        assert_eq!(postgres.quote_ident("Emp"), "\"Emp\"");
+        assert_eq!(postgres.quote_ident("order"), "\"order\"");
+        assert_eq!(postgres.qualified("public", "a\"b"), "public.\"a\"\"b\"");
+        let sqlserver = Dialect::SQLSERVER;
+        assert_eq!(sqlserver.quote_ident("Emp_2"), "Emp_2");
+        assert_eq!(sqlserver.quote_ident("#tmp"), "#tmp");
+        assert_eq!(sqlserver.quote_ident("order"), "[order]");
+        assert_eq!(sqlserver.qualified("dbo", "my]table"), "dbo.[my]]table]");
     }
 }

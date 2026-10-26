@@ -11,16 +11,25 @@ license.workspace = true
 thick = ["dep:oracle"]
 
 [dependencies]
+futures-util.workspace = true
 mysql.workspace = true
 oracle = { workspace = true, optional = true }
 oracledb.workspace = true
 pythia-config.workspace = true
 pythia-plsql.workspace = true
 russh.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tiberius.workspace = true
 tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
+webpki-roots.workspace = true
 
 [[example]]
 name = "thin_probe"

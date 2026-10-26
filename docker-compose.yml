@@ -46,6 +46,66 @@ services:
     build: docker/ssh
     ports:
       - "2222:22"
+  # PostgreSQL for the PostgreSQL backend (PYTHIA_POSTGRES_PORT if 5432 is
+  # taken):
+  #   podman compose up -d postgres
+  #   PYTHIA_TEST_POSTGRES=pythia/pythia@localhost:5432/pythia cargo test -p pythia-db
+  postgres:
+    image: docker.io/library/postgres:18
+    ports:
+      - "${PYTHIA_POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: pythia
+      POSTGRES_PASSWORD: pythia
+      POSTGRES_DB: pythia
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "pythia", "-d", "pythia"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+  # SQL Server for the SQL Server backend; mssql-init adds the database and
+  # login pythia/pythia once it is up:
+  #   podman compose up -d mssql mssql-init
+  #   PYTHIA_TEST_MSSQL=pythia/pythia@localhost:1433/pythia cargo test -p pythia-db
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    ports:
+      - "1433:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: Pythia-2026
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-C", "-S", "localhost", "-U", "sa", "-P", "Pythia-2026", "-Q", "select 1", "-b", "-o", "/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      mssql:
+        condition: service_healthy
+    entrypoint:
+      - /opt/mssql-tools18/bin/sqlcmd
+      - -C
+      - -S
+      - mssql
+      - -U
+      - sa
+      - -P
+      - Pythia-2026
+      - -b
+      - -Q
+      - >-
+        if db_id('pythia') is null create database pythia;
+        if suser_id('pythia') is null create login pythia with password = 'pythia', check_policy = off, default_database = pythia;
+        exec('use pythia; if user_id(''pythia'') is null create user pythia for login pythia; alter role db_owner add member pythia;')
+    restart: "no"
 volumes:
   oracle-data:
   mysql-data:
+  postgres-data:
+  mssql-data:

@@ -32,6 +32,8 @@ pub struct Assist {
     companion: Option<Companion>,
     /// Editor revision the analysis (diagnostics, outline) reflects.
     analyzed_revision: Option<u64>,
+    /// Whether that analysis marked syntax errors.
+    checked: bool,
     /// When the text last changed without being analyzed yet (egui time).
     changed_at: Option<f64>,
     outline: Vec<OutlineItem>,
@@ -132,10 +134,12 @@ impl Layout {
 
 impl Assist {
     /// Re-analyzes the text shortly after typing stops: refreshes syntax
-    /// markers and the outline. Call every frame after `Editor::ui`.
-    pub fn background(&mut self, editor: &mut Editor, ui: &egui::Ui) {
+    /// markers (with `check`: the parser knows Oracle's SQL and PL/SQL,
+    /// other databases' scripts would show errors that aren't) and the
+    /// outline. Call every frame after `Editor::ui`.
+    pub fn background(&mut self, editor: &mut Editor, ui: &egui::Ui, check: bool) {
         const IDLE: f64 = 0.35;
-        if self.analyzed_revision == Some(editor.revision()) {
+        if self.analyzed_revision == Some(editor.revision()) && self.checked == check {
             return;
         }
         let now = ui.input(|i| i.time);
@@ -154,11 +158,15 @@ impl Assist {
         }
         self.changed_at = None;
         self.analyzed_revision = Some(editor.revision());
+        self.checked = check;
         self.analysis.update(editor.text());
         let text = editor.text();
-        let markers = self
-            .analysis
-            .diagnostics()
+        let diagnostics = if check {
+            self.analysis.diagnostics()
+        } else {
+            &[]
+        };
+        let markers = diagnostics
             .iter()
             .map(|d| Marker {
                 line: text[..d.span.start.min(text.len())].matches('\n').count() + 1,

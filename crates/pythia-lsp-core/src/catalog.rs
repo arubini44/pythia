@@ -90,9 +90,15 @@ pub enum NameStyle {
     /// written in double quotes.
     #[default]
     Upper,
+    /// PostgreSQL: unquoted names are stored in lowercase; any other name
+    /// is written in double quotes.
+    Lower,
     /// MySQL: names are stored as written and compared without case;
     /// backticks quote names that need it.
-    AsStored,
+    Backticks,
+    /// SQL Server: names are stored as written and compared without case;
+    /// square brackets quote names that need it.
+    Brackets,
 }
 
 pub trait Catalog {

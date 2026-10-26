@@ -4579,3 +4579,248 @@ select id, customer, total from app_orders where total < @limit order by id;
     });
     wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
 }
+
+/// What every connection to another database checks in the app: a script
+/// ran (its last result has `columns` and `rows` rows) and left a change
+/// pending; Oracle-only menus are gone; the browser has `folders`; tables
+/// open on their columns; completion offers a table's columns after an
+/// alias. Screenshots are named after `tag`.
+struct OtherDatabase<'a> {
+    tag: &'a str,
+    connection: &'a str,
+    product: &'a str,
+    schema: &'a str,
+    folders: &'a [pythia_db::ObjectType],
+}
+
+impl OtherDatabase<'_> {
+    fn check(&self, h: &mut Harness<'_, PythiaApp>, script: &str, columns: &[&str], rows: usize) {
+        use crate::commands::Command;
+        use pythia_db::ObjectType;
+        let connected = format!("Connected to {} ({} ", self.connection, self.product);
+        assert!(
+            h.state()
+                .test_log()
+                .iter()
+                .any(|l| l.starts_with(&connected)),
+            "{:?}",
+            h.state().test_log()
+        );
+
+        h.state_mut().test_open(OpenRequest::Sql {
+            connection: self.connection.into(),
+            text: script.into(),
+            run: true,
+        });
+        wait_until(h, "script", |app| !app.test_focused_busy());
+        let w = h.state_mut().test_sql_window();
+        let errors: Vec<&str> = w
+            .state
+            .messages
+            .iter()
+            .filter(|m| m.level == crate::sql_window::Level::Error)
+            .map(|m| m.text.as_str())
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        let result = w.state.results.last().expect("a result");
+        let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, columns);
+        assert_eq!(result.rows.len(), rows);
+        assert_eq!(
+            h.state().test_transaction_state(),
+            Ok(()),
+            "the insert waits for commit"
+        );
+        save(h, &format!("{}-sql-window", self.tag));
+        h.state_mut().test_command(Command::Commit);
+        wait_until(h, "commit", |app| {
+            app.test_transaction_state() == Err("No transaction")
+        });
+
+        // Oracle-only menus are gone; a shortcut to one explains.
+        for menu in ["Debug", "Monitor", "Reports"] {
+            assert!(h.query_by_label(menu).is_none(), "{menu}");
+        }
+        h.state_mut().test_command(Command::MonitorSessions);
+        assert_eq!(
+            h.state().test_log().last().cloned(),
+            Some(format!(
+                "Sessions isn't available for {} connections",
+                self.product
+            ))
+        );
+
+        h.state_mut()
+            .test_expand_browser(&[ObjectType::Table, ObjectType::Procedure]);
+        wait_until(h, "browser", |app| !app.test_browser_loading());
+        h.run_steps(3);
+        save(h, &format!("{}-browser", self.tag));
+        for folder in self.folders {
+            assert!(h.query_by_label(folder.plural()).is_some(), "{folder:?}");
+        }
+        assert!(h.query_by_label("Packages").is_none());
+        assert!(h.query_by_label_contains("app_orders").is_some());
+
+        h.state_mut().test_open(OpenRequest::Object {
+            connection: self.connection.into(),
+            object: ObjectRef {
+                owner: self.schema.into(),
+                name: "app_orders".into(),
+                object_type: ObjectType::Table,
+            },
+        });
+        h.run_steps(2);
+        wait_until(h, "object view", |app| !app.test_focused_busy());
+        assert_eq!(h.state().test_object_view().loaded_for_test().1, 4);
+        assert!(h.query_by_label("Constraints").is_some());
+        save(h, &format!("{}-object-view", self.tag));
+
+        h.state_mut().test_open(OpenRequest::Sql {
+            connection: self.connection.into(),
+            text: "select o\n  from app_orders o".into(),
+            run: false,
+        });
+        h.run_steps(3);
+        h.state_mut().test_sql_window().editor.select(8..8);
+        h.run_steps(3);
+        h.event(egui::Event::Text(".".into()));
+        wait_until(h, "completion popup", |app| {
+            app.test_sql_window_ref()
+                .is_some_and(|w| w.completion_visible_with("customer"))
+        });
+        save(h, &format!("{}-completion", self.tag));
+    }
+}
+
+/// Connects the harness to the database of `env`
+/// (`user/password@connect string`) as `name`.
+fn connect_to(env: &str, name: &str, kind: pythia_config::DbKind) -> Option<Ui> {
+    let spec = std::env::var(env).ok()?;
+    let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+    let (username, password) = credentials.split_once('/').unwrap();
+    let profile = ConnectionProfile {
+        name: name.into(),
+        kind,
+        username: username.into(),
+        connect_string: connect_string.into(),
+        color: Some([0x3b, 0x82, 0xf6]),
+        ..Default::default()
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password.into());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    Some(h)
+}
+
+/// A PostgreSQL connection (`PYTHIA_TEST_POSTGRES=user/password@host:port/database`):
+/// a script with a dollar-quoted function and casts, transactions, browser,
+/// object views and completion.
+#[test]
+fn postgres_connection() {
+    use pythia_db::ObjectType;
+    let Some(mut h) = connect_to(
+        "PYTHIA_TEST_POSTGRES",
+        "pythia@postgres",
+        pythia_config::DbKind::Postgres,
+    ) else {
+        return;
+    };
+    let database = OtherDatabase {
+        tag: "postgres",
+        connection: "pythia@postgres",
+        product: "PostgreSQL",
+        schema: "public",
+        folders: &[
+            ObjectType::Table,
+            ObjectType::MaterializedView,
+            ObjectType::Function,
+            ObjectType::Sequence,
+        ],
+    };
+    database.check(
+        &mut h,
+        "drop table if exists app_orders cascade;
+create table app_orders (
+  id int primary key,
+  customer varchar(30) not null,
+  total numeric(8,2),
+  ordered timestamp default now()
+);
+comment on column app_orders.customer is 'Who ordered';
+create or replace function app_below(p_limit numeric) returns numeric language plpgsql as $$
+begin
+  -- A body with statements of its own.
+  return (select sum(total) from app_orders where total < p_limit);
+end;
+$$;
+insert into app_orders (id, customer, total) values (1, 'Ada', 12.50), (2, 'Linus', 99.00), (3, 'Grace', 250.00);
+set work_mem = '8MB';
+select id, customer, total::text, app_below(100) as below
+  from app_orders where total < 100::numeric order by id;
+",
+        &["id", "customer", "total", "below"],
+        2,
+    );
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@postgres".into(),
+        text: "drop function app_below;\ndrop table app_orders;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// A SQL Server connection (`PYTHIA_TEST_MSSQL=user/password@host:port/database?trust`):
+/// a script of `GO` batches with a procedure and a variable, transactions,
+/// browser, object views and completion.
+#[test]
+fn sqlserver_connection() {
+    use pythia_db::ObjectType;
+    let Some(mut h) = connect_to(
+        "PYTHIA_TEST_MSSQL",
+        "pythia@sqlserver",
+        pythia_config::DbKind::SqlServer,
+    ) else {
+        return;
+    };
+    let database = OtherDatabase {
+        tag: "sqlserver",
+        connection: "pythia@sqlserver",
+        product: "SQL Server",
+        schema: "dbo",
+        folders: &[
+            ObjectType::Table,
+            ObjectType::Procedure,
+            ObjectType::Sequence,
+            ObjectType::Synonym,
+        ],
+    };
+    database.check(
+        &mut h,
+        "drop table if exists app_orders;
+create table app_orders (
+  id int primary key,
+  customer varchar(30) not null,
+  total decimal(8,2),
+  ordered datetime2 default sysdatetime()
+);
+GO
+create or alter procedure app_below @limit decimal(8,2) as
+begin
+  set nocount on;
+  select id, customer, total from app_orders where total < @limit order by id;
+end
+GO
+insert into app_orders (id, customer, total) values (1, 'Ada', 12.50), (2, 'Linus', 99.00), (3, 'Grace', 250.00);
+declare @limit decimal(8,2) = 100;
+select id, customer, total, @limit as limit from app_orders where total < @limit order by id;
+",
+        &["id", "customer", "total", "limit"],
+        2,
+    );
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@sqlserver".into(),
+        text: "drop procedure app_below;\ndrop table app_orders;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}

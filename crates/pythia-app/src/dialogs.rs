@@ -76,6 +76,41 @@ const COLORS: [[u8; 3]; 8] = [
     [0x64, 0x74, 0x8b],
 ];
 
+/// What the connect form's fields take on each database.
+struct Hints {
+    database: &'static str,
+    /// `None`: the database has no default schema to set.
+    schema: Option<&'static str>,
+    login_script: &'static str,
+}
+
+impl Hints {
+    fn of(kind: DbKind) -> Hints {
+        match kind {
+            DbKind::Oracle => Hints {
+                database: "TNS alias or host:1521/service",
+                schema: Some("work in another schema after connecting"),
+                login_script: "alter session set nls_date_format = 'YYYY-MM-DD HH24:MI:SS';",
+            },
+            DbKind::MySql => Hints {
+                database: "host:3306/database, ?tls for TLS",
+                schema: Some("database to use after connecting"),
+                login_script: "set session time_zone = '+00:00';",
+            },
+            DbKind::Postgres => Hints {
+                database: "host:5432/database, ?sslmode=require for TLS",
+                schema: Some("schema to search first after connecting"),
+                login_script: "set timezone = 'UTC';",
+            },
+            DbKind::SqlServer => Hints {
+                database: "host:1433/database or host\\instance, ?trust for a self-signed certificate",
+                schema: None,
+                login_script: "set dateformat ymd;",
+            },
+        }
+    }
+}
+
 impl ConnectDialog {
     pub fn show(&mut self, last: Option<&ConnectionProfile>) {
         self.open = true;
@@ -306,13 +341,15 @@ impl ConnectDialog {
                     let width = if aliases { 250.0 } else { 280.0 };
                     let db = ui.add(
                         egui::TextEdit::singleline(&mut self.form.connect_string)
-                            .hint_text(if oracle {
-                                "TNS alias or host:1521/service"
-                            } else if self.form.ssh.enabled {
-                                "localhost:3306/database, as the SSH server sees it"
-                            } else {
-                                "host:3306/database, ?tls for TLS"
-                            })
+                            .hint_text(
+                                if self.form.ssh.enabled
+                                    && Dialect::from(self.form.kind).supports(Feature::SshTunnel)
+                                {
+                                    "localhost:3306/database, as the SSH server sees it"
+                                } else {
+                                    Hints::of(self.form.kind).database
+                                },
+                            )
                             .desired_width(width),
                     );
                     submit |= db.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
@@ -418,26 +455,22 @@ impl ConnectDialog {
                     .num_columns(2)
                     .spacing([10.0, 8.0])
                     .show(ui, |ui| {
-                        ui.label("Default schema");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.form.default_schema)
-                                .hint_text(if oracle {
-                                    "work in another schema after connecting"
-                                } else {
-                                    "database to use after connecting"
-                                })
-                                .desired_width(280.0),
-                        );
-                        ui.end_row();
+                        let hints = Hints::of(self.form.kind);
+                        // SQL Server's default schema belongs to the user.
+                        if let Some(hint) = hints.schema {
+                            ui.label("Default schema");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.form.default_schema)
+                                    .hint_text(hint)
+                                    .desired_width(280.0),
+                            );
+                            ui.end_row();
+                        }
                         ui.label("Login script");
                         ui.add(
                             egui::TextEdit::multiline(&mut self.form.login_script)
                                 .code_editor()
-                                .hint_text(if oracle {
-                                    "alter session set nls_date_format = 'YYYY-MM-DD HH24:MI:SS';"
-                                } else {
-                                    "set session time_zone = '+00:00';"
-                                })
+                                .hint_text(hints.login_script)
                                 .desired_rows(3)
                                 .desired_width(280.0),
                         );

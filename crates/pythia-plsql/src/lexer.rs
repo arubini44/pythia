@@ -23,9 +23,11 @@ pub enum TokenKind {
     /// Optimizer hint `/*+ ... */`.
     #[token("/*+", block_comment)]
     Hint,
-    /// `'...'` and `N'...'` string literals.
+    /// `'...'` and `N'...'` string literals, and PostgreSQL's dollar-quoted
+    /// `$$...$$` / `$tag$...$tag$`.
     #[token("'", string)]
     #[regex("[nN]'", string)]
+    #[token("$", dollar_string)]
     String,
     /// Alternative quoting `q'[...]'`, `nq'{...}'`.
     #[regex("[nN]?[qQ]'", q_string)]
@@ -44,7 +46,8 @@ pub enum TokenKind {
     /// SQL*Plus substitution variable `&var` / `&&var`.
     #[regex(r"&&?[\p{L}_][\p{L}\p{N}_$#]*\.?")]
     SubstVar,
-    #[regex(r":=|=>|\|\||<=|>=|<>|!=|\^=|~=|\.\.|\*\*|<<|>>|[+\-*/=<>@%|!^~?&:]")]
+    /// `::` is PostgreSQL's cast (`x::int` has no bind variable `:int`).
+    #[regex(r":=|::|=>|\|\||<=|>=|<>|!=|\^=|~=|\.\.|\*\*|<<|>>|[+\-*/=<>@%|!^~?&:]")]
     Operator,
     #[token(";")]
     Semicolon,
@@ -139,6 +142,29 @@ fn string(lex: &mut logos::Lexer<TokenKind>) {
     lex.bump(rest.len());
 }
 
+/// Consumes the rest of a dollar-quoted string after its first `$`: the tag,
+/// the body and the closing tag (or the rest of the input). A `$` that
+/// doesn't open one stays an error token, as Oracle's `$IF` and `$$name`
+/// directives and PostgreSQL's `$1` always were.
+fn dollar_string(lex: &mut logos::Lexer<TokenKind>) -> bool {
+    let rest = lex.remainder();
+    let tag_len = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    let tag = &rest[..tag_len];
+    if !rest[tag_len..].starts_with('$') || tag.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    let body = &rest[tag_len + 1..];
+    if tag.is_empty() && body.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return false;
+    }
+    let close = format!("${tag}$");
+    let len = body.find(&close).map_or(body.len(), |i| i + close.len());
+    lex.bump(tag_len + 1 + len);
+    true
+}
+
 /// Consumes a `q'<delim>...<delim>'` body after the `q'` prefix.
 fn q_string(lex: &mut logos::Lexer<TokenKind>) {
     let rest = lex.remainder();
@@ -212,5 +238,43 @@ mod tests {
             }]
         );
         assert_eq!(kinds("q'[abc"), vec![(TokenKind::QString, "q'[abc")]);
+        assert_eq!(kinds("$$ ab;c"), vec![(TokenKind::String, "$$ ab;c")]);
+    }
+
+    #[test]
+    fn postgres_syntax() {
+        assert_eq!(
+            kinds("as $$ begin x := 1; end; $$, $f$ a $$ b $f$"),
+            vec![
+                (TokenKind::Keyword, "as"),
+                (TokenKind::String, "$$ begin x := 1; end; $$"),
+                (TokenKind::Comma, ","),
+                (TokenKind::String, "$f$ a $$ b $f$"),
+            ]
+        );
+        assert_eq!(
+            kinds("x::int = :y"),
+            vec![
+                (TokenKind::Ident, "x"),
+                (TokenKind::Operator, "::"),
+                (TokenKind::Ident, "int"),
+                (TokenKind::Operator, "="),
+                (TokenKind::BindVar, ":y"),
+            ]
+        );
+        // Oracle's conditional compilation and PostgreSQL's parameters.
+        assert_eq!(
+            kinds("$IF $$debug $THEN $1"),
+            vec![
+                (TokenKind::Error, "$"),
+                (TokenKind::Keyword, "IF"),
+                (TokenKind::Error, "$$"),
+                (TokenKind::Ident, "debug"),
+                (TokenKind::Error, "$"),
+                (TokenKind::Keyword, "THEN"),
+                (TokenKind::Error, "$"),
+                (TokenKind::Number, "1"),
+            ]
+        );
     }
 }

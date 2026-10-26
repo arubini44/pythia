@@ -696,7 +696,7 @@ impl ProgramWindow {
             return effects;
         };
         let spec = before.first_mut().map(|spec| {
-            spec.assist.background(&mut spec.editor, ui);
+            spec.assist.background(&mut spec.editor, ui, true);
             &spec.assist
         });
         if !part.errors.is_empty() {
@@ -794,7 +794,7 @@ impl ProgramWindow {
             ));
             part.editor
                 .format_as_typed(&out, cx.settings.format_auto, &cx.settings.format);
-            part.assist.background(&mut part.editor, ui);
+            part.assist.background(&mut part.editor, ui, true);
             if let Some(line) = out.gutter_clicked {
                 effects.breakpoints.push((unit.clone(), line as u32));
             }

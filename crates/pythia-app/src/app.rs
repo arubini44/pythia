@@ -517,10 +517,10 @@ impl PythiaApp {
             return;
         };
         conn.use_database(database, &self.notify);
+        let names = name_style(conn.dialect());
         self.catalogs.insert(
             connection.to_owned(),
-            pythia_lsp_core::CatalogCache::new(database.to_owned())
-                .with_names(pythia_lsp_core::NameStyle::AsStored),
+            pythia_lsp_core::CatalogCache::new(database.to_owned()).with_names(names),
         );
         self.catalog_requested.retain(|(c, _)| c != connection);
         self.log(format!("{connection}: database {database}"));
@@ -2872,13 +2872,10 @@ impl PythiaApp {
                     server.version,
                 );
                 let schema = server.current_schema.clone();
-                let names = match server.dialect.kind() {
-                    pythia_db::DbKind::Oracle => pythia_lsp_core::NameStyle::Upper,
-                    pythia_db::DbKind::MySql => pythia_lsp_core::NameStyle::AsStored,
-                };
                 self.catalogs.insert(
                     name.to_owned(),
-                    pythia_lsp_core::CatalogCache::new(schema.clone()).with_names(names),
+                    pythia_lsp_core::CatalogCache::new(schema.clone())
+                        .with_names(name_style(server.dialect)),
                 );
                 self.catalog_requested.retain(|(c, _)| c != name);
                 if let Some(conn) = self.conns.get_mut(name) {
@@ -5278,5 +5275,15 @@ mod rename_tests {
                 .unwrap()
                 .starts_with("Rename works for")
         );
+    }
+}
+
+/// How completion writes and compares a database's names.
+fn name_style(dialect: pythia_db::Dialect) -> pythia_lsp_core::NameStyle {
+    match dialect.kind() {
+        pythia_db::DbKind::Oracle => pythia_lsp_core::NameStyle::Upper,
+        pythia_db::DbKind::Postgres => pythia_lsp_core::NameStyle::Lower,
+        pythia_db::DbKind::MySql => pythia_lsp_core::NameStyle::Backticks,
+        pythia_db::DbKind::SqlServer => pythia_lsp_core::NameStyle::Brackets,
     }
 }

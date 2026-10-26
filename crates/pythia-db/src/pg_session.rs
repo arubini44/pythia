@@ -1,0 +1,1091 @@
+//! PostgreSQL sessions: the requests and events of an Oracle session, served
+//! by `tokio-postgres` on a runtime of the worker's own.
+//!
+//! Statements run with the simple query protocol, so values arrive as the
+//! server writes them; their columns' types come from describing the
+//! statement first. A query's rows are read while the worker waits for
+//! `FetchMore`s; any other request closes the result, cancelling the query
+//! when rows are left.
+//!
+//! Transactions behave like Oracle's: queries see what others committed and
+//! hold no locks, and changes wait for Commit unless the session
+//! autocommits (a change opens a transaction of its own). Inside a
+//! transaction every statement gets a savepoint, so a failing statement is
+//! undone alone instead of aborting the whole transaction.
+
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
+use futures_util::StreamExt;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::CryptoProvider;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
+use tokio::runtime::Runtime;
+use tokio_postgres::config::SslMode;
+use tokio_postgres::error::{ErrorPosition, SqlState};
+use tokio_postgres::tls::MakeTlsConnect;
+use tokio_postgres::types::{Kind, Type};
+use tokio_postgres::{
+    AsyncMessage, CancelToken, Config, SimpleQueryMessage, SimpleQueryRow, SimpleQueryStream,
+    Socket,
+};
+use tokio_postgres_rustls::MakeRustlsConnect;
+use tracing::{debug, info, warn};
+
+use crate::compat::Release;
+use crate::dialect::Dialect;
+use crate::meta::{MetaQuery, MetaResult};
+use crate::session::{CancelSlot, Canceller, Events};
+use crate::sql_text::{
+    char_offset, has_inner_semicolon, has_word, leading_words, release, replace_binds,
+    statement_kind, word_followed_by,
+};
+use crate::types::{
+    Cell, Client, Column, ConnectParams, DbError, DbEvent, DbRequest, ExecSummary, ServerInfo,
+};
+
+type Connection =
+    tokio_postgres::Connection<Socket, <MakeRustlsConnect as MakeTlsConnect<Socket>>::Stream>;
+type Stream = Pin<Box<SimpleQueryStream>>;
+
+/// How long the rest of an abandoned result is read before the query is
+/// cancelled: a small result has arrived already.
+const DRAIN: Duration = Duration::from_millis(200);
+/// The savepoint each statement in a transaction runs after.
+const SAVEPOINT: &str = "pythia_statement";
+
+pub(crate) fn run(
+    params: ConnectParams,
+    requests: Receiver<DbRequest>,
+    events: Events,
+    shared: CancelSlot,
+) {
+    info!(?params, "connecting");
+    let connected = runtime()
+        .map_err(|e| DbError::new(format!("Can't start the PostgreSQL client: {e}")))
+        .and_then(|rt| {
+            let (config, tls) = config(&params)?;
+            let (client, connection) = rt.block_on(config.connect(tls.clone()))?;
+            Ok((rt, client, connection, tls))
+        });
+    let (rt, client, connection, tls) = match connected {
+        Ok(connected) => connected,
+        Err(error) => {
+            warn!("connect failed: {error}");
+            events.send(DbEvent::ConnectFailed(error));
+            return;
+        }
+    };
+    let (notice_tx, notices) = mpsc::channel();
+    let driver = rt.spawn(drive(connection, notice_tx));
+    let token = client.cancel_token();
+    let cancel: Canceller = {
+        let (token, tls) = (token.clone(), tls.clone());
+        Arc::new(move || cancel_in_background(token.clone(), tls.clone()))
+    };
+    *shared.lock().expect("cancel mutex") = Some(cancel);
+
+    let mut worker = Worker {
+        rt,
+        client,
+        token,
+        tls,
+        events,
+        notices,
+        release: (0, 0),
+        autocommit: false,
+        tx: Transaction::default(),
+    };
+    match worker.on_connect() {
+        Ok(server) => {
+            worker.release = server.release;
+            worker.events.send(DbEvent::Connected(server));
+            for sql in &params.init_sql {
+                if let Err(e) = worker.pg().execute(sql) {
+                    worker.events.send(DbEvent::Notice(format!(
+                        "Login script: {e} ({})",
+                        sql.lines().next().unwrap_or_default()
+                    )));
+                }
+            }
+            worker.report_notices();
+        }
+        Err(e) => {
+            *shared.lock().expect("cancel mutex") = None;
+            worker.events.send(DbEvent::ConnectFailed(e));
+            return;
+        }
+    }
+
+    // A request that ended an open result set, handled next.
+    let mut next = None;
+    loop {
+        let request = match next.take() {
+            Some(request) => request,
+            None => match requests.recv() {
+                Ok(request) => request,
+                Err(_) => break,
+            },
+        };
+        debug!(?request, "db request");
+        match request {
+            DbRequest::Execute {
+                id,
+                sql,
+                max_rows,
+                binds,
+            } => next = worker.execute(id, &sql, max_rows, &binds, &requests),
+            // Its result was closed by another request in between.
+            DbRequest::FetchMore { id, .. } => worker.events.send(DbEvent::Rows {
+                id,
+                rows: Vec::new(),
+                more: false,
+                elapsed: Duration::ZERO,
+            }),
+            DbRequest::Meta { id, query } => {
+                let started = Instant::now();
+                let result = crate::pg_meta::run(&worker.pg(), &query);
+                debug!(
+                    id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    ok = result.is_ok(),
+                    ?query,
+                    "metadata query done"
+                );
+                worker.events.send(DbEvent::Meta { id, result });
+            }
+            DbRequest::Commit => worker.end_transaction(true),
+            DbRequest::Rollback => worker.end_transaction(false),
+            DbRequest::SetAutocommit(on) => worker.autocommit = on,
+            DbRequest::Task { id, .. } => worker.events.send(DbEvent::TaskDone {
+                id,
+                result: Err(DbError::unsupported("This tool", Dialect::POSTGRES)),
+            }),
+            DbRequest::Run { id, task } => {
+                let started = Instant::now();
+                let result = task(&mut PgClient(worker.pg()));
+                debug!(
+                    id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    ok = result.is_ok(),
+                    "task done"
+                );
+                worker.events.send(DbEvent::TaskDone { id, result });
+            }
+            DbRequest::Disconnect => break,
+        }
+        worker.report_notices();
+    }
+
+    *shared.lock().expect("cancel mutex") = None;
+    // Without a client the connection says goodbye (rolling back what wasn't
+    // committed) and ends.
+    let Worker {
+        rt, client, events, ..
+    } = worker;
+    drop(client);
+    let _ = rt.block_on(async { tokio::time::timeout(Duration::from_secs(2), driver).await });
+    info!("disconnected");
+    events.send(DbEvent::Disconnected);
+}
+
+fn runtime() -> std::io::Result<Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+/// Runs the connection: its I/O happens while the worker waits for an
+/// answer. Notices (`RAISE NOTICE`, "… does not exist, skipping") go to the
+/// worker, which reports them after each request.
+async fn drive(connection: Connection, notices: mpsc::Sender<String>) {
+    let mut connection = connection;
+    let mut messages = futures_util::stream::poll_fn(move |cx| connection.poll_message(cx));
+    while let Some(message) = messages.next().await {
+        match message {
+            Ok(AsyncMessage::Notice(notice)) => {
+                let _ = notices.send(notice_text(&notice));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!("connection ended: {e}");
+                return;
+            }
+        }
+    }
+}
+
+fn notice_text(notice: &tokio_postgres::error::DbError) -> String {
+    let mut text = format!("{}: {}", notice.severity(), notice.message());
+    if let Some(detail) = notice.detail() {
+        text.push_str(&format!("\nDETAIL: {detail}"));
+    }
+    if let Some(hint) = notice.hint() {
+        text.push_str(&format!("\nHINT: {hint}"));
+    }
+    text
+}
+
+/// PostgreSQL's way to break into a session: a request on a connection of
+/// its own. Runs on a thread of its own, so Break never waits for it.
+fn cancel_in_background(token: CancelToken, tls: MakeRustlsConnect) {
+    let spawned =
+        std::thread::Builder::new()
+            .name("pg-cancel".into())
+            .spawn(move || match runtime() {
+                Ok(rt) => {
+                    if let Err(e) = rt.block_on(token.cancel_query(tls)) {
+                        warn!("cancel failed: {e}");
+                    }
+                }
+                Err(e) => warn!("cancel failed: {e}"),
+            });
+    if let Err(e) = spawned {
+        warn!("cancel failed: {e}");
+    }
+}
+
+struct Worker {
+    rt: Runtime,
+    client: tokio_postgres::Client,
+    token: CancelToken,
+    tls: MakeRustlsConnect,
+    events: Events,
+    notices: Receiver<String>,
+    release: Release,
+    autocommit: bool,
+    tx: Transaction,
+}
+
+/// How a statement ended: a query's rows were reported as they were
+/// fetched (`failed` if fetching them did), anything else is summarized.
+enum Outcome {
+    Query { failed: bool },
+    Done { affected: Option<u64> },
+}
+
+impl Worker {
+    fn pg(&self) -> Pg<'_> {
+        Pg {
+            rt: &self.rt,
+            client: &self.client,
+            release: self.release,
+        }
+    }
+
+    fn on_connect(&mut self) -> Result<ServerInfo, DbError> {
+        let row = self
+            .pg()
+            .first(
+                "select current_setting('server_version'), version(), current_schema()",
+                &[],
+            )?
+            .ok_or_else(|| DbError::new("The server didn't report its version"))?;
+        let mut values = row.into_iter().map(Option::unwrap_or_default);
+        let full = values.next().unwrap_or_default();
+        // `18.1 (Debian 18.1-1.pgdg13+2)` → `18.1`
+        let version = full
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        Ok(ServerInfo {
+            dialect: Dialect::POSTGRES,
+            release: release(&version),
+            banner: values.next().unwrap_or(full),
+            version,
+            current_schema: values.next().unwrap_or_default(),
+        })
+    }
+
+    /// Runs a statement. A query's result stays open for `FetchMore`s;
+    /// returns the request that closed it, if any.
+    fn execute(
+        &mut self,
+        id: u64,
+        sql: &str,
+        max_rows: usize,
+        binds: &[(String, Option<String>)],
+        requests: &Receiver<DbRequest>,
+    ) -> Option<DbRequest> {
+        let started = Instant::now();
+        let mut next = None;
+        // Values are written into the statement: the simple protocol has no
+        // parameters, and PostgreSQL types an unadorned literal by its use.
+        let sql = if binds.is_empty() {
+            sql.to_owned()
+        } else {
+            replace_binds(sql, binds, |_, value| {
+                value.as_deref().map_or_else(|| "null".into(), literal)
+            })
+        };
+        let effect = TxEffect::of(&sql);
+        // Changes wait for Commit: they get a transaction of their own.
+        let opened = !self.autocommit && !self.tx.pending && effect == TxEffect::Changes;
+        let guarded = self.tx.pending && effect.guarded();
+        let before = if opened {
+            self.pg().execute("begin")
+        } else if guarded {
+            self.pg().execute(&format!("savepoint {SAVEPOINT}"))
+        } else {
+            Ok(())
+        };
+        if let Err(error) = before {
+            self.events.send(DbEvent::Failed {
+                id,
+                error,
+                elapsed: started.elapsed(),
+            });
+            self.report_transaction();
+            return None;
+        }
+        if opened {
+            self.tx.pending = true;
+        }
+        let ran = self.run_statement(id, &sql, max_rows, requests, started, &mut next);
+        let failed = match ran {
+            Ok(Outcome::Done { affected }) => {
+                let kind = statement_kind(&sql);
+                let summary = ExecSummary {
+                    rows_affected: if is_dml(&kind) { affected } else { None },
+                    kind,
+                    compiled: None,
+                };
+                self.events.send(DbEvent::Executed {
+                    id,
+                    summary,
+                    elapsed: started.elapsed(),
+                });
+                false
+            }
+            Ok(Outcome::Query { failed }) => failed,
+            Err(e) => {
+                let position = error_position(&e);
+                let mut error = DbError::from(e);
+                // A position in the statement as sent, which binds changed.
+                if binds.is_empty() {
+                    error.offset = position.and_then(|p| char_offset(&sql, p));
+                }
+                self.events.send(DbEvent::Failed {
+                    id,
+                    error,
+                    elapsed: started.elapsed(),
+                });
+                true
+            }
+        };
+        if failed {
+            if opened {
+                // Nothing else to keep in a transaction of its own.
+                let _ = self.pg().execute("rollback");
+                self.tx.pending = false;
+            } else if guarded {
+                let _ = self.pg().execute(&format!(
+                    "rollback to savepoint {SAVEPOINT}; release savepoint {SAVEPOINT}"
+                ));
+            } else if effect == TxEffect::Ends {
+                // A failed COMMIT rolls back.
+                self.tx.pending = false;
+            }
+        } else {
+            if guarded {
+                let _ = self.pg().execute(&format!("release savepoint {SAVEPOINT}"));
+            }
+            self.tx.after(effect);
+        }
+        self.report_notices();
+        self.report_transaction();
+        next
+    }
+
+    fn run_statement(
+        &mut self,
+        id: u64,
+        sql: &str,
+        max_rows: usize,
+        requests: &Receiver<DbRequest>,
+        started: Instant,
+        next: &mut Option<DbRequest>,
+    ) -> Result<Outcome, tokio_postgres::Error> {
+        // The simple protocol names a result's columns, not their types.
+        let types = if returns_rows(sql) && !has_inner_semicolon(sql) {
+            let statement = self.rt.block_on(self.client.prepare(sql))?;
+            statement
+                .columns()
+                .iter()
+                .map(|c| c.type_().clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut stream: Stream = Box::pin(self.rt.block_on(self.client.simple_query_raw(sql))?);
+        let mut affected = None;
+        while let Some(message) = self.rt.block_on(stream.next()) {
+            match message? {
+                SimpleQueryMessage::RowDescription(described) => {
+                    let columns = described
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| column(c.name(), types.get(i)))
+                        .collect();
+                    self.events.send(DbEvent::QueryStarted { id, columns });
+                    let fetch = Fetch {
+                        id,
+                        max_rows,
+                        started,
+                        requests,
+                    };
+                    let failed = self.fetch(stream, fetch, next);
+                    return Ok(Outcome::Query { failed });
+                }
+                SimpleQueryMessage::CommandComplete(n) => affected = Some(n),
+                _ => {}
+            }
+        }
+        Ok(Outcome::Done { affected })
+    }
+
+    /// Reports a query's rows while `FetchMore`s for it come in. Returns
+    /// whether the query failed (or was cancelled when abandoned).
+    fn fetch(
+        &mut self,
+        mut stream: Stream,
+        fetch: Fetch<'_>,
+        next: &mut Option<DbRequest>,
+    ) -> bool {
+        let Fetch {
+            id,
+            mut max_rows,
+            mut started,
+            requests,
+        } = fetch;
+        loop {
+            let mut rows = Vec::with_capacity(max_rows.min(10_000));
+            let mut more = true;
+            while rows.len() < max_rows {
+                match self.rt.block_on(stream.next()) {
+                    Some(Ok(SimpleQueryMessage::Row(row))) => rows.push(cells(&row)),
+                    Some(Ok(SimpleQueryMessage::CommandComplete(_))) | None => {
+                        more = false;
+                        break;
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        self.events.send(DbEvent::Failed {
+                            id,
+                            error: e.into(),
+                            elapsed: started.elapsed(),
+                        });
+                        return true;
+                    }
+                }
+            }
+            self.events.send(DbEvent::Rows {
+                id,
+                rows,
+                more,
+                elapsed: started.elapsed(),
+            });
+            if !more {
+                // Several statements in one: the rest runs unseen.
+                let mut failed = false;
+                while let Some(message) = self.rt.block_on(stream.next()) {
+                    if let Err(e) = message {
+                        self.events.send(DbEvent::Error(e.into()));
+                        failed = true;
+                    }
+                }
+                return failed;
+            }
+            match requests.recv() {
+                Ok(DbRequest::FetchMore {
+                    id: wanted,
+                    max_rows: n,
+                }) if wanted == id => {
+                    max_rows = n;
+                    started = Instant::now();
+                }
+                other => {
+                    *next = Some(other.unwrap_or(DbRequest::Disconnect));
+                    return self.abandon(stream);
+                }
+            }
+        }
+    }
+
+    /// Closes a result with rows left: what has arrived is read, and a query
+    /// still sending is cancelled. Returns whether it ended in an error.
+    fn abandon(&mut self, mut stream: Stream) -> bool {
+        let deadline = Instant::now() + DRAIN;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match self
+                .rt
+                .block_on(async { tokio::time::timeout(left, stream.next()).await })
+            {
+                Ok(None) => return false,
+                Ok(Some(Err(_))) => return true,
+                Ok(Some(Ok(_))) => {}
+                Err(_) => break,
+            }
+        }
+        // Waits for the server to take the request, so it can't hit the
+        // next statement.
+        if let Err(e) = self.rt.block_on(self.token.cancel_query(self.tls.clone())) {
+            warn!("cancel failed: {e}");
+        }
+        let mut failed = false;
+        while let Some(message) = self.rt.block_on(stream.next()) {
+            failed |= message.is_err();
+        }
+        failed
+    }
+
+    fn end_transaction(&mut self, commit: bool) {
+        match self
+            .pg()
+            .execute(if commit { "commit" } else { "rollback" })
+        {
+            Ok(()) => {
+                self.tx.pending = false;
+                self.events.send(DbEvent::Notice(
+                    if commit { "Committed" } else { "Rolled back" }.into(),
+                ));
+            }
+            Err(e) => {
+                // A failed commit rolls back too.
+                self.tx.pending = false;
+                self.events.send(DbEvent::Error(e));
+            }
+        }
+        self.report_notices();
+        self.report_transaction();
+    }
+
+    fn report_transaction(&self) {
+        self.events.send(DbEvent::Transaction {
+            pending: self.tx.pending,
+        });
+    }
+
+    /// Notices of the last request, as messages.
+    fn report_notices(&self) {
+        while let Ok(notice) = self.notices.try_recv() {
+            self.events.send(DbEvent::Notice(notice));
+        }
+    }
+}
+
+/// What [`Worker::fetch`] reads.
+struct Fetch<'a> {
+    id: u64,
+    max_rows: usize,
+    started: Instant,
+    requests: &'a Receiver<DbRequest>,
+}
+
+/// A session's connection for queries of its own (dictionary lookups,
+/// tools): values as text, `$1`, `$2` written in as literals.
+pub(crate) struct Pg<'a> {
+    rt: &'a Runtime,
+    client: &'a tokio_postgres::Client,
+    pub(crate) release: Release,
+}
+
+impl Pg<'_> {
+    /// Runs statements, ignoring what they return.
+    pub(crate) fn execute(&self, sql: &str) -> Result<(), DbError> {
+        Ok(self.rt.block_on(self.client.batch_execute(sql))?)
+    }
+
+    /// The column names and rows of a query.
+    pub(crate) fn query(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<(Vec<String>, Vec<Vec<Cell>>), DbError> {
+        let sql = with_params(sql, params);
+        let messages = self.rt.block_on(self.client.simple_query(&sql))?;
+        let mut names = Vec::new();
+        let mut rows = Vec::new();
+        for message in messages {
+            match message {
+                SimpleQueryMessage::RowDescription(columns) if names.is_empty() => {
+                    names = columns.iter().map(|c| c.name().to_owned()).collect();
+                }
+                SimpleQueryMessage::Row(row) => rows.push(cells(&row)),
+                _ => {}
+            }
+        }
+        Ok((names, rows))
+    }
+
+    pub(crate) fn rows(&self, sql: &str, params: &[&str]) -> Result<Vec<Vec<Cell>>, DbError> {
+        Ok(self.query(sql, params)?.1)
+    }
+
+    pub(crate) fn first(&self, sql: &str, params: &[&str]) -> Result<Option<Vec<Cell>>, DbError> {
+        Ok(self.rows(sql, params)?.into_iter().next())
+    }
+}
+
+/// A PostgreSQL connection as a [`Client`].
+struct PgClient<'a>(Pg<'a>);
+
+impl Client for PgClient<'_> {
+    fn dialect(&self) -> Dialect {
+        Dialect::POSTGRES
+    }
+
+    fn query(&mut self, sql: &str, params: &[&str]) -> Result<Vec<Vec<Cell>>, DbError> {
+        self.0.rows(sql, params)
+    }
+
+    fn meta(&mut self, query: &MetaQuery) -> Result<MetaResult, DbError> {
+        crate::pg_meta::run(&self.0, query)
+    }
+}
+
+fn cells(row: &SimpleQueryRow) -> Vec<Cell> {
+    (0..row.len())
+        .map(|i| row.get(i).map(str::to_owned))
+        .collect()
+}
+
+/// A string literal PostgreSQL reads back as `value`, whatever
+/// `standard_conforming_strings` says.
+pub(crate) fn literal(value: &str) -> String {
+    let quoted = value.replace('\'', "''");
+    if value.contains('\\') {
+        format!("E'{}'", quoted.replace('\\', "\\\\"))
+    } else {
+        format!("'{quoted}'")
+    }
+}
+
+/// Writes `params` into `sql` as literals for its `$1`, `$2`, ….
+pub(crate) fn with_params(sql: &str, params: &[&str]) -> String {
+    if params.is_empty() {
+        return sql.to_owned();
+    }
+    let tokens = pythia_plsql::tokenize(sql);
+    let mut out = String::with_capacity(sql.len());
+    let mut last = 0;
+    for pair in tokens.windows(2) {
+        let (dollar, number) = (&pair[0], &pair[1]);
+        if &sql[dollar.span.clone()] != "$"
+            || number.kind != pythia_plsql::TokenKind::Number
+            || number.span.start != dollar.span.end
+        {
+            continue;
+        }
+        let Some(value) = sql[number.span.clone()]
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| params.get(n.checked_sub(1)?))
+        else {
+            continue;
+        };
+        out.push_str(&sql[last..dollar.span.start]);
+        out.push_str(&literal(value));
+        last = number.span.end;
+    }
+    out.push_str(&sql[last..]);
+    out
+}
+
+/// Whether a statement may return rows (its columns are described first).
+fn returns_rows(sql: &str) -> bool {
+    let words = leading_words(sql);
+    matches!(
+        words.first().map(String::as_str),
+        Some("SELECT" | "WITH" | "VALUES" | "TABLE" | "SHOW" | "EXPLAIN" | "FETCH" | "CALL")
+    ) || has_word(sql, &["RETURNING"])
+}
+
+fn is_dml(kind: &str) -> bool {
+    matches!(kind, "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "COPY")
+}
+
+fn column(name: &str, ty: Option<&Type>) -> Column {
+    let numeric = ty.is_some_and(|t| {
+        matches!(
+            *t,
+            Type::INT2
+                | Type::INT4
+                | Type::INT8
+                | Type::FLOAT4
+                | Type::FLOAT8
+                | Type::NUMERIC
+                | Type::OID
+                | Type::MONEY
+        )
+    });
+    Column {
+        name: name.to_owned(),
+        type_name: ty.map_or_else(|| "text".into(), type_name),
+        numeric,
+    }
+}
+
+/// The type the way PostgreSQL writes it in DDL.
+fn type_name(ty: &Type) -> String {
+    if let Kind::Array(inner) = ty.kind() {
+        return format!("{}[]", type_name(inner));
+    }
+    match *ty {
+        Type::INT2 => "smallint",
+        Type::INT4 => "integer",
+        Type::INT8 => "bigint",
+        Type::FLOAT4 => "real",
+        Type::FLOAT8 => "double precision",
+        Type::BOOL => "boolean",
+        Type::BPCHAR => "character",
+        Type::VARCHAR => "character varying",
+        Type::TIMESTAMPTZ => "timestamp with time zone",
+        Type::TIMETZ => "time with time zone",
+        _ => ty.name(),
+    }
+    .to_owned()
+}
+
+/// The 1-based character position of an error in the statement.
+fn error_position(e: &tokio_postgres::Error) -> Option<usize> {
+    match e.as_db_error()?.position()? {
+        ErrorPosition::Original(position) => usize::try_from(*position).ok(),
+        ErrorPosition::Internal { .. } => None,
+    }
+}
+
+/// What a statement does to the session's transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxEffect {
+    /// `BEGIN`, `START TRANSACTION`.
+    Begins,
+    /// Changes or locks rows.
+    Changes,
+    /// `COMMIT`, `ROLLBACK`, `END`, `ABORT`, `PREPARE TRANSACTION`.
+    Ends,
+    /// The session's own `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`.
+    Savepoint,
+    None,
+}
+
+impl TxEffect {
+    fn of(sql: &str) -> Self {
+        let words = leading_words(sql);
+        let first = words.first().map(String::as_str).unwrap_or_default();
+        let second = words.get(1).map(String::as_str).unwrap_or_default();
+        match first {
+            "ROLLBACK" if second == "TO" => TxEffect::Savepoint,
+            "COMMIT" | "ROLLBACK" | "END" | "ABORT" => TxEffect::Ends,
+            "PREPARE" if second == "TRANSACTION" => TxEffect::Ends,
+            "BEGIN" | "START" => TxEffect::Begins,
+            "SAVEPOINT" | "RELEASE" => TxEffect::Savepoint,
+            "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "COPY" | "CALL" | "DO" | "TRUNCATE"
+            | "LOCK" => TxEffect::Changes,
+            "SELECT" | "WITH" | "TABLE" => {
+                // `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`
+                let locks = word_followed_by(sql, "FOR", &["UPDATE", "SHARE", "NO", "KEY"]);
+                if locks
+                    || first == "WITH" && has_word(sql, &["INSERT", "UPDATE", "DELETE", "MERGE"])
+                {
+                    TxEffect::Changes
+                } else {
+                    TxEffect::None
+                }
+            }
+            _ => TxEffect::None,
+        }
+    }
+
+    /// Whether the statement runs after a savepoint of its own inside a
+    /// transaction (not those that end it or manage savepoints themselves).
+    fn guarded(self) -> bool {
+        matches!(self, TxEffect::Changes | TxEffect::None)
+    }
+}
+
+/// Whether the session has a transaction to commit. It follows the
+/// statements; without the session's autocommit, a change opens a
+/// transaction first (see [`Worker::execute`]).
+#[derive(Debug, Default)]
+struct Transaction {
+    pending: bool,
+}
+
+impl Transaction {
+    /// Notes a statement that succeeded.
+    fn after(&mut self, effect: TxEffect) {
+        match effect {
+            TxEffect::Begins => self.pending = true,
+            TxEffect::Ends => self.pending = false,
+            TxEffect::Changes | TxEffect::Savepoint | TxEffect::None => {}
+        }
+    }
+}
+
+/// Connection options from `host[:port][/database][?sslmode=…]`, a
+/// `postgresql://` URL or `key=value` pairs. `sslmode` is libpq's: `prefer`
+/// (the default) and `require` don't check the server's certificate,
+/// `verify-ca` and `verify-full` do.
+pub(crate) fn config(params: &ConnectParams) -> Result<(Config, MakeRustlsConnect), DbError> {
+    let text = params.connect_string.trim();
+    let mut ssl = None;
+    let mut take_ssl = |option: &str| match option.strip_prefix("sslmode=") {
+        Some(mode) => {
+            ssl = Some(mode.to_ascii_lowercase());
+            false
+        }
+        None => true,
+    };
+    let pairs = !text.contains("://") && !text.contains('?') && text.contains('=');
+    let spec = if pairs {
+        text.split_whitespace()
+            .filter(|o| take_ssl(o))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        let (address, query) = text.split_once('?').unwrap_or((text, ""));
+        let options: Vec<&str> = query
+            .split('&')
+            .filter(|o| !o.is_empty() && take_ssl(o))
+            .collect();
+        let address = if address.contains("://") {
+            address.to_owned()
+        } else {
+            format!("postgresql://{}", address.trim_start_matches('/'))
+        };
+        if options.is_empty() {
+            address
+        } else {
+            format!("{address}?{}", options.join("&"))
+        }
+    };
+    let mut config: Config = spec
+        .parse()
+        .map_err(|e| DbError::new(format!("Can't read the connect string: {e}")))?;
+    if !params.username.is_empty() {
+        config.user(&params.username);
+    }
+    if !params.password.is_empty() {
+        config.password(&params.password);
+    }
+    if config.get_application_name().is_none() {
+        config.application_name("Pythia");
+    }
+    if config.get_connect_timeout().is_none() {
+        config.connect_timeout(Duration::from_secs(15));
+    }
+    let (mode, verify) = match ssl.as_deref() {
+        None | Some("prefer" | "allow") => (SslMode::Prefer, false),
+        Some("disable") => (SslMode::Disable, false),
+        Some("require") => (SslMode::Require, false),
+        Some("verify-ca" | "verify-full") => (SslMode::Require, true),
+        Some(other) => {
+            return Err(DbError::new(format!(
+                "Unknown sslmode {other} (use disable, prefer, require, verify-full)"
+            )));
+        }
+    };
+    config.ssl_mode(mode);
+    Ok((config, tls(verify)))
+}
+
+fn tls(verify: bool) -> MakeRustlsConnect {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions");
+    let config = if verify {
+        let mut roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        let native = rustls_native_certs::load_native_certs();
+        roots.add_parsable_certificates(native.certs);
+        builder.with_root_certificates(roots).with_no_client_auth()
+    } else {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
+            .with_no_client_auth()
+    };
+    MakeRustlsConnect::new(config)
+}
+
+/// Accepts the server's certificate unchecked, as libpq does below
+/// `sslmode=verify-ca` (the connection is still encrypted).
+#[derive(Debug)]
+struct AnyCertificate(Arc<CryptoProvider>);
+
+impl ServerCertVerifier for AnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+impl From<tokio_postgres::Error> for DbError {
+    fn from(e: tokio_postgres::Error) -> Self {
+        let lost = e.is_closed()
+            || std::error::Error::source(&e).is_some_and(|s| s.is::<std::io::Error>());
+        let Some(db) = e.as_db_error() else {
+            return Self {
+                lost,
+                ..Self::new(format!("PostgreSQL: {e}"))
+            };
+        };
+        let mut message = format!("{} {}: {}", db.severity(), db.code().code(), db.message());
+        if let Some(detail) = db.detail() {
+            message.push_str(&format!("\nDETAIL: {detail}"));
+        }
+        if let Some(hint) = db.hint() {
+            message.push_str(&format!("\nHINT: {hint}"));
+        }
+        if let Some(context) = db.where_() {
+            message.push_str(&format!("\nCONTEXT: {context}"));
+        }
+        // Terminated session, server shutting down.
+        let gone = [
+            SqlState::ADMIN_SHUTDOWN,
+            SqlState::CRASH_SHUTDOWN,
+            SqlState::CANNOT_CONNECT_NOW,
+        ]
+        .contains(db.code());
+        Self {
+            lost: lost || gone,
+            ..Self::new(message)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(connect_string: &str) -> ConnectParams {
+        ConnectParams {
+            kind: crate::DbKind::Postgres,
+            username: "app".into(),
+            password: "secret".into(),
+            connect_string: connect_string.into(),
+            privilege: Default::default(),
+            init_sql: Vec::new(),
+            ssh: None,
+        }
+    }
+
+    #[test]
+    fn connect_strings() {
+        let parse = |text: &str| config(&params(text)).map(|(c, _)| c);
+        let c = parse("db.example.com:5433/shop?sslmode=verify-full").unwrap();
+        assert_eq!(c.get_ports(), [5433]);
+        assert_eq!(c.get_dbname(), Some("shop"));
+        assert_eq!(c.get_user(), Some("app"));
+        assert_eq!(c.get_ssl_mode(), SslMode::Require);
+        let c = parse("localhost").unwrap();
+        assert_eq!(c.get_ssl_mode(), SslMode::Prefer);
+        assert_eq!(c.get_application_name(), Some("Pythia"));
+        let c = parse("host=h port=6000 dbname=x sslmode=disable").unwrap();
+        assert_eq!(
+            (c.get_ports(), c.get_ssl_mode()),
+            (&[6000][..], SslMode::Disable)
+        );
+        let c = parse("postgresql://u@[::1]/d?sslmode=require").unwrap();
+        assert_eq!(c.get_dbname(), Some("d"));
+        assert_eq!(c.get_user(), Some("app"));
+        assert!(parse("h?sslmode=sometimes").is_err());
+    }
+
+    #[test]
+    fn literals_and_params() {
+        assert_eq!(literal("it's"), "'it''s'");
+        assert_eq!(literal(r"a\b"), r"E'a\\b'");
+        assert_eq!(
+            with_params(
+                "select $1, '$2', $2::int, $3 from t where a = $1",
+                &["x", "7"]
+            ),
+            "select 'x', '$2', '7'::int, $3 from t where a = 'x'"
+        );
+    }
+
+    #[test]
+    fn transaction_effects() {
+        let cases = [
+            ("select 1", TxEffect::None),
+            ("select * from t for update", TxEffect::Changes),
+            ("select * from t for no key update", TxEffect::Changes),
+            ("select 'for update' from t", TxEffect::None),
+            (
+                "with d as (delete from t returning *) select * from d",
+                TxEffect::Changes,
+            ),
+            ("insert into t values (1)", TxEffect::Changes),
+            ("do $$ begin null; end $$", TxEffect::Changes),
+            ("create table x (a int)", TxEffect::None),
+            ("savepoint a", TxEffect::Savepoint),
+            ("rollback to savepoint a", TxEffect::Savepoint),
+            ("release a", TxEffect::Savepoint),
+            ("rollback", TxEffect::Ends),
+            ("end", TxEffect::Ends),
+            ("begin", TxEffect::Begins),
+            ("start transaction read only", TxEffect::Begins),
+        ];
+        for (sql, effect) in cases {
+            assert_eq!(TxEffect::of(sql), effect, "{sql}");
+        }
+    }
+
+    #[test]
+    fn type_names() {
+        assert_eq!(type_name(&Type::INT4_ARRAY), "integer[]");
+        assert_eq!(type_name(&Type::NUMERIC), "numeric");
+        assert!(column("n", Some(&Type::NUMERIC)).numeric);
+        assert!(!column("t", None).numeric);
+    }
+}

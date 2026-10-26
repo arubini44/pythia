@@ -6,6 +6,13 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- PostgreSQL and SQL Server connections (experimental): *Type: PostgreSQL*
+  and *Type: SQL Server*, with the same tools as MySQL except the SSH
+  tunnel and the dashboard (#36). Scripts split the database's way:
+  dollar-quoted routine bodies and `::` casts on PostgreSQL, `GO` batches
+  and `BEGIN … END` blocks on SQL Server.
+
 ## [0.5.0] - 2026-10-26
 
 ### Added

@@ -7,15 +7,24 @@ pub enum DbKind {
     #[default]
     Oracle,
     MySql,
+    Postgres,
+    SqlServer,
 }
 
 impl DbKind {
-    pub const ALL: [DbKind; 2] = [DbKind::Oracle, DbKind::MySql];
+    pub const ALL: [DbKind; 4] = [
+        DbKind::Oracle,
+        DbKind::MySql,
+        DbKind::Postgres,
+        DbKind::SqlServer,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             DbKind::Oracle => "Oracle",
             DbKind::MySql => "MySQL",
+            DbKind::Postgres => "PostgreSQL",
+            DbKind::SqlServer => "SQL Server",
         }
     }
 }
@@ -148,6 +157,18 @@ mod tests {
         assert!(text.contains("kind = \"mysql\""), "{text}");
         let back: ConnectionProfile = toml::from_str(&text).unwrap();
         assert_eq!(back.kind, DbKind::MySql);
+
+        for (kind, name) in [
+            (DbKind::Postgres, "postgres"),
+            (DbKind::SqlServer, "sqlserver"),
+        ] {
+            let profile = ConnectionProfile {
+                kind,
+                ..Default::default()
+            };
+            let text = toml::to_string(&profile).unwrap();
+            assert!(text.contains(&format!("kind = \"{name}\"")), "{text}");
+        }
     }
 
     #[test]

@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use egui::{RichText, Ui};
 use pythia_db::{Cell, Column, DbError, DbEvent, DbRequest, Feature, MetaQuery, MetaResult};
-use pythia_plsql::{StatementKind, TokenKind, split_statements, statement_at, tokenize};
+use pythia_plsql::{
+    StatementKind, Syntax, TokenKind, split_statements_in, statement_at_in, tokenize,
+};
 use pythia_ui::icons::{Icon, icon_button, icon_text_button};
 use pythia_ui::{GridState, ResultGrid, selection_data, shown_data, to_tsv};
 use serde::{Deserialize, Serialize};
@@ -97,6 +99,9 @@ pub struct RunState {
     /// Result of a running export (file dialog + write on a helper thread).
     pub export: Option<std::sync::mpsc::Receiver<Result<Option<std::path::PathBuf>, String>>>,
     pub selection_summary: Option<String>,
+    /// Where the connection's scripts end their statements (from the
+    /// document context, each frame).
+    pub syntax: Syntax,
 }
 
 #[derive(Debug, Clone)]
@@ -317,11 +322,11 @@ impl SqlWindow {
             None => (0, text),
         };
         let statements = if current_only && selection.is_none() {
-            statement_at(src, self.editor.cursor())
+            statement_at_in(src, self.editor.cursor(), self.state.syntax)
                 .into_iter()
                 .collect()
         } else {
-            split_statements(src)
+            split_statements_in(src, self.state.syntax)
         };
         statements
             .into_iter()
@@ -340,6 +345,7 @@ impl SqlWindow {
         if self.is_running() {
             return Effects::default();
         }
+        self.state.syntax = cx.dialect.syntax();
         let statements = self.statements(current_only);
         let state = &mut self.state;
         state.results.clear();
@@ -966,7 +972,7 @@ impl SqlWindow {
         }
         match crate::text_file::read(&path).map(|f| f.text) {
             Ok(text) => {
-                let statements = split_statements(&text);
+                let statements = split_statements_in(&text, self.state.syntax);
                 self.state.total += statements.len();
                 self.info(format!(
                     "Running {} ({} statements)",
@@ -1341,6 +1347,7 @@ impl SqlWindow {
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &DocContext) -> Effects {
         let mut effects = Effects::default();
+        self.state.syntax = cx.dialect.syntax();
         egui::Panel::bottom(egui::Id::new(("sql-bottom", cx.id)))
             .resizable(true)
             .default_size(ui.available_height() * 0.45)
@@ -1389,7 +1396,9 @@ impl SqlWindow {
                         .collect(),
                 );
             }
-            self.assist.background(&mut self.editor, ui);
+            // Syntax errors come from the PL/SQL parser.
+            let check = cx.dialect.supports(Feature::PlSql);
+            self.assist.background(&mut self.editor, ui, check);
             self.state.line_col = self.editor.line_col();
             // The toolbar was drawn before this frame's edits.
             if self.refresh_debuggable() {
@@ -2175,8 +2184,8 @@ pub fn find_binds(sql: &str) -> Vec<String> {
 
 /// SQL*Plus commands the SQL window carries out itself for any database
 /// (scripts, prompts, substitution variables). The others mean something
-/// else to MySQL and go to the server.
-fn client_command(sql: &str) -> bool {
+/// else to other databases and go to the server.
+pub(crate) fn client_command(sql: &str) -> bool {
     let line = sql.trim_start();
     let command = line
         .split(|c: char| c.is_whitespace() || c == ';')
