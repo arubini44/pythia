@@ -7,6 +7,9 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- Session details: open cursors show their whole statement, not the first
+  60 characters V$OPEN_CURSOR keeps; selecting one shows it in full below
+  the list (#73).
 - Session details of a session that has ended no longer show the waits,
   statistics, open cursors and locks of the session that got its SID since.
   A blocker missing from the session list (shown with its SID only in the

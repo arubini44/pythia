@@ -886,6 +886,8 @@ pub struct LockRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenCursor {
     pub sql_id: Option<String>,
+    /// The whole statement, or the start the instance still has of it (all
+    /// of it while it's in the shared pool).
     pub text: String,
     pub cursor_type: Option<String>,
 }
@@ -998,13 +1000,23 @@ pub fn session_detail(conn: &Connection, sid: i64, serial: i64) -> SessionDetail
         "Open cursors",
         query(
             conn,
-            "select sql_id, sql_text, cursor_type from v$open_cursor where sid = :1 order by sql_text",
+            // V$OPEN_CURSOR has the first 60 characters of the statement,
+            // V$SQL the first 1000 and, for longer ones, the whole text.
+            "select oc.sql_id, oc.cursor_type, nvl(q.sql_text, oc.sql_text), \
+                    case when dbms_lob.getlength(q.sql_fulltext) > length(q.sql_text) \
+                         then q.sql_fulltext end \
+               from v$open_cursor oc \
+               left join v$sql q on q.address = oc.address and q.child_address = oc.child_address \
+              where oc.sid = :1 \
+              order by 3",
             &[&sid],
             |r| {
+                let text: Option<String> = get(r, 2)?;
+                let full: Option<String> = get(r, 3)?;
                 Ok(OpenCursor {
                     sql_id: get(r, 0)?,
-                    text: get::<Option<String>>(r, 1)?.unwrap_or_default(),
-                    cursor_type: get(r, 2)?,
+                    cursor_type: get(r, 1)?,
+                    text: full.or(text).unwrap_or_default(),
                 })
             },
         )

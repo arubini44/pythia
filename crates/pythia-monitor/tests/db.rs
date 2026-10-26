@@ -444,6 +444,41 @@ fn session_detail_of_a_reused_sid() {
     assert!(detail.errors.is_empty(), "{:?}", detail.errors);
 }
 
+/// Open cursors show whole statements, not V$OPEN_CURSOR's first 60
+/// characters: up to 1000 from V$SQL.SQL_TEXT, longer ones in full (#73).
+#[test]
+fn open_cursors_show_whole_statements() {
+    let Some(conn) = dba() else { return };
+    let medium = "select /* pythia_cursor_medium: a statement longer than sixty characters */ \
+                  dummy from dual"
+        .to_owned();
+    let long = format!(
+        "select /* pythia_cursor_long */ 1{} as total from dual",
+        " + 1".repeat(400)
+    );
+    assert!(long.len() > 1000);
+    let other = open_dba();
+    // DBMS_SQL cursors stay open until closed (these never are).
+    for statement in [&medium, &long] {
+        other
+            .execute(
+                "declare c integer; begin c := dbms_sql.open_cursor; \
+                 dbms_sql.parse(c, :1, dbms_sql.native); end;",
+                &[statement],
+            )
+            .unwrap();
+    }
+    let detail = queries::session_detail(&conn, sid(&other), serial(&other));
+    assert!(detail.errors.is_empty(), "{:?}", detail.errors);
+    for statement in [medium, long] {
+        assert!(
+            detail.cursors.iter().any(|c| c.text == statement),
+            "{statement}: {:?}",
+            detail.cursors
+        );
+    }
+}
+
 /// Object names of locks and row lock waits on tables the monitoring user
 /// has no privileges on: ALL_OBJECTS doesn't list them, DBA_OBJECTS does
 /// (#76). Needs `PYTHIA_TEST_DB`, a user with SELECT_CATALOG_ROLE only.
