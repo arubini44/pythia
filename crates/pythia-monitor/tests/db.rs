@@ -370,6 +370,9 @@ fn awr_and_ash() {
         return;
     }
     let before = queries::awr_snapshots(&conn, 10).unwrap();
+    // Two of our own: a report over an older snapshot fails with ORA-20019
+    // when the instance was restarted since.
+    queries::awr_create_snapshot(&conn).unwrap();
     let id = queries::awr_create_snapshot(&conn).unwrap();
     let snaps = queries::awr_snapshots(&conn, 10).unwrap();
     assert!(
