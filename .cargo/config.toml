@@ -1,0 +1,5 @@
+[alias]
+# The build behind cargo-packager's beforePackagingCommand. The release
+# workflow's Instant Client flavor replaces it through the environment
+# (CARGO_ALIAS_PACKAGE_BUILD) to add `--features pythia-db/thick`.
+package-build = "build --release -p pythia-app"

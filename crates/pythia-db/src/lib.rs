@@ -39,3 +39,19 @@ pub use ::oracle;
 #[cfg(not(feature = "thick"))]
 #[path = "thin.rs"]
 pub mod oracle;
+
+/// How this build reaches Oracle, for the About dialog. With the `thick`
+/// feature the first call loads the Oracle Client to ask for its version.
+pub fn oracle_driver() -> &'static str {
+    static DRIVER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DRIVER.get_or_init(|| {
+        #[cfg(feature = "thick")]
+        let driver = match ::oracle::Version::client() {
+            Ok(v) => format!("Oracle Client {v}"),
+            Err(_) => "Oracle Client (not found)".to_owned(),
+        };
+        #[cfg(not(feature = "thick"))]
+        let driver = "Pure-Rust driver (no Oracle client)".to_owned();
+        driver
+    })
+}

@@ -1,7 +1,11 @@
 name: Release
 
 # Builds packages for every platform and publishes them as a GitHub release
-# when a version tag is pushed:
+# when a version tag is pushed. Each platform comes in two flavors: the
+# pure-Rust driver (no Oracle client needed) and `-instantclient`, built with
+# `pythia-db/thick` for servers the pure-Rust driver can't reach (Native
+# Network Encryption required, 11.2). ODPI-C loads the Instant Client at run
+# time, so building needs no client.
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 
@@ -20,11 +24,11 @@ env:
 
 jobs:
   package:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.platform.name }}${{ matrix.flavor.suffix }}
     strategy:
       fail-fast: false
       matrix:
-        include:
+        platform:
           - name: linux-x86_64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -41,17 +45,25 @@ jobs:
             os: macos-15-intel
             target: x86_64-apple-darwin
             formats: app,dmg
-    runs-on: ${{ matrix.os }}
+        flavor:
+          - suffix: ""
+            build: build --release -p pythia-app
+          - suffix: -instantclient
+            build: build --release -p pythia-app --features pythia-db/thick
+    runs-on: ${{ matrix.platform.os }}
+    env:
+      # The build behind beforePackagingCommand (`cargo package-build`).
+      CARGO_ALIAS_PACKAGE_BUILD: ${{ matrix.flavor.build }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.platform.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.platform.target }}${{ matrix.flavor.suffix }}
 
       - name: Install cargo-packager
         uses: taiki-e/install-action@v2
@@ -67,8 +79,8 @@ jobs:
         shell: bash
         run: |
           cargo packager --release -p pythia-app \
-            --target ${{ matrix.target }} \
-            --formats ${{ matrix.formats }} \
+            --target ${{ matrix.platform.target }} \
+            --formats ${{ matrix.platform.formats }} \
             --out-dir "${{ github.workspace }}/dist"
         env:
           # Optional signing material; see docs/RELEASING.md.
@@ -78,6 +90,19 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      # pythia_0.4.0_amd64.deb -> pythia-instantclient_0.4.0_amd64.deb, so
+      # both flavors fit in one release.
+      - name: Name the flavor's packages
+        if: matrix.flavor.suffix != ''
+        shell: bash
+        run: |
+          shopt -s nullglob
+          cd dist
+          for f in *.deb *.AppImage *.msi *-setup.exe *.dmg; do
+            mv "$f" "${f/_/${{ matrix.flavor.suffix }}_}"
+          done
+          ls
 
       - name: Plain binary archive
         shell: bash
@@ -89,14 +114,14 @@ jobs:
           cp "target/release/$bin" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE dist/archive/
           cd dist/archive
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "../pythia-${{ github.ref_name }}-${{ matrix.name }}.zip" .
+            7z a "../pythia-${{ github.ref_name }}-${{ matrix.platform.name }}${{ matrix.flavor.suffix }}.zip" .
           else
-            tar czf "../pythia-${{ github.ref_name }}-${{ matrix.name }}.tar.gz" .
+            tar czf "../pythia-${{ github.ref_name }}-${{ matrix.platform.name }}${{ matrix.flavor.suffix }}.tar.gz" .
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pythia-${{ matrix.name }}
+          name: pythia-${{ matrix.platform.name }}${{ matrix.flavor.suffix }}
           path: |
             dist/*.deb
             dist/*.AppImage
