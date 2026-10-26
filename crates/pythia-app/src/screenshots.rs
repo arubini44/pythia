@@ -3709,6 +3709,133 @@ fn result_toolbar_fits_narrow_windows() {
     }
 }
 
+/// One connection for the whole app (#80): connecting makes the new
+/// connection the active one, and the object browser, new SQL windows and
+/// the open SQL windows follow it; windows with a transaction are asked
+/// about first. A program window keeps its connection, which its tab
+/// names. Disconnecting the active connection hands over to another.
+#[test]
+fn one_active_connection() {
+    use crate::commands::Command;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let first = "pythia@FREEPDB1";
+    let other = ConnectionProfile {
+        name: "other".into(),
+        color: None,
+        ..profile.clone()
+    };
+    let spec = std::env::var("PYTHIA_TEST_DB").unwrap();
+    let (cred, db) = spec.rsplit_once('@').unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let conn = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+    let _ = conn.execute("drop table pythia_active_t purge", &[]);
+    conn.execute("create table pythia_active_t (n number)", &[])
+        .unwrap();
+    let rows = || -> i64 {
+        conn.query_row_as("select count(*) from pythia_active_t", &[])
+            .unwrap()
+    };
+
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password.clone());
+    wait_until(&mut h, "first connection", |app| {
+        app.test_connected_to(first)
+    });
+    h.state_mut().test_command(Command::NewSqlWindow);
+    h.run_steps(2);
+    h.state_mut().test_open(OpenRequest::Program {
+        connection: first.into(),
+        object: ObjectRef {
+            owner: "PYTHIA".into(),
+            name: "DEMO_PKG".into(),
+            object_type: pythia_db::ObjectType::Package,
+        },
+    });
+    wait_until(&mut h, "package", |app| !app.test_focused_busy());
+    let on = |h: &Ui, prefix: &str| -> Vec<Option<String>> {
+        h.state()
+            .test_window_connections()
+            .into_iter()
+            .filter(|(title, _)| title.starts_with(prefix))
+            .map(|(_, c)| c)
+            .collect()
+    };
+    let some = |c: &str| Some(c.to_owned());
+    // All SQL windows on `connection`: how many.
+    let sql_on = |h: &Ui, connection: &str| -> usize {
+        let windows = on(h, "SQL");
+        assert!(
+            windows.iter().all(|c| c.as_deref() == Some(connection)),
+            "SQL windows on {connection}: {windows:?}"
+        );
+        windows.len()
+    };
+
+    // Connecting: the new connection is the active one; the SQL window
+    // moves, the package stays and its tab says where it is.
+    h.state_mut().test_connect(other, password);
+    wait_until(&mut h, "second connection", |app| {
+        app.test_connected_to("other")
+    });
+    h.run_steps(2);
+    assert_eq!(
+        h.state().test_active_connection(),
+        (some("other"), some("other"))
+    );
+    let windows = sql_on(&h, "other");
+    assert_eq!(on(&h, "demo_pkg"), [some(first)]);
+    assert_eq!(
+        h.state().test_tab_title("demo_pkg"),
+        Some(format!("demo_pkg · {first}")),
+        "the package's tab names its connection"
+    );
+    // New windows open on it, whichever window is focused.
+    h.state_mut().test_command(Command::NewSqlWindow);
+    h.run_steps(2);
+    assert_eq!(sql_on(&h, "other"), windows + 1);
+
+    // A transaction: switching (the object browser's picker) asks first.
+    h.state_mut()
+        .test_sql_window()
+        .editor
+        .set_text("insert into pythia_active_t values (1)");
+    h.state_mut().test_execute_focused();
+    wait_until(&mut h, "pending transaction", |app| {
+        app.test_transaction_state().is_ok()
+    });
+    h.state_mut().test_open(OpenRequest::Browse {
+        connection: first.into(),
+    });
+    h.run_steps(2);
+    assert_eq!(h.state().test_active_connection().0, some("other"));
+    h.get_by_label("Roll back and switch").click();
+    h.run_steps(4);
+    assert_eq!(
+        h.state().test_active_connection(),
+        (some(first), some(first))
+    );
+    assert_eq!(sql_on(&h, first), windows + 1);
+    wait_until(&mut h, "rolled back", |_| rows() == 0);
+    assert_eq!(
+        h.state().test_tab_title("demo_pkg").as_deref(),
+        Some("demo_pkg"),
+        "the package is on the active connection again"
+    );
+
+    // Disconnecting the active connection: the other one takes over.
+    h.state_mut().test_command(Command::Disconnect);
+    h.run_steps(2);
+    assert_eq!(
+        h.state().test_active_connection(),
+        (some("other"), some("other"))
+    );
+    assert_eq!(sql_on(&h, "other"), windows + 1);
+    conn.execute("drop table pythia_active_t purge", &[])
+        .unwrap();
+}
+
 /// SQL windows stay on their connection unless the settings allow
 /// switching, and never switch with a pending transaction.
 #[test]
@@ -3761,16 +3888,16 @@ fn window_connection_switching() {
     h.state_mut().test_rebind_focused("other");
     assert_eq!(on(&h), "other");
 
-    // Switching off again: a window whose connection was closed can still
-    // pick one.
+    // Switching off again: the window goes back to the connection the
+    // object browser shows, the app's, and moves when it is disconnected.
     h.state_mut().test_settings_mut().switch_window_connection = false;
+    h.run_steps(2);
+    assert_eq!(on(&h), "pythia@FREEPDB1");
+    assert!(h.query_by_label("Connection").is_none());
     h.state_mut()
         .test_command(crate::commands::Command::Disconnect);
     h.run_steps(2);
-    assert!(h.query_by_label("Connection").is_some());
-    h.state_mut().test_rebind_focused("pythia@FREEPDB1");
-    assert_eq!(on(&h), "pythia@FREEPDB1");
-    h.run_steps(2);
+    assert_eq!(on(&h), "other");
     assert!(h.query_by_label("Connection").is_none());
 }
 

@@ -323,10 +323,13 @@ impl Document {
         }
     }
 
-    pub fn tab_title(&self, color: Option<egui::Color32>) -> RichText {
+    /// The tab's title; `elsewhere` names its connection when that isn't
+    /// the active one.
+    pub fn tab_title(&self, color: Option<egui::Color32>, elsewhere: Option<&str>) -> RichText {
         let busy = if self.is_busy() { " …" } else { "" };
         let dirty = if self.is_dirty() { " •" } else { "" };
-        let text = RichText::new(format!("{}{dirty}{busy}", self.title()));
+        let on = elsewhere.map(|c| format!(" · {c}")).unwrap_or_default();
+        let text = RichText::new(format!("{}{on}{dirty}{busy}", self.title()));
         match color {
             Some(c) => text.color(c),
             None => text,

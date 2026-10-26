@@ -16,6 +16,20 @@ All notable changes to Pythia are documented here. The format follows
   right-clicking a subprogram's name in the spec, or a public one in the
   body, offers Test… and Debug… too (#71).
 
+### Changed
+- One connection for the whole app: with several connections open, the
+  toolbar, object browser, status bar, new SQL windows and the open SQL
+  windows all use the *active connection*, so a statement no longer runs on
+  another database than the object browser shows. Connecting, the object
+  browser's connection picker and the toolbar's connection menu switch it;
+  SQL windows with a transaction or a running statement ask first (commit
+  or roll back). Other connections stay open, to switch back to. Program
+  windows and object views keep their connection and name it in their tab
+  when it isn't the active one. Disconnecting the active connection hands
+  over to another open one. With *Switch connection per window* on, SQL
+  windows keep their own connections as before and the object browser
+  follows the focused window (#80).
+
 ### Fixed
 - Windows: `pythia.exe` carries Pythia's icon and version, so the taskbar,
   the Start menu and desktop shortcuts, Explorer, Installed apps and

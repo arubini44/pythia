@@ -448,9 +448,11 @@ fn query(ui: &mut Ui, s: &mut Settings) {
     row(
         ui,
         "Switch connection per window",
-        "A connection picker above each SQL window and in the toolbar's connection menu. Off: \
-         windows stay on the connection they were opened on; one without an open connection \
-         can still pick one.",
+        "Each SQL window keeps its own connection, with a picker above it and in the toolbar's \
+         connection menu; the object browser shows the focused window's. Off: one connection \
+         for the whole app. The toolbar, object browser, new windows and SQL windows use the \
+         active connection; picking another (toolbar menu, object browser) or connecting moves \
+         the SQL windows there.",
         |ui| {
             ui.checkbox(&mut s.switch_window_connection, "");
         },
