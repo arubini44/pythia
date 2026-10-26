@@ -67,7 +67,11 @@ for Linux, Windows and macOS.
 - Program windows with spec and body, compile with clickable errors
   (gutter markers and squiggles), unsaved-change tracking, save to file.
 - **Test…** generates a ready-to-run block for any procedure or function
-  (IN parameters as binds, OUT parameters printed).
+  (IN parameters as binds, OUT parameters printed). **Debug…** runs that
+  block under the debugger right away and stops on entry to the
+  subprogram. Both are on the right-click menu of procedures, functions and
+  package members, in the object browser and in the editors, also on a
+  subprogram's name in its own package spec or body.
 - **Debugger** (DBMS_DEBUG_JDWP): breakpoints with conditions and hit
   counts, break on exception, step over/into/out (also through the debugged
   block itself), call stack with subprograms, variables of any frame

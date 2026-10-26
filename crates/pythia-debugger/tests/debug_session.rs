@@ -12,7 +12,9 @@ use std::thread;
 
 use common::{Harness, connect, host, run_target, value, watch};
 use pythia_debugger::target::{self, MissingPrivilege};
-use pythia_debugger::{Breakpoint, BreakpointOptions, DebugCommand, StopReason, Unit, UnitType};
+use pythia_debugger::{
+    Breakpoint, BreakpointOptions, DebugCommand, DebugEvent, StopReason, Unit, UnitType,
+};
 
 const DEMO: &str = "create or replace procedure dbg_demo(p_n in number) is
   type t_arr is table of number; type t_rec is record (a number := 7, b varchar2(10) := 'bee');
@@ -311,6 +313,42 @@ fn debug_procedures_and_packages() {
         .unwrap();
     assert!(outcome.error.is_none(), "{:?}", outcome.error);
     assert_eq!(outcome.output, ["handled -1"]);
+
+    // --- stop on entry: a procedure, once -------------------------------------
+    let h = Harness::new();
+    h.debugger.send(DebugCommand::BreakOnEntry {
+        unit: helper.clone(),
+        subprogram: "DBG_HELPER".into(),
+    });
+    let target = run_target(h.debugger.port(), "begin dbg_demo(2); dbg_demo(1); end;");
+    let (stop, depth) = h.stop_full();
+    eprintln!("entry: {stop:?}");
+    assert_eq!((stop.reason, &stop.unit), (StopReason::Entry, &helper));
+    assert_eq!(depth, 3, "dbg_helper called from dbg_demo");
+    assert_eq!(stop.line, Some(1), "the procedure's header");
+    assert_eq!(value(&stop.variables, "P_V"), Some("3"));
+    // The second call doesn't stop.
+    h.debugger.send(DebugCommand::Resume);
+    assert!(h.next_stop().is_none(), "stops once");
+    target.join().unwrap().expect("target ran to completion");
+
+    // --- stop on entry: no such subprogram -------------------------------------
+    let h = Harness::new();
+    h.debugger.send(DebugCommand::BreakOnEntry {
+        unit: body.clone(),
+        subprogram: "NOT_THERE".into(),
+    });
+    let target = run_target(h.debugger.port(), "begin dbg_pkg.p; end;");
+    let error = loop {
+        match h.next() {
+            DebugEvent::Error(e) => break e,
+            DebugEvent::Terminated => panic!("no error about the missing subprogram"),
+            _ => {}
+        }
+    };
+    assert!(error.contains("not_there"), "{error}");
+    assert!(h.next_stop().is_none(), "runs through");
+    target.join().unwrap().expect("target ran to completion");
 
     for ddl in [
         "drop procedure dbg_demo",

@@ -9,12 +9,22 @@ All notable changes to Pythia are documented here. The format follows
 ### Added
 - Program windows: *Compile all* has a tooltip saying that it compiles the
   specification, then the body, and stops at the first error (#78).
+- **Debug…** next to **Test…** on procedures, functions and package
+  members: it opens the test block in a SQL window and debugs it right away,
+  stopping on entry to the subprogram (any overload) without a breakpoint;
+  its unit is compiled with debug information first. In a program window,
+  right-clicking a subprogram's name in the spec, or a public one in the
+  body, offers Test… and Debug… too (#71).
 
 ### Fixed
 - Windows: `pythia.exe` carries Pythia's icon and version, so the taskbar,
   the Start menu and desktop shortcuts, Explorer, Installed apps and
   associated files show Pythia's icon rather than the default one, and Task
   Manager and "Open with" list it as Pythia (#77).
+- Test… on an overloaded package subprogram tests that overload, not
+  always the first one: in the object browser, and in a program window,
+  where the overload is the declaration right-clicked in the spec, or the
+  one with the same parameters as the implementation in the body (#85).
 
 ## [0.4.1] - 2026-10-26
 

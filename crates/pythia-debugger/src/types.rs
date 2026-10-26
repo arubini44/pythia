@@ -178,6 +178,8 @@ pub enum StopReason {
     Step,
     Pause,
     Exception,
+    /// Entered the subprogram of [`DebugCommand::BreakOnEntry`].
+    Entry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +200,14 @@ pub enum DebugCommand {
     SelectFrame(usize),
     /// Stop when an exception is raised.
     BreakOnException(bool),
+    /// Stop once, when execution enters a subprogram of a unit (any
+    /// overload), at its first line with code. A package's subprograms are
+    /// in its body; a standalone procedure or function is its own
+    /// subprogram. Replaces an entry not reached yet.
+    BreakOnEntry {
+        unit: Unit,
+        subprogram: String,
+    },
     Resume,
     StepOver,
     StepInto,

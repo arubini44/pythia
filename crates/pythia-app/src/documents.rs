@@ -176,6 +176,13 @@ pub enum OpenRequest {
         text: String,
         run: bool,
     },
+    /// A SQL window with a block that calls a subprogram, debugged right
+    /// away; the run stops on entry to `entry` (unit and subprogram).
+    Debug {
+        connection: String,
+        text: String,
+        entry: (pythia_debugger::Unit, String),
+    },
     Program {
         connection: String,
         object: ObjectRef,
