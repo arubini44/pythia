@@ -3104,6 +3104,68 @@ fn mysql_through_ssh() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The MySQL dashboard (`PYTHIA_TEST_MYSQL`): server KPIs, trends and
+/// findings on the connection's own session, and what the user would need
+/// to see more.
+#[test]
+fn mysql_dashboard() {
+    use crate::commands::Command;
+    let Some(spec) = std::env::var("PYTHIA_TEST_MYSQL").ok() else {
+        return;
+    };
+    let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+    let (username, password) = credentials.split_once('/').unwrap();
+    let profile = ConnectionProfile {
+        name: "shop".into(),
+        kind: pythia_config::DbKind::MySql,
+        username: username.into(),
+        connect_string: connect_string.into(),
+        color: Some([0x14, 0xb8, 0xa6]),
+        ..Default::default()
+    };
+    // Tall enough for all of it.
+    let mut h = sized_harness(egui::vec2(1440.0, 2100.0));
+    h.state_mut().test_connect(profile, password.into());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_command(Command::MonitorDashboard);
+
+    // Three snapshots: rates from the second on, a chart from the third.
+    let wait_for = |h: &mut Ui, what: &str, done: &dyn Fn(&mut Ui) -> bool| {
+        let start = Instant::now();
+        while !done(h) {
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "timed out waiting for {what}"
+            );
+            h.step();
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    };
+    wait_for(&mut h, "the dashboard", &|h| {
+        h.query_by_label("Buffer pool hit ratio").is_some()
+    });
+    // Refreshing now until the charts have two samples.
+    let start = Instant::now();
+    while h.query_all_by_label("Collecting samples…").next().is_some() {
+        assert!(start.elapsed() < Duration::from_secs(60), "no charts");
+        std::thread::sleep(Duration::from_millis(600));
+        h.get_by_label("⟳").click();
+        h.run_steps(3);
+    }
+    for label in [
+        "Connections",
+        "Queries / s",
+        "Buffer pool used",
+        "Temp tables on disk",
+        "Largest tables",
+        "Running statements, longest first",
+    ] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("Dashboard"));
+    save(&mut h, "mysql-dashboard");
+}
+
 /// A MySQL connection (`PYTHIA_TEST_MYSQL=user/password@host:port/database`):
 /// queries, transactions, browser and object views work; what MySQL can't
 /// do is left out of the menus, the toolbar and the browser.
@@ -3171,9 +3233,16 @@ select id, customer, total from app_orders where total < @limit order by id;
     });
 
     // Oracle-only menus are gone, the rest only offers what works.
-    for menu in ["Debug", "Monitor", "Reports"] {
+    for menu in ["Debug", "Reports"] {
         assert!(h.query_by_label(menu).is_none(), "{menu}");
     }
+    h.get_by_label("Monitor").click();
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Dashboard").is_some());
+    assert!(h.query_by_label_contains("Blocking Sessions").is_none());
+    assert!(h.query_by_label_contains("AWR").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
     h.get_by_label("Tools").click();
     h.run_steps(2);
     assert!(h.query_by_label_contains("Find Database Object").is_some());

@@ -22,7 +22,9 @@ pub enum Feature {
     Statistics,
     Profiler,
     Debugger,
-    /// Dashboard, sessions, blocking, AWR and trace analysis.
+    /// The monitoring dashboard: KPIs, trends, findings, top SQL.
+    Dashboard,
+    /// Sessions, blocking, AWR and trace analysis.
     Monitor,
     SchedulerJobs,
     InvalidObjects,
@@ -90,7 +92,10 @@ impl Dialect {
             DbKind::Oracle => feature != Feature::SshTunnel,
             DbKind::MySql => matches!(
                 feature,
-                Feature::ExplainPlan | Feature::Completion | Feature::SshTunnel
+                Feature::ExplainPlan
+                    | Feature::Completion
+                    | Feature::SshTunnel
+                    | Feature::Dashboard
             ),
         }
     }
@@ -182,13 +187,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn oracle_has_everything() {
-        for feature in [Feature::PlSql, Feature::Debugger, Feature::Monitor] {
+    fn oracle_has_everything_but_ssh() {
+        for feature in [
+            Feature::PlSql,
+            Feature::Debugger,
+            Feature::Dashboard,
+            Feature::Monitor,
+        ] {
             assert!(Dialect::ORACLE.supports(feature));
         }
-        assert!(Dialect::MYSQL.supports(Feature::ExplainPlan));
+        assert!(!Dialect::ORACLE.supports(Feature::SshTunnel));
+        for feature in [Feature::ExplainPlan, Feature::Dashboard, Feature::SshTunnel] {
+            assert!(Dialect::MYSQL.supports(feature));
+        }
         assert!(!Dialect::MYSQL.supports(Feature::Debugger));
         assert!(!Dialect::MYSQL.supports(Feature::ServerOutput));
+        assert!(!Dialect::MYSQL.supports(Feature::Monitor));
         assert_eq!(Dialect::default(), Dialect::ORACLE);
     }
 

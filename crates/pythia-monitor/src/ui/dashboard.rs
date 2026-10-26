@@ -383,7 +383,7 @@ fn activity(ui: &mut Ui, snap: &DashboardSnapshot) {
     });
 }
 
-fn top_list(ui: &mut Ui, title: &str, rows: &[(String, i64)]) {
+pub(super) fn top_list(ui: &mut Ui, title: &str, rows: &[(String, i64)]) {
     section(ui, title, |ui| {
         if rows.is_empty() {
             ui.weak("—");
@@ -667,7 +667,7 @@ fn long_ops(ui: &mut Ui, snap: &DashboardSnapshot) {
 
 /// "What needs attention" — findings first, so the dashboard answers the
 /// question before showing the numbers.
-fn insights_strip(ui: &mut Ui, found: &[Insight], have_rates: bool, wants: &mut Wants) {
+pub(super) fn insights_strip(ui: &mut Ui, found: &[Insight], have_rates: bool, wants: &mut Wants) {
     if found.is_empty() {
         let text = if have_rates {
             "All clear — no blocking, load and storage look healthy"

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use egui::Ui;
 use pythia_db::{DbEvent, DbRequest};
-use pythia_monitor::{Monitor, MonitorAction, MonitorTab, Token};
+use pythia_monitor::{Monitor, MonitorAction, MonitorTab, MonitorTask, Token};
 use serde::{Deserialize, Serialize};
 
 use crate::documents::{DocContext, Effects, Target, request_id};
@@ -92,17 +92,16 @@ impl MonitorWindow {
         state
             .monitor
             .set_analyze(!cx.settings.ai.backends.is_empty());
+        state.monitor.set_dialect(cx.dialect);
         let out = state.monitor.ui(ui);
         for request in out.requests {
             let id = request_id();
             state.tokens.insert(id, request.token);
-            effects.request(
-                Target::Own,
-                DbRequest::Task {
-                    id,
-                    task: request.task,
-                },
-            );
+            let request = match request.task {
+                MonitorTask::Oracle(task) => DbRequest::Task { id, task },
+                MonitorTask::Client(task) => DbRequest::Run { id, task },
+            };
+            effects.request(Target::Own, request);
         }
         for action in out.actions {
             match action {

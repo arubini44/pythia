@@ -144,9 +144,8 @@ impl Command {
             SwitchSpecBody => Feature::PlSql,
             DebugStart | ToggleBreakpoint | DebugContinue | DebugStepOver | DebugStepInto
             | DebugStepOut | DebugStop | ShowDebugger => Feature::Debugger,
-            MonitorDashboard | MonitorSessions | MonitorBlocking | MonitorAwr | MonitorTrace => {
-                Feature::Monitor
-            }
+            MonitorDashboard => Feature::Dashboard,
+            MonitorSessions | MonitorBlocking | MonitorAwr | MonitorTrace => Feature::Monitor,
             AiAnalyzePlan => Feature::ExplainPlan,
             _ => return None,
         })

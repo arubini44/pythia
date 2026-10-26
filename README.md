@@ -160,9 +160,16 @@ for Linux, Windows and macOS.
   triggers; object views show columns, indexes, constraints, triggers,
   grants, dependencies and the DDL. *Edit* opens a routine as a script that
   drops and creates it again.
+- A monitoring dashboard of its own (Monitor → Dashboard): findings first
+  (lock waits and who blocks, metadata locks, connections near the limit,
+  buffer pool hit ratio, long transactions, replication), then KPIs and
+  trends from `SHOW GLOBAL STATUS`, running statements, open transactions,
+  storage and top statements from `performance_schema`. Other users'
+  threads, transactions and lock waits need the `PROCESS` privilege; top
+  statements and lock waits `SELECT` on `performance_schema`.
 - Everything built on Oracle's dictionary or PL/SQL — debugger, profiler,
-  monitor, reports, scheduler jobs, compare, import/export, editing results,
-  the form editors — isn't offered on MySQL connections. As in SQL\*Plus,
+  the rest of the monitor, reports, scheduler jobs, compare, import/export,
+  editing results, the form editors — isn't offered on MySQL connections. As in SQL\*Plus,
   end a routine with `/` on a line of its own (there is no `DELIMITER`).
 
 ## Installing
@@ -248,6 +255,7 @@ PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 |---|---|
 | `PYTHIA_TEST_DB` | integration tests (app user) |
 | `PYTHIA_TEST_MYSQL` | MySQL tests, e.g. `pythia/pythia@localhost:3306/pythia` for `docker compose up -d mysql` |
+| `PYTHIA_TEST_MYSQL_DBA` | MySQL dashboard tests that need privileges, e.g. `root/mysql@localhost:3306/pythia` |
 | `PYTHIA_TEST_SSH`, `PYTHIA_TEST_MYSQL_VIA_SSH` | SSH tunnel tests: `pythia:pythia@localhost:2222` and `pythia/pythia@mysql:3306/pythia` for `docker compose up -d mysql ssh` |
 | `PYTHIA_TEST_DB_DBA` | monitor, compare and debugger tests (`system/oracle@…`) |
 | `PYTHIA_DEBUG_HOST` | debugger tests: how the database reaches this machine (`host.containers.internal` for a local Podman container; with Docker on Linux, the compose network's gateway from `docker network inspect pythia_default`) |

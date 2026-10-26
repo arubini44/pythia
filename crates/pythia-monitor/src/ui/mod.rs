@@ -2,15 +2,19 @@
 //!
 //! The driver never touches a connection. Views ask for data; the driver turns
 //! that into [`MonitorRequest`]s (a token plus a closure) which the host sends
-//! as [`pythia_db::DbRequest::Task`] on a dedicated monitoring session, and feeds
-//! the results back with [`Monitor::on_task_done`].
+//! as [`pythia_db::DbRequest::Task`] (Oracle) or [`pythia_db::DbRequest::Run`]
+//! (MySQL) on a dedicated monitoring session, and feeds the results back with
+//! [`Monitor::on_task_done`].
 //!
 //! ```ignore
 //! let out = monitor.ui(ui);
 //! for req in out.requests {
 //!     let id = app.request_id();
 //!     app.monitor_tasks.insert(id, req.token);
-//!     monitor_session.send(DbRequest::Task { id, task: req.task });
+//!     monitor_session.send(match req.task {
+//!         MonitorTask::Oracle(task) => DbRequest::Task { id, task },
+//!         MonitorTask::Client(task) => DbRequest::Run { id, task },
+//!     });
 //! }
 //! // later, on DbEvent::TaskDone { id, result }:
 //! if let Some(token) = app.monitor_tasks.remove(&id) { monitor.on_task_done(token, result); }
@@ -19,6 +23,7 @@
 mod awr;
 mod dashboard;
 mod detail;
+mod mysql;
 mod sessions;
 pub mod style;
 mod trace;
@@ -27,13 +32,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use egui::{RichText, Ui};
-use pythia_db::{DbError, TaskFn, TaskResult};
+use pythia_db::{DbError, DbKind, Dialect, RunFn, TaskFn, TaskResult};
 
 use crate::queries::{self, Capabilities};
 
 pub use awr::AwrView;
 pub use dashboard::{DashboardView, Refresh};
 pub use detail::SessionDetailView;
+pub use mysql::MySqlDashboardView;
 pub use sessions::SessionsView;
 pub use trace::TraceView;
 
@@ -43,7 +49,15 @@ pub type Token = u64;
 /// Work for the monitoring session.
 pub struct MonitorRequest {
     pub token: Token,
-    pub task: TaskFn,
+    pub task: MonitorTask,
+}
+
+/// How a request runs on the session.
+pub enum MonitorTask {
+    /// On the Oracle connection (`DbRequest::Task`).
+    Oracle(TaskFn),
+    /// On any database's [`pythia_db::Client`] (`DbRequest::Run`).
+    Client(RunFn),
 }
 
 /// Things the host should do on the monitor's behalf.
@@ -93,6 +107,10 @@ pub enum MonitorTab {
 pub(crate) enum Want {
     Capabilities,
     Dashboard,
+    /// With table statistics or without.
+    MySqlDashboard {
+        storage: bool,
+    },
     Sessions {
         background: bool,
     },
@@ -154,6 +172,7 @@ pub(crate) enum Want {
 enum Job {
     Capabilities,
     Dashboard,
+    MySqlDashboard,
     Sessions,
     Detail(i64, i64),
     Control(String),
@@ -180,11 +199,14 @@ impl Wants {
 }
 
 pub struct Monitor {
+    /// The connection's database: MySQL has the dashboard only.
+    dialect: Dialect,
     tab: MonitorTab,
     show_tabs: bool,
     caps: Option<Result<Capabilities, String>>,
     caps_pending: bool,
     pub dashboard: DashboardView,
+    pub mysql: MySqlDashboardView,
     pub sessions: SessionsView,
     pub awr: AwrView,
     pub trace: TraceView,
@@ -207,11 +229,13 @@ impl Default for Monitor {
 impl Monitor {
     pub fn new(tab: MonitorTab) -> Self {
         Self {
+            dialect: Dialect::ORACLE,
             tab,
             show_tabs: true,
             caps: None,
             caps_pending: false,
             dashboard: DashboardView::default(),
+            mysql: MySqlDashboardView::default(),
             sessions: SessionsView::default(),
             awr: AwrView::default(),
             trace: TraceView::default(),
@@ -228,6 +252,16 @@ impl Monitor {
     /// chosen ones come back as [`MonitorAction::Analyze`].
     pub fn set_analyze(&mut self, on: bool) {
         self.analyze = on;
+    }
+
+    /// The connection's database. A MySQL connection gets its dashboard,
+    /// whatever the tab.
+    pub fn set_dialect(&mut self, dialect: Dialect) {
+        self.dialect = dialect;
+    }
+
+    fn is_mysql(&self) -> bool {
+        self.dialect.kind() == DbKind::MySql
     }
 
     /// Hide the tab bar to host a single view as its own document.
@@ -260,6 +294,9 @@ impl Monitor {
 
     /// Title for a host tab.
     pub fn title(&self) -> String {
+        if self.is_mysql() {
+            return "Dashboard".into();
+        }
         match self.tab {
             MonitorTab::Dashboard => "Dashboard".into(),
             MonitorTab::Sessions => "Sessions".into(),
@@ -277,6 +314,11 @@ impl Monitor {
         };
         let mut out = MonitorOutput::default();
 
+        if self.is_mysql() {
+            self.mysql.ui(ui, now, &mut wants);
+            self.handle(wants, &mut out);
+            return out;
+        }
         if self.caps.is_none() && !self.caps_pending {
             wants.push(Want::Capabilities);
         }
@@ -339,7 +381,12 @@ impl Monitor {
                 None => self.tab = MonitorTab::Sessions,
             },
         }
+        self.handle(wants, &mut out);
+        out
+    }
 
+    /// Turns what the views want into requests and actions.
+    fn handle(&mut self, wants: Wants, out: &mut MonitorOutput) {
         for want in wants.list {
             if let Want::Analyze(analysis) = want {
                 out.actions.push(MonitorAction::Analyze(analysis));
@@ -374,7 +421,6 @@ impl Monitor {
             }
         }
         out.actions.append(&mut self.awr.actions);
-        out
     }
 
     fn token(&mut self, job: Job) -> Token {
@@ -387,6 +433,14 @@ impl Monitor {
     fn task(&mut self, want: Want) -> Option<MonitorRequest> {
         fn boxed<T: Send + 'static>(r: Result<T, DbError>) -> TaskResult {
             r.map(|v| Box::new(v) as Box<dyn std::any::Any + Send>)
+        }
+        if let Want::MySqlDashboard { storage } = want {
+            return Some(MonitorRequest {
+                token: self.token(Job::MySqlDashboard),
+                task: MonitorTask::Client(Box::new(move |c| {
+                    boxed(Ok(crate::mysql::snapshot(c, storage)))
+                })),
+            });
         }
         let (job, task): (Job, TaskFn) = match want {
             Want::Capabilities => {
@@ -483,11 +537,12 @@ impl Monitor {
             Want::OpenDetail { .. }
             | Want::ShowBlocking
             | Want::ShowSessions
-            | Want::Analyze(_) => return None,
+            | Want::Analyze(_)
+            | Want::MySqlDashboard { .. } => return None,
         };
         Some(MonitorRequest {
             token: self.token(job),
-            task,
+            task: MonitorTask::Oracle(task),
         })
     }
 
@@ -513,6 +568,7 @@ impl Monitor {
                 self.caps = Some(take::<Capabilities>(result).map_err(|e| e.to_string()));
             }
             Job::Dashboard => self.dashboard.on_snapshot(take(result), now),
+            Job::MySqlDashboard => self.mysql.on_snapshot(take(result), now),
             Job::Sessions => self.sessions.on_sessions(take(result)),
             Job::Detail(sid, serial) => {
                 let result = take(result);

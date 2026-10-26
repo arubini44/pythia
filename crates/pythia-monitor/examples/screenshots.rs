@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
 use pythia_db::oracle::Connection;
-use pythia_monitor::{Monitor, MonitorRequest, MonitorTab};
+use pythia_monitor::{Monitor, MonitorRequest, MonitorTab, MonitorTask};
 
 struct State {
     monitor: Monitor,
@@ -34,7 +34,10 @@ fn settle(harness: &mut Harness<'_, State>, conn: &Connection, start: Instant) {
             continue;
         }
         for req in pending {
-            let result = (req.task)(conn);
+            let MonitorTask::Oracle(task) = req.task else {
+                continue;
+            };
+            let result = task(conn);
             let now = start.elapsed().as_secs_f64();
             harness
                 .state_mut()

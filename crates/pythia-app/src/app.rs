@@ -2882,7 +2882,7 @@ impl PythiaApp {
                     groups(ui, &[&[Command::SaveAsReport]]);
                 });
             }
-            if dialect.supports(Feature::Monitor) {
+            if dialect.supports(Feature::Dashboard) || dialect.supports(Feature::Monitor) {
                 bar_menu(ui, "Monitor", |ui| {
                     groups(
                         ui,

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use pythia_config::Privilege;
 use pythia_db::{ConnectParams, DbEvent, DbRequest, Session};
-use pythia_monitor::{Monitor, MonitorAction, Token};
+use pythia_monitor::{Monitor, MonitorAction, MonitorTask, Token};
 
 struct App {
     session: Session,
@@ -46,7 +46,10 @@ impl eframe::App for App {
                 let id = self.next_id;
                 self.next_id += 1;
                 self.tasks.insert(id, req.token);
-                self.session.send(DbRequest::Task { id, task: req.task });
+                self.session.send(match req.task {
+                    MonitorTask::Oracle(task) => DbRequest::Task { id, task },
+                    MonitorTask::Client(task) => DbRequest::Run { id, task },
+                });
             }
             for action in out.actions {
                 match action {

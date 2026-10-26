@@ -18,6 +18,14 @@ All notable changes to Pythia are documented here. The format follows
   connection share one SSH connection, which logs in again when it was
   lost. A server's host key has to be in `~/.ssh/known_hosts` or trusted
   once in the dialog; a changed key fails.
+- MySQL monitoring dashboard (Monitor → Dashboard): findings (lock waits
+  and their blocker, metadata lock waits, connections near
+  `max_connections`, buffer pool hit ratio, long transactions, replication
+  stopped or lagging), KPI tiles and trend charts from `SHOW GLOBAL
+  STATUS`, connections by user, host and database, running statements,
+  open transactions, the largest databases and tables, and the top
+  statements from `performance_schema` with *Analyze*. What needs the
+  `PROCESS` privilege or `SELECT` on `performance_schema` says so.
 - Toolbar: a Debug button next to Execute (Ctrl+F9). It is enabled only
   with the cursor in an anonymous block of a connected SQL window, and when
   disabled says why; in a program window it points to Test… for a block
