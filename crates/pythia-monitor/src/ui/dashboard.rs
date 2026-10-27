@@ -573,6 +573,25 @@ fn top_events(
 
 /// Counts per name as bars, largest first. With a `hint`, the bars are
 /// links: returns the name clicked.
+/// What a "sessions by …" bar counts, as a filter of the session list.
+pub(super) type SessionBar<'a> = (
+    &'a str,
+    &'a [(String, i64)],
+    fn(String) -> crate::connections::ConnectionFilter,
+);
+
+/// MySQL's, PostgreSQL's and SQL Server's "sessions by …" bars, side by
+/// side; each opens the sessions it counts.
+pub(super) fn session_bars(ui: &mut Ui, bars: &[SessionBar<'_>], wants: &mut super::Wants) {
+    ui.columns(bars.len(), |cols| {
+        for (col, (title, rows, filter)) in cols.iter_mut().zip(bars) {
+            if let Some(value) = top_list(col, title, rows, Some("Show these sessions")) {
+                wants.push(super::Want::ShowConnections(Some(filter(value))));
+            }
+        }
+    });
+}
+
 pub(super) fn top_list(
     ui: &mut Ui,
     title: &str,

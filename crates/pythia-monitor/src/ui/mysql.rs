@@ -8,9 +8,10 @@ use egui_extras::{Column, TableBuilder};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use pythia_db::DbError;
 
-use super::dashboard::{Refresh, insights_strip, top_list};
+use super::dashboard::{Refresh, insights_strip, session_bars};
 use super::style::{self, Kpi, Palette, bytes, compact, duration, section};
 use super::{Analysis, Want, Wants, refresh_selector};
+use crate::connections::ConnectionFilter;
 use crate::mysql::{Counters, MySqlSnapshot, Storage, TopStatement, insights};
 
 /// Table statistics are read this often (seconds): they cost more than
@@ -169,11 +170,19 @@ impl MySqlDashboardView {
                 ui.add_space(8.0);
                 activity(ui, snap);
                 ui.add_space(8.0);
-                ui.columns(3, |cols| {
-                    top_list(&mut cols[0], "Connections by user", &snap.by_user, None);
-                    top_list(&mut cols[1], "Connections by host", &snap.by_host, None);
-                    top_list(&mut cols[2], "Connections by database", &snap.by_db, None);
-                });
+                session_bars(
+                    ui,
+                    &[
+                        ("Connections by user", &snap.by_user, ConnectionFilter::User),
+                        ("Connections by host", &snap.by_host, ConnectionFilter::Host),
+                        (
+                            "Connections by database",
+                            &snap.by_db,
+                            ConnectionFilter::Database,
+                        ),
+                    ],
+                    wants,
+                );
                 if snap.own_threads_only {
                     ui.weak(
                         "Only this user's connections are listed: other users' need the \

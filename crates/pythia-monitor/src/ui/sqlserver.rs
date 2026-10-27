@@ -8,9 +8,10 @@ use egui_extras::{Column, TableBuilder};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use pythia_db::DbError;
 
-use super::dashboard::{Refresh, insights_strip, top_list};
+use super::dashboard::{Refresh, insights_strip, session_bars};
 use super::style::{self, Kpi, Palette, bytes, compact, duration, section};
 use super::{Analysis, Want, Wants, refresh_selector};
+use crate::connections::ConnectionFilter;
 use crate::queries::{EventRate, SystemEvent, event_rates};
 use crate::sqlserver::{Counters, MsSnapshot, SERVER_STATE, Storage, TopStatement, insights};
 
@@ -185,17 +186,24 @@ impl SqlServerDashboardView {
                     activity(ui, snap);
                     ui.add_space(8.0);
                 }
-                ui.columns(4, |cols| {
-                    top_list(&mut cols[0], "Sessions by login", &snap.by_login, None);
-                    top_list(&mut cols[1], "Sessions by host", &snap.by_host, None);
-                    top_list(&mut cols[2], "Sessions by program", &snap.by_program, None);
-                    top_list(
-                        &mut cols[3],
-                        "Sessions by database",
-                        &snap.by_database,
-                        None,
-                    );
-                });
+                session_bars(
+                    ui,
+                    &[
+                        ("Sessions by login", &snap.by_login, ConnectionFilter::User),
+                        ("Sessions by host", &snap.by_host, ConnectionFilter::Host),
+                        (
+                            "Sessions by program",
+                            &snap.by_program,
+                            ConnectionFilter::Program,
+                        ),
+                        (
+                            "Sessions by database",
+                            &snap.by_database,
+                            ConnectionFilter::Database,
+                        ),
+                    ],
+                    wants,
+                );
                 if !snap.blocked.is_empty() {
                     ui.add_space(8.0);
                     blocking(ui, snap, wants);

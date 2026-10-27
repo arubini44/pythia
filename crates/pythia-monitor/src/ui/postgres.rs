@@ -8,9 +8,10 @@ use egui_extras::{Column, TableBuilder};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use pythia_db::DbError;
 
-use super::dashboard::{Refresh, insights_strip, top_list};
+use super::dashboard::{Refresh, insights_strip, session_bars};
 use super::style::{self, Kpi, Palette, bytes, compact, duration, section};
 use super::{Analysis, Want, Wants, refresh_selector};
+use crate::connections::ConnectionFilter;
 use crate::postgres::{Backend, Counters, PgSnapshot, STATS_ROLE, Storage, TopStatement, insights};
 
 /// Table statistics are read this often (seconds): they cost more than
@@ -163,22 +164,28 @@ impl PostgresDashboardView {
                 ui.add_space(8.0);
                 activity(ui, snap);
                 ui.add_space(8.0);
-                ui.columns(4, |cols| {
-                    top_list(&mut cols[0], "Connections by user", &snap.by_user, None);
-                    top_list(
-                        &mut cols[1],
-                        "Connections by application",
-                        &snap.by_application,
-                        None,
-                    );
-                    top_list(&mut cols[2], "Connections by client", &snap.by_client, None);
-                    top_list(
-                        &mut cols[3],
-                        "Connections by database",
-                        &snap.by_database,
-                        None,
-                    );
-                });
+                session_bars(
+                    ui,
+                    &[
+                        ("Connections by user", &snap.by_user, ConnectionFilter::User),
+                        (
+                            "Connections by application",
+                            &snap.by_application,
+                            ConnectionFilter::Program,
+                        ),
+                        (
+                            "Connections by client",
+                            &snap.by_client,
+                            ConnectionFilter::Host,
+                        ),
+                        (
+                            "Connections by database",
+                            &snap.by_database,
+                            ConnectionFilter::Database,
+                        ),
+                    ],
+                    wants,
+                );
                 if snap.own_sessions_only {
                     ui.weak(format!(
                         "Other users' statements are hidden: they need {STATS_ROLE}."

@@ -50,7 +50,9 @@ impl MonitorWindow {
                 MonitorStart::Trace => MonitorTab::Trace,
             });
             if start == MonitorStart::Blocking {
+                // Oracle's sessions, or the other databases'.
                 monitor.sessions.show_blocking();
+                monitor.connections.show_blocking();
             }
             State {
                 monitor,

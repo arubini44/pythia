@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use pythia_db::{Cell, Client, DbError};
 
 use crate::cells::{all_counts, int, num, opt, plural, text, top_counts};
+use crate::connections::{Connection, ConnectionList};
 use crate::insights::{Insight, Severity};
 use crate::queries::SectionError;
 use crate::ui::style::{bytes, duration};
@@ -406,6 +407,14 @@ fn is_system_thread(user: &str, command: &str) -> bool {
         || matches!(command, "Daemon" | "Binlog Dump" | "Binlog Dump GTID")
 }
 
+/// A thread's host without the client's port.
+fn client_host(host: &str) -> String {
+    match host.rsplit_once(':') {
+        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host.to_owned(),
+        _ => host.to_owned(),
+    }
+}
+
 fn threads(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError> {
     let rows = c.query(
         "select id, user, host, db, command, time, state, info \
@@ -428,11 +437,7 @@ fn threads(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError> {
         .filter(|t| !is_system_thread(&t.user, &t.command))
         .collect();
     s.by_user = top_counts(threads.iter().map(|t| t.user.clone()));
-    // Without the client's port.
-    s.by_host = top_counts(threads.iter().map(|t| match t.host.rsplit_once(':') {
-        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host.to_owned(),
-        _ => t.host.clone(),
-    }));
+    s.by_host = top_counts(threads.iter().map(|t| client_host(&t.host)));
     s.by_db = top_counts(
         threads
             .iter()
@@ -960,6 +965,105 @@ pub fn thread_detail(c: &mut dyn Client, id: i64) -> ThreadDetail {
     }
     d.errors = errors;
     d
+}
+
+/// Every thread, for the Sessions tab: idle ones too, the server's own only
+/// with `background`, and who waits for whose row locks.
+pub fn connections(c: &mut dyn Client, background: bool) -> Result<ConnectionList, DbError> {
+    let mut list = ConnectionList::default();
+    let with_transactions = c.query(
+        "select p.id, p.user, p.host, p.db, p.command, p.time, p.state, p.info, \
+                timestampdiff(second, t.trx_started, now()), t.trx_state, \
+                timestampdiff(second, t.trx_wait_started, now()) \
+           from information_schema.processlist p \
+           left join information_schema.innodb_trx t on t.trx_mysql_thread_id = p.id \
+          where p.id <> connection_id()",
+        &[],
+    );
+    let rows = match with_transactions {
+        // Without PROCESS: no transactions, and only the user's threads.
+        Err(e) if is_privilege_error(&e) => {
+            list.notes.push(
+                "Only this user's sessions are listed: the others, and open transactions, \
+                 need the PROCESS privilege."
+                    .into(),
+            );
+            c.query(
+                "select id, user, host, db, command, time, state, info \
+                   from information_schema.processlist \
+                  where id <> connection_id()",
+                &[],
+            )?
+        }
+        rows => rows?,
+    };
+    let mut lock_wait = false;
+    for r in &rows {
+        let (user, command) = (text(r, 1), text(r, 4));
+        let system = is_system_thread(&user, &command);
+        if system && !background {
+            continue;
+        }
+        let waiting = opt(r, 9).as_deref() == Some("LOCK WAIT");
+        lock_wait |= waiting;
+        list.rows.push(Connection {
+            id: int(r, 0),
+            user: Some(user),
+            host: opt(r, 2).map(|h| client_host(&h)),
+            database: opt(r, 3),
+            program: None,
+            active: command != "Sleep" && !system,
+            status: command,
+            wait: opt(r, 6).filter(|s| !s.is_empty()),
+            seconds: num(r, 5),
+            transaction_secs: opt(r, 8).map(|_| num(r, 8)),
+            blocked_by: None,
+            wait_secs: if waiting { num(r, 10) } else { 0.0 },
+            query: opt(r, 7),
+            background: system,
+        });
+    }
+    if lock_wait {
+        match lock_blockers(c) {
+            Ok(pairs) => {
+                for (waiting, blocker) in pairs {
+                    if let Some(t) = list.rows.iter_mut().find(|t| t.id == waiting) {
+                        t.blocked_by.get_or_insert(blocker);
+                    }
+                }
+            }
+            Err(e) => list.notes.push(format!(
+                "Who blocks whom isn't shown: {}",
+                explain(&e, "SELECT on performance_schema")
+            )),
+        }
+    }
+    Ok(list)
+}
+
+/// Waiting thread and the thread holding the row lock it waits for.
+fn lock_blockers(c: &mut dyn Client) -> Result<Vec<(i64, i64)>, DbError> {
+    let rows = c.query(
+        "select r.trx_mysql_thread_id, b.trx_mysql_thread_id \
+           from performance_schema.data_lock_waits w \
+           join information_schema.innodb_trx r \
+             on r.trx_id = w.requesting_engine_transaction_id \
+           join information_schema.innodb_trx b \
+             on b.trx_id = w.blocking_engine_transaction_id",
+        &[],
+    );
+    let rows = match rows {
+        // MySQL 5.7 and MariaDB have them in information_schema.
+        Err(e) if e.code == Some(1146) => c.query(
+            "select r.trx_mysql_thread_id, b.trx_mysql_thread_id \
+               from information_schema.innodb_lock_waits w \
+               join information_schema.innodb_trx r on r.trx_id = w.requesting_trx_id \
+               join information_schema.innodb_trx b on b.trx_id = w.blocking_trx_id",
+            &[],
+        )?,
+        rows => rows?,
+    };
+    Ok(rows.iter().map(|r| (int(r, 0), int(r, 1))).collect())
 }
 
 /// Ends a thread's running statement (`query_only`) or its connection.

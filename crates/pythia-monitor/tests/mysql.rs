@@ -364,3 +364,80 @@ fn thread_details_and_kill() {
     b.session.send(DbRequest::Rollback);
     setup.ok("drop table pythia_mon_threads");
 }
+
+/// The session list (#131): idle sessions too, an open transaction, who
+/// waits for whom, and the blocking tree; without PROCESS, the user's own
+/// sessions and a note why.
+#[test]
+fn session_list() {
+    let (Some(app), Some(dba)) = (params("PYTHIA_TEST_MYSQL"), params("PYTHIA_TEST_MYSQL_DBA"))
+    else {
+        return;
+    };
+    let _serial = LOCK_WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut setup = Harness::connect(app.clone());
+    setup.ok("create table if not exists pythia_mon_list (id int primary key, v int)");
+    setup.ok("delete from pythia_mon_list");
+    setup.ok("insert into pythia_mon_list values (1, 0)");
+    setup.ok("commit");
+
+    // A holds the row and goes idle; B waits for it.
+    let mut a = Harness::connect(app.clone());
+    let mut b = Harness::connect(app.clone());
+    let a_id: i64 = a.scalar("select connection_id()").parse().unwrap();
+    let b_id: i64 = b.scalar("select connection_id()").parse().unwrap();
+    let setup_id: i64 = setup.scalar("select connection_id()").parse().unwrap();
+    a.ok("update pythia_mon_list set v = 1 where id = 1");
+    b.send("update pythia_mon_list set v = 2 where id = 1");
+
+    let mut monitor = Harness::connect(dba);
+    let mut list = monitor.run(|c| mysql::connections(c, false)).unwrap();
+    for _ in 0..50 {
+        if list.rows.iter().any(|t| t.blocked_by.is_some()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        list = monitor.run(|c| mysql::connections(c, false)).unwrap();
+    }
+    assert!(list.notes.is_empty(), "{:?}", list.notes);
+    let find = |id: i64| list.rows.iter().find(|t| t.id == id).expect("listed");
+    let (ta, tb) = (find(a_id), find(b_id));
+    assert!(!ta.active && ta.status == "Sleep", "{ta:?}");
+    assert!(ta.transaction_secs.is_some(), "A's open transaction");
+    assert!(ta.idle_in_transaction());
+    assert!(tb.active && tb.blocked_by == Some(a_id), "{tb:?}");
+    assert!(
+        tb.query.as_deref().is_some_and(|q| q.contains("set v = 2")),
+        "{tb:?}"
+    );
+    assert!(!find(setup_id).active, "idle sessions are listed");
+    assert!(list.rows.iter().all(|t| !t.background));
+    let tree = pythia_monitor::connections::blocking_tree(&list.rows);
+    assert_eq!(tree[0].connection.id, a_id);
+    assert_eq!(tree[0].children[0].connection.id, b_id);
+
+    // Without PROCESS: the user's own sessions, and why.
+    let mut own = Harness::connect(app);
+    let mine = own.run(|c| mysql::connections(c, false)).unwrap();
+    let privileged = own.scalar(
+        "select count(*) from information_schema.user_privileges \
+          where privilege_type = 'PROCESS'",
+    ) != "0";
+    if !privileged {
+        assert!(
+            mine.notes.iter().any(|n| n.contains("PROCESS privilege")),
+            "{:?}",
+            mine.notes
+        );
+        assert!(mine.rows.iter().any(|t| t.id == a_id));
+    }
+
+    // The server's own threads only when asked for.
+    let all = monitor.run(|c| mysql::connections(c, true)).unwrap();
+    assert!(all.rows.len() >= list.rows.len());
+
+    a.session.send(DbRequest::Rollback);
+    b.settle("the waiting update");
+    b.session.send(DbRequest::Rollback);
+    setup.ok("drop table pythia_mon_list");
+}

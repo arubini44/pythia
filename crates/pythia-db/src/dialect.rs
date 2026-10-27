@@ -25,7 +25,9 @@ pub enum Feature {
     Debugger,
     /// The monitoring dashboard: KPIs, trends, findings, top SQL.
     Dashboard,
-    /// Sessions, blocking, AWR and trace analysis.
+    /// The session list and the blocking tree.
+    Sessions,
+    /// AWR and trace analysis.
     Monitor,
     SchedulerJobs,
     InvalidObjects,
@@ -101,6 +103,7 @@ impl Dialect {
                     | Feature::Completion
                     | Feature::SshTunnel
                     | Feature::Dashboard
+                    | Feature::Sessions
                     | Feature::EditResults
             ),
             // Rows found by key: MySQL's way, not yet theirs (#101).
@@ -110,6 +113,7 @@ impl Dialect {
                     | Feature::Completion
                     | Feature::SshTunnel
                     | Feature::Dashboard
+                    | Feature::Sessions
             ),
         }
     }
@@ -267,6 +271,7 @@ mod tests {
             Feature::PlSql,
             Feature::Debugger,
             Feature::Dashboard,
+            Feature::Sessions,
             Feature::Monitor,
         ] {
             assert!(Dialect::ORACLE.supports(feature));
@@ -277,6 +282,7 @@ mod tests {
             Feature::Dashboard,
             Feature::SshTunnel,
             Feature::EditResults,
+            Feature::Sessions,
         ] {
             assert!(Dialect::MYSQL.supports(feature));
         }
@@ -290,9 +296,10 @@ mod tests {
             assert!(!dialect.supports(Feature::ServerOutput));
             assert!(!dialect.supports(Feature::Monitor));
         }
-        // A dashboard (#92) and SSH tunnels (#97).
+        // A dashboard (#92), SSH tunnels (#97), sessions (#131).
         for dialect in [Dialect::POSTGRES, Dialect::SQLSERVER] {
             assert!(dialect.supports(Feature::Dashboard));
+            assert!(dialect.supports(Feature::Sessions));
             assert!(dialect.supports(Feature::SshTunnel));
         }
         assert_eq!(Dialect::default(), Dialect::ORACLE);

@@ -398,3 +398,117 @@ fn backend_details_cancel_and_terminate() {
     setup.ok("drop table pythia_det_locks");
     setup.ok("commit");
 }
+
+/// The session list (#131): idle sessions too, an idle transaction, who
+/// waits for whom and since when, the blocking tree, the server's own
+/// processes only when asked; without pg_read_all_stats, a note.
+#[test]
+fn session_list() {
+    let Some(p) = params(None) else {
+        return;
+    };
+    let mut setup = Harness::connect(p.clone());
+    setup.ok("drop table if exists pythia_mon_list");
+    setup.ok("create table pythia_mon_list (id int primary key, v int)");
+    setup.ok("insert into pythia_mon_list values (1, 0)");
+    setup.ok("commit");
+    let setup_pid: i64 = setup.scalar("select pg_backend_pid()").parse().unwrap();
+    setup.ok("commit");
+
+    let mut holder = Harness::connect(p.clone());
+    let holder_pid: i64 = holder.scalar("select pg_backend_pid()").parse().unwrap();
+    holder.ok("update pythia_mon_list set v = v + 1 where id = 1");
+    let mut waiter = Harness::connect(p.clone());
+    let waiter_pid: i64 = waiter.scalar("select pg_backend_pid()").parse().unwrap();
+    waiter.send("update pythia_mon_list set v = v + 1 where id = 1");
+
+    let mut monitor = Harness::connect(p.clone());
+    let start = Instant::now();
+    let list = loop {
+        let list = monitor.run(|c| postgres::connections(c, false)).unwrap();
+        if list
+            .rows
+            .iter()
+            .any(|b| b.id == waiter_pid && b.blocked_by.is_some())
+        {
+            break list;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "no lock wait");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(list.notes.is_empty(), "{:?}", list.notes);
+    let find = |pid: i64| list.rows.iter().find(|b| b.id == pid).expect("listed");
+    let (h, w) = (find(holder_pid), find(waiter_pid));
+    assert_eq!(h.status, "idle in transaction");
+    assert!(h.idle_in_transaction() && !h.active, "{h:?}");
+    assert!(w.active && w.blocked_by == Some(holder_pid), "{w:?}");
+    assert!(
+        w.wait.as_deref().is_some_and(|e| e.starts_with("Lock:")),
+        "{w:?}"
+    );
+    assert!(w.wait_secs >= 0.0 && w.wait_secs < 60.0, "{w:?}");
+    assert!(
+        w.query
+            .as_deref()
+            .is_some_and(|q| q.contains("pythia_mon_list"))
+    );
+    assert_eq!(find(setup_pid).status, "idle", "idle sessions are listed");
+    assert!(list.rows.iter().all(|b| !b.background));
+    let tree = pythia_monitor::connections::blocking_tree(&list.rows);
+    let root = tree
+        .iter()
+        .find(|t| t.connection.id == holder_pid)
+        .expect("the holder as a root");
+    assert_eq!(root.children[0].connection.id, waiter_pid);
+
+    let all = monitor.run(|c| postgres::connections(c, true)).unwrap();
+    assert!(
+        all.rows
+            .iter()
+            .any(|b| b.background && b.status == "checkpointer"),
+        "{:?}",
+        all.rows
+    );
+
+    // A plain role sees the sessions, not their statements, and why.
+    monitor.ok("do $$ begin \
+           if not exists (select from pg_roles where rolname = 'pythia_mon_list_plain') then \
+             create role pythia_mon_list_plain login password 'plain'; \
+           end if; \
+         end $$");
+    monitor.ok("commit");
+    let mut plain = Harness::connect(params(Some(("pythia_mon_list_plain", "plain"))).unwrap());
+    let seen = plain.run(|c| postgres::connections(c, false)).unwrap();
+    assert!(
+        seen.notes.iter().any(|n| n.contains("pg_read_all_stats")),
+        "{:?}",
+        seen.notes
+    );
+    let other = seen
+        .rows
+        .iter()
+        .find(|b| b.id == waiter_pid)
+        .expect("listed");
+    assert_eq!(other.query, None);
+    drop(plain);
+
+    holder.ok("rollback");
+    loop {
+        if let DbEvent::Transaction { .. } = waiter.next() {
+            break;
+        }
+    }
+    waiter.ok("rollback");
+    setup.ok("drop table pythia_mon_list");
+    setup.ok("commit");
+    let start = Instant::now();
+    while monitor
+        .scalar("select count(*) from pg_stat_activity where usename = 'pythia_mon_list_plain'")
+        != "0"
+    {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    monitor.ok("drop role pythia_mon_list_plain");
+    monitor.ok("commit");
+}

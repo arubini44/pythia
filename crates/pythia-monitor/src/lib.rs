@@ -4,11 +4,13 @@
 //!
 //! - [`queries`]: plain data functions over `&oracle::Connection`.
 //! - [`mysql`]: the MySQL dashboard's data, over any session's `Client`.
+//! - [`connections`]: the session list of MySQL, PostgreSQL and SQL Server.
 //! - [`insights`]: plain-language findings derived from a snapshot.
 //! - [`tkprof`]: pure-Rust 10046 trace parser and aggregator.
 //! - [`ui`]: egui views and the [`Monitor`] driver that hosts them.
 
 mod cells;
+pub mod connections;
 pub mod insights;
 pub mod mysql;
 pub mod postgres;

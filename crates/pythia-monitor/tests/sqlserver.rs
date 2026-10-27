@@ -388,3 +388,88 @@ fn session_details_and_kill() {
     assert_eq!(b.scalar("select v from det_block_t where id = 1"), "0");
     b.ok("drop table det_block_t");
 }
+
+/// The session list (#131): idle sessions too, the blocker's open
+/// transaction and last statement, who waits for whom, the blocking tree,
+/// system sessions only when asked; without VIEW SERVER STATE, the login's
+/// own sessions and a note.
+#[test]
+fn session_list() {
+    let (Some(mut dba), Some(mut a), Some(mut b), Some(mut plain)) = (
+        Harness::connect("PYTHIA_TEST_MSSQL_DBA"),
+        Harness::connect("PYTHIA_TEST_MSSQL"),
+        Harness::connect("PYTHIA_TEST_MSSQL"),
+        Harness::connect("PYTHIA_TEST_MSSQL"),
+    ) else {
+        eprintln!("PYTHIA_TEST_MSSQL(_DBA) not set, skipping");
+        return;
+    };
+    a.ok("drop table if exists list_block_t");
+    a.ok("create table list_block_t (id int primary key, v int)");
+    a.ok("insert into list_block_t values (1, 0)");
+    a.session.send(DbRequest::Commit);
+    a.settle("commit");
+    let blocker: i64 = a.scalar("select @@spid").parse().unwrap();
+    let waiting: i64 = b.scalar("select @@spid").parse().unwrap();
+    let idle: i64 = plain.scalar("select @@spid").parse().unwrap();
+
+    a.ok("update list_block_t set v = 1 where id = 1");
+    b.send("update list_block_t set v = 2 where id = 1");
+    let start = Instant::now();
+    let list = loop {
+        let list = dba.run(|c| sqlserver::connections(c, false)).unwrap();
+        if list
+            .rows
+            .iter()
+            .any(|s| s.id == waiting && s.blocked_by.is_some())
+        {
+            break list;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "no blocking seen"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(list.notes.is_empty(), "{:?}", list.notes);
+    let find = |id: i64| list.rows.iter().find(|s| s.id == id).expect("listed");
+    let (h, w) = (find(blocker), find(waiting));
+    assert!(!h.active && h.status == "sleeping", "{h:?}");
+    assert!(h.idle_in_transaction(), "{h:?}");
+    // What it ran last: the driver's own `@@rowcount` after the update.
+    assert!(h.query.is_some(), "its last statement: {h:?}");
+    assert_eq!(h.user.as_deref(), Some("pythia"));
+    assert_eq!(h.database.as_deref(), Some("pythia"));
+    assert!(w.active && w.blocked_by == Some(blocker), "{w:?}");
+    assert!(
+        w.wait.as_deref().is_some_and(|t| t.starts_with("LCK_M_")),
+        "{w:?}"
+    );
+    assert!(!find(idle).active, "idle sessions are listed");
+    assert!(list.rows.iter().all(|s| !s.background));
+    let tree = pythia_monitor::connections::blocking_tree(&list.rows);
+    let root = tree
+        .iter()
+        .find(|t| t.connection.id == blocker)
+        .expect("the blocker as a root");
+    assert_eq!(root.children[0].connection.id, waiting);
+
+    let all = dba.run(|c| sqlserver::connections(c, true)).unwrap();
+    assert!(all.rows.iter().any(|s| s.background), "system sessions");
+
+    let granted = plain.scalar("select has_perms_by_name(null, null, 'VIEW SERVER STATE')");
+    if granted != "1" {
+        let own = plain.run(|c| sqlserver::connections(c, false)).unwrap();
+        assert!(
+            own.notes.iter().any(|n| n.contains("VIEW SERVER STATE")),
+            "{:?}",
+            own.notes
+        );
+        assert!(own.rows.iter().all(|s| s.user.as_deref() == Some("pythia")));
+    }
+
+    a.rollback();
+    b.settle("the blocked update");
+    b.rollback();
+    a.ok("drop table list_block_t");
+}
