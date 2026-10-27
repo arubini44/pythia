@@ -778,6 +778,10 @@ impl SqlWindow {
     /// Re-runs result `index` with what identifies its rows (ROWIDs on
     /// Oracle, the table's key on MySQL) so it can be edited in place.
     pub fn start_editing(&mut self, index: usize, cx: &DocContext) -> Effects {
+        if cx.read_only {
+            self.info(READ_ONLY_EDIT);
+            return Effects::default();
+        }
         let Some(result) = self.state.results.get(index) else {
             return Effects::default();
         };
@@ -841,6 +845,10 @@ impl SqlWindow {
     /// Applies the pending changes of result `index` in this window's
     /// transaction, then refreshes the result.
     pub fn apply_changes(&mut self, index: usize, cx: &DocContext) -> Effects {
+        if cx.read_only {
+            self.info(READ_ONLY_EDIT);
+            return Effects::default();
+        }
         let statements = self.pending_dml(index, cx);
         let Some(result) = self.state.results.get(index) else {
             return Effects::default();
@@ -1639,6 +1647,7 @@ impl SqlWindow {
                         }
                         None => {
                             if idle
+                                && !cx.read_only
                                 && cx.dialect.supports(Feature::EditResults)
                                 && crate::data_edit::can_edit(&result.sql)
                                 && labelled(ui, Icon::Edit, "Edit")
@@ -2113,6 +2122,9 @@ fn statistics_ui(ui: &mut Ui, report: &crate::statistics::Report) {
     });
 }
 
+/// Why *Edit* and *Apply* do nothing on a read-only connection.
+const READ_ONLY_EDIT: &str = "Connection is read-only: results can't be edited";
+
 const DESCRIBE_SQL: &str = "select column_name as \"Name\", \
         decode(nullable, 'N', 'NOT NULL') as \"Null?\", \
         data_type || case \
@@ -2358,6 +2370,86 @@ pub fn fmt_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On a read-only connection, nothing makes a result editable or
+    /// applies its changes (#107).
+    #[test]
+    fn read_only_connections_dont_edit_results() {
+        let settings = pythia_config::Settings::default();
+        let cx = |read_only| DocContext {
+            id: crate::documents::DocId(1),
+            settings: &settings,
+            connected: true,
+            fetch_size: 100,
+            connection: Some("shop".into()),
+            catalog: None,
+            catalog_revision: 0,
+            connections: &[],
+            debug: None,
+            marks: None,
+            privilege: None,
+            dialect: pythia_db::Dialect::MYSQL,
+            read_only,
+        };
+        let column = |name: &str| Column {
+            name: name.into(),
+            type_name: "INT".into(),
+            numeric: true,
+        };
+        let mut w = SqlWindow::new("t".into(), String::new());
+        w.state.running = Some(Running {
+            start: 0,
+            sql: "select x from t".into(),
+            internal: None,
+        });
+        w.on_event(
+            DbEvent::QueryStarted {
+                id: 7,
+                columns: vec![column("x"), column("pythia$id")],
+            },
+            &cx(false),
+        );
+        w.on_event(
+            DbEvent::Rows {
+                id: 7,
+                rows: vec![vec![Some("1".into()), Some("1".into())]],
+                more: false,
+                elapsed: Duration::ZERO,
+            },
+            &cx(false),
+        );
+        assert!(w.start_editing(0, &cx(true)).requests.is_empty());
+        assert!(w.state.queue.is_empty() && w.state.running.is_none());
+
+        // Made editable on a writable connection, with a change pending.
+        let r = &mut w.state.results[0];
+        r.edit = Some(crate::data_edit::Editable {
+            table: "t".into(),
+            source: "select x from t".into(),
+            key: crate::data_edit::RowKey::Columns(vec!["id".into()]),
+        });
+        r.grid.set_editable(Some(1));
+        let rows = r.rows.clone();
+        r.grid.edit_cell(&rows, 0, 0, Some("2".into()));
+        assert!(w.apply_changes(0, &cx(true)).requests.is_empty());
+        assert!(w.state.queue.is_empty() && w.state.running.is_none());
+        let texts: Vec<&str> = w.state.messages.iter().map(|m| m.text.as_str()).collect();
+        assert!(texts.contains(&READ_ONLY_EDIT), "{texts:?}");
+        assert!(
+            w.state.results[0]
+                .grid
+                .changes()
+                .is_some_and(|c| !c.is_empty()),
+            "the change stays to apply elsewhere"
+        );
+
+        let sent = w.apply_changes(0, &cx(false)).requests;
+        assert!(
+            matches!(&sent[..], [(_, DbRequest::Execute { sql, .. })]
+                if sql == "update t set x = 2 where id = 1 and x = 1"),
+            "{sent:?}"
+        );
+    }
 
     #[test]
     fn client_commands() {

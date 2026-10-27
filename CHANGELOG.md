@@ -41,6 +41,9 @@ All notable changes to Pythia are documented here. The format follows
   doesn't end the statement).
 
 ### Fixed
+- Read-only connections no longer let results be edited (#107): *Edit*
+  isn't offered, and the changes of a result can't be applied. Before,
+  only statements run from the editor were held back.
 - *Export → SQL INSERT* and *Copy as → INSERT* wrote Oracle SQL on every
   connection (#106). On MySQL, column names went into double quotes (a
   syntax error), dates into `to_date(…)`, and `VARBINARY` values into

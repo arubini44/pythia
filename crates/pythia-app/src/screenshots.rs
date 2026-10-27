@@ -347,6 +347,7 @@ fn data_editing() {
             marks: None,
             privilege: None,
             dialect: Default::default(),
+            read_only: false,
         };
         let effects = app.test_sql_window().start_editing(0, &cx);
         app.test_apply(effects);
@@ -400,6 +401,7 @@ fn data_editing() {
             marks: None,
             privilege: None,
             dialect: Default::default(),
+            read_only: false,
         };
         let effects = app.test_sql_window().apply_changes(0, &cx);
         app.test_apply(effects);
