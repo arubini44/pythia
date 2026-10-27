@@ -29,6 +29,9 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- Debugger: *Watch* on an element of a collection with text keys
+  (`l_map('Key')`) said the collection "has no ('key')": the key was
+  lowercased, also in the element's label (#119).
 - Trigger compile errors were marked too high, by the number of lines of
   the trigger's header: Oracle counts their lines from the trigger's body.
   Program windows, SQL windows and the invalid objects window now show them

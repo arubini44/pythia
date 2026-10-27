@@ -953,6 +953,29 @@ fn value_text(ui: &Ui, var: &Variable, stale: bool) -> RichText {
     }
 }
 
+/// A variable's name as shown: lowercase, but text keys (`('Key')`) and
+/// watch expressions (`l_map('Key')`) as they are.
+fn shown_name(name: &str) -> String {
+    if name.contains('(') {
+        name.to_owned()
+    } else {
+        name.to_lowercase()
+    }
+}
+
+/// The path of a variable, field or element below `parent`, as a watch
+/// names it: `l_rec.name`, `l_tab(3)`, `l_map('Key')`.
+fn child_path(parent: &str, name: &str) -> String {
+    let name = shown_name(name);
+    if parent.is_empty() {
+        name
+    } else if name.starts_with('(') {
+        format!("{parent}{name}")
+    } else {
+        format!("{parent}.{name}")
+    }
+}
+
 /// A variable and its fields/elements; right-click offers "Add watch" with
 /// the variable's full path (`parent` is the path of the enclosing one).
 /// `opaque` says why it has no contents, if known.
@@ -964,14 +987,8 @@ fn variable_ui(
     watch: &mut Option<String>,
     opaque: Option<&str>,
 ) {
-    let name = var.name.to_lowercase();
-    let path = if parent.is_empty() {
-        name.clone()
-    } else if name.starts_with('(') {
-        format!("{parent}{name}")
-    } else {
-        format!("{parent}.{name}")
-    };
+    let name = shown_name(&var.name);
+    let path = child_path(parent, &var.name);
     let menu = |ui: &mut Ui, watch: &mut Option<String>| {
         if ui.button(format!("Watch {path}")).clicked() {
             *watch = Some(path.clone());
@@ -1321,6 +1338,20 @@ mod tests {
             s.current_frame().map(|f| f.method.as_str()),
             Some("LINE_AMOUNT")
         );
+    }
+
+    #[test]
+    fn paths_as_watches_name_them() {
+        assert_eq!(child_path("", "L_REC"), "l_rec");
+        assert_eq!(child_path("l_rec", "NAME"), "l_rec.name");
+        assert_eq!(child_path("l_tab", "(3)"), "l_tab(3)");
+        // Text keys keep their case, or the path finds nothing.
+        assert_eq!(child_path("l_map", "('Key')"), "l_map('Key')");
+        assert_eq!(child_path("l_map('Key')", "A"), "l_map('Key').a");
+        assert_eq!(child_path("", "l_map('Key')"), "l_map('Key')", "a watch");
+        let path = condition::parse_path(&child_path("l_map", "('Key')")).unwrap();
+        let map = var("L_MAP", None, vec![var("('Key')", Some("1"), vec![])]);
+        assert_eq!(condition::lookup(&[map], &path).unwrap().value.as_deref(), Some("1"));
     }
 
     #[test]
