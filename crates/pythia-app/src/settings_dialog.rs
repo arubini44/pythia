@@ -248,13 +248,18 @@ impl SettingsDialog {
         let mut learn = None;
         let screen = ctx.content_rect();
         egui::Window::new("Settings")
+            // Not the title's id: drops the size saved while a hint on one
+            // line widened the window past the screen (#113).
+            .id(egui::Id::new("settings-window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_size([780.0, 600.0])
             // Fits the screen, so the title bar and its close button stay
-            // visible: a taller page scrolls (#62).
+            // visible: a taller page scrolls (#62), a wider one is cut off
+            // (#113).
             .max_height((screen.height() - 48.0).max(240.0))
+            .max_width((screen.width() - 48.0).max(320.0))
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(screen.center())
             .show(ctx, |ui| {
@@ -309,12 +314,15 @@ fn row(ui: &mut Ui, label: &str, hint: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         let height = ui.spacing().interact_size.y;
         ui.add_sized([width, height], egui::Label::new(label));
-        add(ui);
+        // Controls that don't fit continue on the next line instead of
+        // widening the window (#113).
+        ui.horizontal_wrapped(add);
     });
     if !hint.is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(width + ui.spacing().item_spacing.x - 2.0);
-            ui.label(RichText::new(hint).small().weak());
+            // A horizontal row doesn't wrap text by itself (#113).
+            ui.add(egui::Label::new(RichText::new(hint).small().weak()).wrap());
         });
     }
     ui.add_space(4.0);

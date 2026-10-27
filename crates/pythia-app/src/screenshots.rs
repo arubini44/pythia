@@ -4609,28 +4609,46 @@ fn nothing_shows_through_behind_the_dock() {
 }
 
 /// Every Settings page fits Pythia's default window: the close button stays
-/// on screen however tall the page is (#62), and closes the dialog.
+/// on screen however tall the page is (#62), and closes the dialog. No page
+/// makes the window wider, also with a bigger interface font: a hint on one
+/// line pushed the page list off the screen (#113).
 #[test]
 fn settings_pages_fit_the_window() {
-    let mut h = sized_harness(egui::vec2(1280.0, 800.0));
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
-    let mut page = 0;
-    while h.state_mut().test_settings_page(page) {
+    for font_size in [13.0, 18.0] {
+        let mut h = sized_harness(screen.size());
+        h.state_mut().test_settings_mut().appearance.font_size = font_size;
+        let ctx = h.ctx.clone();
+        h.state_mut().test_apply_settings(&ctx);
+        let mut page = 0;
+        let mut first_close = None;
+        while h.state_mut().test_settings_page(page) {
+            h.run_steps(4);
+            let at = format!("{font_size} pt, page {page}");
+            let close = h.get_by_label("Close window").rect();
+            assert!(
+                screen.contains_rect(close),
+                "{at}: close button at {close:?}"
+            );
+            let first_close = *first_close.get_or_insert(close);
+            assert_eq!(close, first_close, "{at}: the window changed size");
+            for entry in h.query_all_by_label("Appearance") {
+                let rect = entry.rect();
+                assert!(screen.contains_rect(rect), "{at}: Appearance at {rect:?}");
+            }
+            page += 1;
+        }
+        assert!(page > 5, "{page} pages");
+        h.state_mut().test_settings(true);
         h.run_steps(4);
-        let close = h.get_by_label("Close window").rect();
-        assert!(
-            screen.contains_rect(close),
-            "page {page}: close button at {close:?}"
+        save(
+            &mut h,
+            &format!("settings-formatter-small-window-{font_size}pt"),
         );
-        page += 1;
+        h.get_by_label("Close window").click();
+        h.run_steps(2);
+        assert!(!h.state().test_settings_open());
     }
-    assert!(page > 5, "{page} pages");
-    h.state_mut().test_settings(true);
-    h.run_steps(4);
-    save(&mut h, "settings-formatter-small-window");
-    h.get_by_label("Close window").click();
-    h.run_steps(2);
-    assert!(!h.state().test_settings_open());
 }
 
 /// The MySQL dashboard (`PYTHIA_TEST_MYSQL`): server KPIs, trends and
