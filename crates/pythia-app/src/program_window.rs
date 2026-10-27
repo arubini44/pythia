@@ -493,6 +493,8 @@ impl ProgramWindow {
                         self.state.compile_queue.clear();
                     }
                     let mut effects = self.ddl_time(i, DdlCheck::Remember);
+                    // Valid or invalid now, and so may be its dependents.
+                    effects.invalid_changed = true;
                     // Created, if with errors.
                     if self.new {
                         self.new = false;

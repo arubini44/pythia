@@ -4042,6 +4042,106 @@ fn invalid_objects_indicator_and_recompile() {
     }
 }
 
+/// Compiling in a program window updates the status bar's invalid count:
+/// with Compile all, as it is after the body, not after the spec.
+#[test]
+fn program_compile_refreshes_invalid_count() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let spec = std::env::var("PYTHIA_TEST_DB").unwrap();
+    let (cred, db) = spec.rsplit_once('@').unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let conn = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+    let drops = ["drop package icnt_p", "drop table icnt_t purge"];
+    for sql in drops {
+        let _ = conn.execute(sql, &[]);
+    }
+    for sql in [
+        "create table icnt_t (a number)",
+        "create or replace package icnt_p as procedure p(a icnt_t.a%type); end;",
+        "create or replace package body icnt_p as procedure p(a icnt_t.a%type) is \
+         begin null; end; end;",
+        "drop table icnt_t purge",
+        "create table icnt_t (a number)",
+    ] {
+        conn.execute(sql, &[]).unwrap();
+    }
+    let ours = || -> u32 {
+        conn.query_row_as::<u32>(
+            "select count(*) from user_objects where status = 'INVALID' and object_name = 'ICNT_P'",
+            &[],
+        )
+        .unwrap()
+    };
+    assert_eq!(ours(), 2, "spec and body invalid");
+    let mut h = harness(true);
+    // Only compiles refresh the count.
+    h.state_mut().test_settings_mut().invalid.refresh_minutes = 0;
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    wait_until(&mut h, "invalid count", |app| {
+        app.test_invalid_total("pythia@FREEPDB1").is_some()
+    });
+    let total = h.state().test_invalid_total("pythia@FREEPDB1").unwrap();
+    assert!(total >= 2, "{total}");
+    h.state_mut().test_open(OpenRequest::Program {
+        connection: "pythia@FREEPDB1".into(),
+        object: ObjectRef {
+            owner: "PYTHIA".into(),
+            name: "ICNT_P".into(),
+            object_type: pythia_db::ObjectType::Package,
+        },
+    });
+    wait_until(&mut h, "source", |app| !app.test_focused_busy());
+    let effects = h.state_mut().test_program().compile(true, false);
+    h.state_mut().test_apply_focused(effects);
+    wait_until(&mut h, "compile", |app| !app.test_focused_busy());
+    let message = h.state_mut().test_program().message();
+    assert!(matches!(&message, Some((false, _))), "{message:?}");
+    assert_eq!(ours(), 0, "spec and body valid");
+    // Other tests' objects come and go: the count matches the schema's.
+    let counted = |h: &mut Harness<'_, PythiaApp>| {
+        wait_until(h, "count refreshed", |app| {
+            let now = conn
+                .query_row_as::<u32>(
+                    "select count(*) from user_objects where status = 'INVALID'",
+                    &[],
+                )
+                .unwrap();
+            app.test_invalid_total("pythia@FREEPDB1") == Some(now)
+        });
+    };
+    counted(&mut h);
+
+    // A block in a SQL window compiles the spec: one more than before.
+    for sql in ["drop table icnt_t purge", "create table icnt_t (a number)"] {
+        conn.execute(sql, &[]).unwrap();
+    }
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "begin\n  execute immediate 'alter package icnt_p compile specification';\nend;\n/\n"
+            .into(),
+        run: true,
+    });
+    wait_until(&mut h, "block", |app| !app.test_focused_busy());
+    assert_eq!(ours(), 1, "only the body invalid");
+    counted(&mut h);
+
+    // A change while a count runs: the app takes that count (from before
+    // the change) only on its next frame, and counts again after it.
+    h.state_mut().test_refresh_invalid("pythia@FREEPDB1");
+    std::thread::sleep(Duration::from_secs(1));
+    conn.execute("alter package icnt_p compile body", &[])
+        .unwrap();
+    assert_eq!(ours(), 0, "body valid");
+    h.state_mut().test_refresh_invalid("pythia@FREEPDB1");
+    counted(&mut h);
+    for sql in drops {
+        conn.execute(sql, &[]).unwrap();
+    }
+}
+
 /// Formatting while typing and on paste, and learning the formatter
 /// settings from the focused editor.
 #[test]
