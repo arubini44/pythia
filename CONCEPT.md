@@ -222,7 +222,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Generate a test script for a procedure/function (anonymous block with bind variables for params)
 - [ ] Variable grid: name, type, value, in/out
 - [x] Run, run with debugger
-- [x] Show DBMS_OUTPUT and out parameters, ref cursors as result grids (OUT parameters and results printed via DBMS_OUTPUT; ref cursors not shown as grids)
+- [x] Show DBMS_OUTPUT and out parameters, ref cursors as result grids (OUT parameters and results printed via DBMS_OUTPUT, collections, records and objects included; ref cursors printed row by row, not as grids)
 - [ ] Save/load test scripts (`.tst`), compatible with PL/SQL Developer format if feasible
 
 ### 5.9 Command Window (M5)
