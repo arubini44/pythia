@@ -1455,6 +1455,11 @@ mod tests {
         let Ok(spec) = std::env::var("PYTHIA_TEST_DB") else {
             return;
         };
+        // Its synonyms and grants deadlock with the account tests' DDL too
+        // (#126).
+        let _accounts = crate::test_db::ACCOUNTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (cred, db) = spec.rsplit_once('@').unwrap();
         let (user, pw) = cred.split_once('/').unwrap();
         let conn = Connection::connect(user, pw, db).unwrap();
