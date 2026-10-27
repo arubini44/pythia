@@ -99,6 +99,14 @@ fn save(harness: &mut Harness<'_, PythiaApp>, name: &str) {
     eprintln!("wrote {}", path.display());
 }
 
+/// A file that exists on every platform but isn't a font (`/etc/hostname`
+/// is missing on macOS and Windows), named after the test using it.
+fn not_a_font(test: &str) -> String {
+    let path = std::env::temp_dir().join(format!("pythia-{test}-{}.ttf", std::process::id()));
+    std::fs::write(&path, "not a font").unwrap();
+    path.to_string_lossy().into_owned()
+}
+
 /// Steps the app until `done` holds (DB events arrive on other threads).
 fn wait_until(harness: &mut Harness<'_, PythiaApp>, what: &str, done: impl Fn(&PythiaApp) -> bool) {
     let start = Instant::now();
@@ -1837,14 +1845,16 @@ fn code_font() {
     h.state_mut().test_code_font(&ctx, font);
     h.run_steps(3);
     save(&mut h, "code-font");
-    h.state_mut().test_code_font(&ctx, "/etc/hostname");
+    let bad = not_a_font("code-font");
+    h.state_mut().test_code_font(&ctx, &bad);
     h.run_steps(2);
     assert!(
         h.state()
             .test_log()
             .iter()
-            .any(|l| l.contains("is not a TrueType or OpenType font"))
+            .any(|l| l.contains(&format!("{bad} is not a TrueType or OpenType font")))
     );
+    let _ = std::fs::remove_file(&bad);
 }
 
 /// Settings → Appearance applies right away: Compact tightens the layout,
@@ -1888,16 +1898,18 @@ fn appearance_settings() {
         );
         save(&mut h, "settings-appearance");
     }
-    h.state_mut().test_settings_mut().appearance.font_file = "/etc/hostname".into();
+    let bad = not_a_font("appearance");
+    h.state_mut().test_settings_mut().appearance.font_file = bad.clone();
     let ctx = h.ctx.clone();
     h.state_mut().test_apply_settings(&ctx);
     h.run_steps(2);
+    let log = h.state().test_log();
     assert!(
-        h.state()
-            .test_log()
-            .iter()
-            .any(|l| l.contains("/etc/hostname is not a TrueType or OpenType font"))
+        log.iter()
+            .any(|l| l.contains(&format!("{bad} is not a TrueType or OpenType font"))),
+        "{log:?}"
     );
+    let _ = std::fs::remove_file(&bad);
     let first = h
         .ctx
         .fonts(|f| f.definitions().families[&egui::FontFamily::Proportional][0].clone());
