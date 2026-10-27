@@ -540,7 +540,9 @@ impl Worker {
         };
 
         let columns = loop {
-            match wait(rt, cancel, &mut stream) {
+            let item = wait(rt, cancel, &mut stream);
+            report_messages(&mut stream, events);
+            match item {
                 Wait::Item(Some(Ok(QueryItem::Metadata(meta)))) => {
                     break meta.columns().iter().map(column).collect::<Vec<_>>();
                 }
@@ -573,7 +575,10 @@ impl Worker {
                         more = false;
                         break;
                     }
-                    Wait::Item(Some(Err(e))) => return Err(failed(e)),
+                    Wait::Item(Some(Err(e))) => {
+                        report_messages(&mut stream, events);
+                        return Err(failed(e));
+                    }
                     Wait::Cancel => {
                         cancelled = true;
                         break;
@@ -587,6 +592,7 @@ impl Worker {
                     more: false,
                     elapsed: started.elapsed(),
                 });
+                report_messages(&mut stream, events);
                 return Ok(Ran::Break("Cancelled while fetching"));
             }
             events.send(DbEvent::Rows {
@@ -595,9 +601,11 @@ impl Worker {
                 more,
                 elapsed: started.elapsed(),
             });
+            report_messages(&mut stream, events);
             if !more {
                 // The rest of the batch runs; only its first result shows.
                 while let Some(item) = rt.block_on(stream.next()) {
+                    report_messages(&mut stream, events);
                     match item {
                         Ok(QueryItem::Metadata(_)) => sets += 1,
                         Ok(QueryItem::Row(_)) => {}
@@ -671,6 +679,15 @@ fn wait(rt: &Runtime, cancel: &Notify, stream: &mut QueryStream<'_>) -> Wait {
             () = cancel.notified() => Wait::Cancel,
         }
     })
+}
+
+/// The batch's `PRINT` output and informational messages read so far, as
+/// messages (#98). Reported after what came before them: the items read,
+/// and rows once they are sent.
+fn report_messages(stream: &mut QueryStream<'_>, events: &Events) {
+    for message in stream.take_messages() {
+        events.send(DbEvent::Notice(message.message().to_owned()));
+    }
 }
 
 /// Break: the attention signal stops the batch on the server. The server

@@ -6033,8 +6033,7 @@ dependencies = [
 [[package]]
 name = "tiberius"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e07324791de2bdaed058af4aa433a0b5ec5c0beac407a9797419c19805df2415"
+source = "git+https://github.com/ortic/tiberius?rev=1ec36e8bbbcbb332de19c3bc65e9adaab074841c#1ec36e8bbbcbb332de19c3bc65e9adaab074841c"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
@@ -6067,8 +6066,7 @@ dependencies = [
 [[package]]
 name = "tiberius-macros"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "907fed5ea55695d902cc3359fffa4a35021dfa9b95ab4eb9c8376d42ffb9eec8"
+source = "git+https://github.com/ortic/tiberius?rev=1ec36e8bbbcbb332de19c3bc65e9adaab074841c#1ec36e8bbbcbb332de19c3bc65e9adaab074841c"
 dependencies = [
  "proc-macro2",
  "quote",

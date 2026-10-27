@@ -495,6 +495,44 @@ fn several_result_sets() {
     );
 }
 
+/// PRINT output and informational messages show as messages, in order
+/// with the result: before its columns, after its rows (#98).
+#[test]
+fn print_and_info_messages() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    let events = |h: &mut Harness, sql: &str| {
+        h.execute(1, sql, 10);
+        let mut seen = Vec::new();
+        loop {
+            match h.next() {
+                DbEvent::QueryStarted { .. } => seen.push("(columns)".to_owned()),
+                DbEvent::Rows { .. } => seen.push("(rows)".to_owned()),
+                DbEvent::Notice(n) => seen.push(n),
+                DbEvent::Failed { error, .. } => seen.push(format!("(failed: {})", error.message)),
+                DbEvent::Transaction { .. } => return seen,
+                _ => {}
+            }
+        }
+    };
+    assert_eq!(
+        events(
+            &mut h,
+            "print 'before'; select 1 as a; raiserror('after', 10, 1) with nowait"
+        ),
+        ["before", "(columns)", "(rows)", "after"]
+    );
+    // No result at all; and messages before an error.
+    assert_eq!(events(&mut h, "print 'only a message'"), ["only a message"]);
+    let failed = events(&mut h, "print 'first'; select 1 / 0");
+    assert_eq!(failed[0], "first");
+    assert!(
+        failed.iter().any(|e| e.contains("Divide by zero")),
+        "{failed:?}"
+    );
+}
+
 #[test]
 fn oracle_tasks_are_refused() {
     let Some(mut h) = Harness::connect() else {
