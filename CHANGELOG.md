@@ -110,6 +110,18 @@ All notable changes to Pythia are documented here. The format follows
 - Monitor: the session list's filter chip ends in an × rather than a box;
   its `✕` has no glyph in Pythia's fonts. A test now checks every character
   the UI writes against the fonts (#91).
+- MySQL: the database picked in the object browser becomes the
+  connection's database, as 0.5.0 meant (#81). The browser listed its
+  objects, but SQL windows still failed with *No database selected*, and
+  the toolbar and status bar kept saying "No database" (#102).
+- A connection reports the schema its login statements leave it in. A
+  MySQL profile with a *Default schema* and no database in its address
+  said "No database" in the toolbar and status bar, and the object browser
+  asked for one, while SQL windows ran in that schema. The same happened
+  when the main session reconnected after a database was picked in the
+  browser. On Oracle and PostgreSQL, the object browser and completion
+  start in the profile's default schema, or the one the login script
+  sets, instead of the user's own (#103).
 
 ## [0.5.0] - 2026-10-26
 

@@ -416,13 +416,20 @@ fn login_script_runs_on_connect() {
     let Some(mut params) = params() else {
         return;
     };
-    params.init_sql = vec!["alter session set nls_date_format = 'YYYY'".into()];
+    params.init_sql = vec![
+        "alter session set current_schema = SYSTEM".into(),
+        "alter session set nls_date_format = 'YYYY'".into(),
+    ];
     let (tx, wake) = mpsc::channel();
     let session = Session::connect(params, move || {
         let _ = tx.send(());
     });
     let mut h = Harness { session, wake };
-    assert!(matches!(h.next(), DbEvent::Connected(_)));
+    // The schema the login script leaves the session in (#103).
+    let DbEvent::Connected(server) = h.next() else {
+        panic!("expected Connected")
+    };
+    assert_eq!(server.current_schema, "SYSTEM");
     h.session.send(DbRequest::Execute {
         id: 1,
         sql: "select to_char(date '2024-06-01') from dual".into(),

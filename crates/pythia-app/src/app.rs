@@ -4296,12 +4296,6 @@ impl PythiaApp {
         (self.active.clone(), self.browser.connection.clone())
     }
 
-    /// Picks a schema (database) in the object browser's picker.
-    pub fn test_pick_schema(&mut self, schema: &str) {
-        let effects = self.browser.pick_schema(schema);
-        self.apply_browser(effects);
-    }
-
     /// The tab title of the window whose title starts with `prefix`.
     pub fn test_tab_title(&self, prefix: &str) -> Option<String> {
         let doc = self.docs.values().find(|d| d.title().starts_with(prefix))?;

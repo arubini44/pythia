@@ -147,17 +147,11 @@ impl Worker {
             autocommit: false,
             open_query: None,
         };
-        match worker.on_connect() {
-            Ok(server) => {
+        match worker.on_connect(&params.init_sql) {
+            Ok((server, failed)) => {
                 worker.events.send(DbEvent::Connected(server));
-                for sql in &params.init_sql {
-                    if let Err(e) = worker.conn.execute(sql, &[]) {
-                        let e = DbError::from(e);
-                        worker.events.send(DbEvent::Notice(format!(
-                            "Login script: {e} ({})",
-                            sql.lines().next().unwrap_or_default()
-                        )));
-                    }
+                for notice in failed {
+                    worker.events.send(DbEvent::Notice(notice));
                 }
             }
             Err(e) => worker.events.send(DbEvent::ConnectFailed(e)),
@@ -227,18 +221,32 @@ impl Worker {
         worker.events.send(DbEvent::Disconnected);
     }
 
-    fn on_connect(&self) -> Result<ServerInfo, DbError> {
+    /// Sets the session up and runs the login statements, which may set
+    /// the current schema (#103): it is read after them. Their failures
+    /// come back as notices.
+    fn on_connect(&self, init_sql: &[String]) -> Result<(ServerInfo, Vec<String>), DbError> {
         let (version, banner) = self.conn.server_version()?;
         self.conn.set_module("pythia")?;
         self.conn
             .execute("begin dbms_output.enable(null); end;", &[])?;
-        Ok(ServerInfo {
+        let mut failed = Vec::new();
+        for sql in init_sql {
+            if let Err(e) = self.conn.execute(sql, &[]) {
+                let e = DbError::from(e);
+                failed.push(format!(
+                    "Login script: {e} ({})",
+                    sql.lines().next().unwrap_or_default()
+                ));
+            }
+        }
+        let server = ServerInfo {
             dialect: Dialect::ORACLE,
             version: version.to_string(),
             release: (version.major(), version.minor()),
             banner,
             current_schema: current_schema(&self.conn)?,
-        })
+        };
+        Ok((server, failed))
     }
 
     fn execute(&mut self, id: u64, sql: &str, max_rows: usize, binds: &[(String, Option<String>)]) {

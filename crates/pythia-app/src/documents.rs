@@ -163,6 +163,7 @@ impl Effects {
         self.ai.extend(other.ai);
         self.changed = other.changed.or(self.changed.take());
         self.close |= other.close;
+        self.database = other.database.or(self.database.take());
     }
 }
 
