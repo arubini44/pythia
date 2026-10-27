@@ -47,6 +47,8 @@ pub fn error_name(code: u16) -> &'static str {
         100 => "NULL_POINTER",
         101 => "ABSENT_INFORMATION",
         102 => "INVALID_EVENT_TYPE",
+        103 => "ILLEGAL_ARGUMENT",
+        111 => "ACCESS_DENIED",
         112 => "VM_DEAD",
         _ => "error",
     }
@@ -113,6 +115,16 @@ impl Out {
             .id(loc.class, sizes.reference_type)
             .id(loc.method, sizes.method)
             .u64(loc.index)
+    }
+
+    /// A reference as a tagged value (`StackFrame.SetValues`): a string
+    /// or another object (`Value::Object { id: 0, .. }` is null).
+    pub fn reference(self, value: &Value, sizes: &IdSizes) -> Self {
+        match value {
+            Value::String(id) => self.u8(b's').id(*id, sizes.object),
+            Value::Object { tag, id } => self.u8(*tag).id(*id, sizes.object),
+            other => panic!("not a reference: {other:?}"),
+        }
     }
 }
 
@@ -708,6 +720,12 @@ impl Jdwp {
         self.command(1, 6, Out::default()).map(drop)
     }
 
+    /// A new string in the debuggee (VirtualMachine.CreateString).
+    pub fn create_string(&mut self, text: &str) -> Result<u64> {
+        let data = self.command(1, 11, self.out().string(text))?;
+        In::new(&data).id(self.sizes.object)
+    }
+
     pub fn exit(&mut self, code: i32) -> Result<()> {
         self.command(1, 10, self.out().i32(code)).map(drop)
     }
@@ -831,6 +849,24 @@ impl Jdwp {
         let mut r = In::new(&data);
         let n = r.i32()?;
         (0..n).map(|_| r.value(&self.sizes)).collect()
+    }
+
+    /// Sets fields of an object to references (ObjectReference.SetValues;
+    /// the values are untagged).
+    pub fn set_object_values(&mut self, object: u64, values: &[(u64, Value)]) -> Result<()> {
+        let mut out = self
+            .out()
+            .id(object, self.sizes.object)
+            .i32(values.len() as i32);
+        for (field, value) in values {
+            out = out.id(*field, self.sizes.field);
+            let id = match value {
+                Value::String(id) | Value::Object { id, .. } => *id,
+                other => panic!("not a reference: {other:?}"),
+            };
+            out = out.id(id, self.sizes.object);
+        }
+        self.command(9, 3, out).map(drop)
     }
 
     pub fn string_value(&mut self, object: u64) -> Result<String> {
@@ -966,6 +1002,24 @@ impl Jdwp {
         let mut r = In::new(&data);
         let n = r.i32()?;
         (0..n).map(|_| r.value(&self.sizes)).collect()
+    }
+
+    /// Sets slots of a frame to references (StackFrame.SetValues).
+    pub fn set_frame_values(
+        &mut self,
+        thread: u64,
+        frame: u64,
+        values: &[(i32, Value)],
+    ) -> Result<()> {
+        let mut out = self
+            .out()
+            .id(thread, self.sizes.object)
+            .id(frame, self.sizes.frame)
+            .i32(values.len() as i32);
+        for (slot, value) in values {
+            out = out.i32(*slot).reference(value, &self.sizes);
+        }
+        self.command(16, 2, out).map(drop)
     }
 }
 

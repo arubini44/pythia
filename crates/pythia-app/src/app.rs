@@ -58,6 +58,9 @@ struct Workspace {
     project: crate::project::Project,
     #[serde(default)]
     marks: crate::browser::Marks,
+    /// Breakpoints, watches and Break on exceptions.
+    #[serde(default)]
+    debug: pythia_debugger::ui::Saved,
 }
 
 pub struct PythiaApp {
@@ -228,6 +231,7 @@ impl PythiaApp {
             app.last_profile = ws.last_profile;
             app.project = ws.project;
             app.browser.marks = ws.marks;
+            app.debug.restore(ws.debug);
             if !ws.docs.is_empty() {
                 app.dock = ws.dock;
                 app.docs = ws.docs;
@@ -1746,6 +1750,32 @@ impl PythiaApp {
         self.debug_actions(actions);
     }
 
+    /// Continues the stopped debug run to the cursor line of the focused
+    /// program window, or of the block being debugged in a SQL window.
+    fn debug_run_to_cursor(&mut self) {
+        let target = match self
+            .focused
+            .and_then(|id| self.docs.get(&id))
+            .map(|d| &d.kind)
+        {
+            Some(DocKind::Program(w)) => w.cursor_line(),
+            Some(DocKind::Sql(w)) => w.state.debug_start.and_then(|start| {
+                // The block is the outermost frame.
+                let block = self.debug.stack.last()?.location.unit.clone();
+                let line = w.editor.line_col().0;
+                (block.unit_type == pythia_debugger::UnitType::Block && line >= start)
+                    .then(|| (block, (line - start + 1) as u32))
+            }),
+            _ => None,
+        };
+        match target {
+            Some((unit, line)) => self.debug.run_to(unit, line),
+            None => self.log(
+                "Run to cursor: put the cursor in a program window, or in the block being debugged",
+            ),
+        }
+    }
+
     fn debug_actions(&mut self, actions: Vec<pythia_debugger::ui::DebugAction>) {
         use pythia_debugger::ui::DebugAction;
         for action in actions {
@@ -2155,6 +2185,7 @@ impl PythiaApp {
             Command::DebugStepOver => self.debug.command(pythia_debugger::DebugCommand::StepOver),
             Command::DebugStepInto => self.debug.command(pythia_debugger::DebugCommand::StepInto),
             Command::DebugStepOut => self.debug.command(pythia_debugger::DebugCommand::StepOut),
+            Command::DebugRunToCursor => self.debug_run_to_cursor(),
             Command::DebugStop => self.debug.stop(),
             Command::ShowDebugger => self.open_tab(Tab::Debugger),
             Command::ShowVariables => {
@@ -3218,6 +3249,7 @@ impl PythiaApp {
                                 Command::DebugStepOver,
                                 Command::DebugStepInto,
                                 Command::DebugStepOut,
+                                Command::DebugRunToCursor,
                                 Command::DebugStop,
                             ],
                             &[Command::ShowDebugger],
@@ -4272,6 +4304,7 @@ impl eframe::App for PythiaApp {
             last_profile: self.last_profile.clone(),
             project: std::mem::take(&mut self.project),
             marks: std::mem::take(&mut self.browser.marks),
+            debug: self.debug.saved(),
         };
         eframe::set_value(storage, WORKSPACE_KEY, &workspace);
         self.docs = workspace.docs;
@@ -5360,6 +5393,38 @@ mod workspace_tests {
         let app = start(&storage);
         assert_eq!(app.browser.marks.recent.get("hr@db"), Some(&vec![object]));
         assert_eq!(app.docs.len(), 1, "a new SQL window");
+    }
+
+    /// Breakpoints, their conditions, watches and Break on exceptions are
+    /// there again after a restart (#117).
+    #[test]
+    fn debugger_state_is_kept() {
+        let mut storage = Memory::default();
+        let mut app = start(&storage);
+        let unit = pythia_debugger::Unit::new("HR", "API", pythia_debugger::UnitType::PackageBody);
+        let at = |line| pythia_debugger::Breakpoint {
+            unit: unit.clone(),
+            line,
+        };
+        app.debug.toggle_breakpoint(unit.clone(), 12);
+        app.debug.toggle_breakpoint(unit.clone(), 40);
+        app.debug.set_enabled(&at(40), false);
+        let options = pythia_debugger::BreakpointOptions {
+            condition: Some("l_total > 3".into()),
+            hit_count: Some(2),
+        };
+        app.debug.set_options(&at(12), options.clone());
+        app.debug.add_watch("g_count");
+        app.debug.set_break_on_exception(true);
+        eframe::App::save(&mut app, &mut storage);
+
+        let app = start(&storage);
+        let debug = &app.debug;
+        assert_eq!(debug.breakpoints, [at(12), at(40)].into());
+        assert_eq!(debug.disabled, [at(40)].into());
+        assert_eq!(debug.options.get(&at(12)), Some(&options));
+        assert_eq!(debug.watches, ["g_count"]);
+        assert!(debug.break_on_exception);
     }
 }
 

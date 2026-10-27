@@ -13,10 +13,12 @@
 //! | Shift+F7   | Step out                                 |
 //! | Shift+F9   | Stop (terminate the call)                |
 //! | Ctrl+B     | Toggle breakpoint at cursor (app)        |
+//! | Ctrl+F7    | Run to cursor (app)                      |
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, RichText, Ui};
+use serde::{Deserialize, Serialize};
 
 use crate::Debugger;
 use crate::condition;
@@ -24,6 +26,7 @@ use crate::types::{
     Breakpoint, BreakpointOptions, DebugCommand, DebugEvent, Frame, Location, StopReason, Unit,
     UnitType, Variable, Watch,
 };
+use crate::value;
 
 pub const CONTINUE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F9);
 pub const STEP_OVER: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F6);
@@ -113,6 +116,39 @@ pub struct DebugSession {
     opaque_reasons: BTreeMap<(Unit, String), String>,
     /// Opaque variables asked about in this session (each once).
     opaque_asked: BTreeSet<(Unit, String)>,
+    /// The value being changed in the Variables or Watches panel.
+    value_edit: Option<ValueEdit>,
+    /// Why the last change of a value failed: its path and the reason.
+    value_error: Option<(String, String)>,
+}
+
+/// What the debugger keeps across restarts of Pythia: breakpoints with
+/// their state, conditions and hit counts, the watches and Break on
+/// exceptions.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Saved {
+    pub breakpoints: Vec<SavedBreakpoint>,
+    pub watches: Vec<String>,
+    pub break_on_exception: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedBreakpoint {
+    pub breakpoint: Breakpoint,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub options: BreakpointOptions,
+}
+
+/// A value being changed in the Variables or Watches panel.
+struct ValueEdit {
+    /// The value's path, as a watch names it.
+    path: String,
+    draft: String,
+    /// The field got the focus.
+    focused: bool,
 }
 
 impl DebugSession {
@@ -209,6 +245,7 @@ impl DebugSession {
             if matches!(
                 command,
                 DebugCommand::Resume
+                    | DebugCommand::RunTo(_)
                     | DebugCommand::StepOver
                     | DebugCommand::StepInto
                     | DebugCommand::StepOut
@@ -218,6 +255,68 @@ impl DebugSession {
             }
             d.send(command);
         }
+    }
+
+    /// Continues to a line while stopped, and stops there once (unless
+    /// something else stops first).
+    pub fn run_to(&mut self, unit: Unit, line: u32) {
+        if !self.is_suspended() {
+            self.log
+                .push("Run to cursor goes on from a stop (a breakpoint, a step or Pause)".into());
+            return;
+        }
+        self.command(DebugCommand::RunTo(Breakpoint { unit, line }));
+    }
+
+    /// Changes a value of the selected frame while stopped (`None` = NULL).
+    pub fn set_value(&mut self, expression: &str, value: Option<String>) {
+        if !self.is_suspended() {
+            return;
+        }
+        self.value_error = None;
+        self.command(DebugCommand::SetValue {
+            expression: expression.to_owned(),
+            value,
+        });
+    }
+
+    /// Breakpoints, watches and Break on exceptions, to keep across
+    /// restarts.
+    pub fn saved(&self) -> Saved {
+        Saved {
+            breakpoints: self
+                .breakpoints
+                .iter()
+                .map(|bp| SavedBreakpoint {
+                    breakpoint: bp.clone(),
+                    disabled: self.disabled.contains(bp),
+                    options: self.options.get(bp).cloned().unwrap_or_default(),
+                })
+                .collect(),
+            watches: self.watches.clone(),
+            break_on_exception: self.break_on_exception,
+        }
+    }
+
+    /// Restores what [`Self::saved`] kept (before any debugging).
+    pub fn restore(&mut self, saved: Saved) {
+        if self.is_active() {
+            return;
+        }
+        self.breakpoints.clear();
+        self.disabled.clear();
+        self.options.clear();
+        for b in saved.breakpoints {
+            if b.disabled {
+                self.disabled.insert(b.breakpoint.clone());
+            }
+            if !b.options.is_empty() {
+                self.options.insert(b.breakpoint.clone(), b.options);
+            }
+            self.breakpoints.insert(b.breakpoint);
+        }
+        self.watches = saved.watches;
+        self.break_on_exception = saved.break_on_exception;
     }
 
     /// Adds a breakpoint, enables a disabled one, or removes it.
@@ -319,6 +418,8 @@ impl DebugSession {
             // Not the previous frame's values meanwhile.
             self.variables.clear();
             self.watch_values.clear();
+            self.value_edit = None;
+            self.value_error = None;
             self.command(DebugCommand::SelectFrame(index));
         }
         Some(DebugAction::ShowLocation(location))
@@ -468,6 +569,8 @@ impl DebugSession {
                 self.state = State::Suspended { reason };
                 self.stack = stack;
                 self.frame = frame;
+                self.value_edit = None;
+                self.value_error = None;
                 self.variables = variables;
                 self.watch_values = watches;
                 if let Some(e) = &exception {
@@ -479,6 +582,12 @@ impl DebugSession {
                 self.explain_opaque(actions);
             }
             DebugEvent::Watches(values) => self.watch_values = values,
+            DebugEvent::ValueSet { expression, error } => {
+                if let Some(error) = error {
+                    self.log.push(format!("Can't set {expression}: {error}"));
+                    self.value_error = Some((expression, error));
+                }
+            }
             // Only the latest selection (a click may still be on its way).
             DebugEvent::FrameSelected {
                 frame,
@@ -509,6 +618,8 @@ impl DebugSession {
                 self.stack.clear();
                 self.frame = 0;
                 self.exception = None;
+                self.value_edit = None;
+                self.value_error = None;
                 self.log.push("Debug session ended".into());
                 actions.push(DebugAction::Finished);
             }
@@ -574,7 +685,8 @@ impl DebugSession {
             }
 
             cols[1].horizontal(|ui| {
-                ui.strong("Variables");
+                ui.strong("Variables")
+                    .on_hover_text("Double-click a value to change it while stopped");
                 // Say whose, when it isn't where execution stopped.
                 if self.is_suspended()
                     && self.frame != self.execution_frame()
@@ -586,22 +698,28 @@ impl DebugSession {
                     );
                 }
             });
-            let mut watch = None;
             let unit = self.stack.get(self.frame).map(|f| &f.location.unit);
+            let mut rows = Rows {
+                editable: self.is_suspended(),
+                edit: &mut self.value_edit,
+                error: self.value_error.as_ref(),
+                action: None,
+            };
             egui::ScrollArea::vertical()
                 .id_salt("dbg-vars")
                 .show(&mut cols[1], |ui| {
                     for (i, var) in self.variables.iter().enumerate() {
-                        let reason = unit.and_then(|u| self.opaque_reason(u, &var.name));
-                        variable_ui(ui, var, "", i, &mut watch, reason);
+                        let reason = unit
+                            .and_then(|u| self.opaque_reasons.get(&(u.clone(), var.name.clone())))
+                            .map(String::as_str);
+                        variable_ui(ui, var, "", i, &mut rows, reason);
                     }
                     if self.variables.is_empty() {
                         ui.weak("—");
                     }
                 });
-            if let Some(expression) = watch {
-                self.add_watch(&expression);
-            }
+            let action = rows.action;
+            self.row_action(action);
 
             self.watches_ui(&mut cols[2]);
             self.breakpoints_ui(&mut cols[3]);
@@ -662,6 +780,7 @@ impl DebugSession {
                         StopReason::Step => format!("Stopped after step, {at}"),
                         StopReason::Pause => format!("Paused at {at}"),
                         StopReason::Entry => format!("Stopped on entry, {at}"),
+                        StopReason::Cursor => format!("Stopped at cursor, {at}"),
                         StopReason::Exception => format!(
                             "Exception at {at}: {}",
                             self.exception.as_deref().unwrap_or("raised")
@@ -680,10 +799,24 @@ impl DebugSession {
         });
     }
 
+    fn row_action(&mut self, action: Option<RowAction>) {
+        match action {
+            Some(RowAction::Watch(expression)) => self.add_watch(&expression),
+            Some(RowAction::Set(path, value)) => self.set_value(&path, value),
+            None => {}
+        }
+    }
+
     fn watches_ui(&mut self, ui: &mut Ui) {
         ui.strong("Watches");
         let mut remove = None;
         let stale = !self.is_suspended();
+        let mut rows = Rows {
+            editable: !stale,
+            edit: &mut self.value_edit,
+            error: self.value_error.as_ref(),
+            action: None,
+        };
         egui::ScrollArea::vertical()
             .id_salt("dbg-watches")
             .max_height((ui.available_height() - 28.0).max(40.0))
@@ -700,14 +833,22 @@ impl DebugSession {
                         match value.map(|w| &w.value) {
                             Some(Ok(var)) if var.children.is_empty() => {
                                 ui.label(RichText::new(expression).monospace().strong());
-                                ui.label(value_text(ui, var, stale));
+                                if let Some(response) =
+                                    value_ui(ui, expression, var, &mut rows, stale, true)
+                                {
+                                    if rows.can_edit(var) && response.double_clicked() {
+                                        rows.start(expression, var);
+                                    }
+                                    response.context_menu(|ui| {
+                                        value_menu(ui, expression, var, &mut rows, false)
+                                    });
+                                }
                             }
                             Some(Ok(var)) => {
                                 let mut named = var.clone();
                                 named.name = expression.clone();
                                 ui.vertical(|ui| {
-                                    let mut ignore = None;
-                                    variable_ui(ui, &named, "", 1000 + i, &mut ignore, None);
+                                    variable_ui(ui, &named, "", 1000 + i, &mut rows, None);
                                 });
                             }
                             Some(Err(e)) => {
@@ -726,11 +867,16 @@ impl DebugSession {
                             }
                         }
                     });
+                    if let Some((_, error)) = rows.error.filter(|(path, _)| path == expression) {
+                        error_ui(ui, error);
+                    }
                 }
                 if self.watches.is_empty() {
                     ui.weak("Right-click a variable or type an expression below");
                 }
             });
+        let action = rows.action;
+        self.row_action(action);
         if let Some(i) = remove {
             self.remove_watch(i);
         }
@@ -953,6 +1099,39 @@ fn value_text(ui: &Ui, var: &Variable, stale: bool) -> RichText {
     }
 }
 
+/// What the variable rows of the Variables and Watches panels share while
+/// they are drawn.
+struct Rows<'a> {
+    /// Values can be changed (stopped).
+    editable: bool,
+    edit: &'a mut Option<ValueEdit>,
+    /// Why the last change failed: its path and the reason.
+    error: Option<&'a (String, String)>,
+    /// What a row asked for.
+    action: Option<RowAction>,
+}
+
+enum RowAction {
+    Watch(String),
+    /// Change the value at a path (`None` = NULL).
+    Set(String, Option<String>),
+}
+
+impl Rows<'_> {
+    fn can_edit(&self, var: &Variable) -> bool {
+        self.editable && var.children.is_empty() && value::changeable(&var.type_name)
+    }
+
+    /// Starts changing a value: a field with its text.
+    fn start(&mut self, path: &str, var: &Variable) {
+        *self.edit = Some(ValueEdit {
+            path: path.to_owned(),
+            draft: var.value.clone().unwrap_or_default(),
+            focused: false,
+        });
+    }
+}
+
 /// A variable's name as shown: lowercase, but text keys (`('Key')`) and
 /// watch expressions (`l_map('Key')`) as they are.
 fn shown_name(name: &str) -> String {
@@ -976,41 +1155,36 @@ fn child_path(parent: &str, name: &str) -> String {
     }
 }
 
-/// A variable and its fields/elements; right-click offers "Add watch" with
-/// the variable's full path (`parent` is the path of the enclosing one).
+/// A variable and its fields/elements; right-click offers "Watch" with the
+/// variable's full path (`parent` is the path of the enclosing one) and,
+/// while stopped, changing a scalar's value (also on double-click).
 /// `opaque` says why it has no contents, if known.
 fn variable_ui(
     ui: &mut Ui,
     var: &Variable,
     parent: &str,
     index: usize,
-    watch: &mut Option<String>,
+    rows: &mut Rows,
     opaque: Option<&str>,
 ) {
     let name = shown_name(&var.name);
     let path = child_path(parent, &var.name);
-    let menu = |ui: &mut Ui, watch: &mut Option<String>| {
-        if ui.button(format!("Watch {path}")).clicked() {
-            *watch = Some(path.clone());
-            ui.close();
-        }
-        if let Some(v) = &var.value
-            && ui.button("Copy value").clicked()
-        {
-            ui.ctx().copy_text(v.clone());
-            ui.close();
-        }
-    };
     if var.children.is_empty() {
         let response = ui
             .horizontal(|ui| {
                 ui.label(RichText::new(&name).monospace().strong());
-                ui.label(value_text(ui, var, false));
+                value_ui(ui, &path, var, rows, false, false);
                 ui.weak(&var.type_name);
             })
             .response
             .interact(egui::Sense::click());
-        response.context_menu(|ui| menu(ui, watch));
+        if rows.can_edit(var) && response.double_clicked() {
+            rows.start(&path, var);
+        }
+        response.context_menu(|ui| value_menu(ui, &path, var, rows, true));
+        if let Some((_, error)) = rows.error.filter(|(p, _)| *p == path) {
+            error_ui(ui, error);
+        }
         if let Some(reason) = opaque {
             ui.label(
                 RichText::new(reason)
@@ -1034,11 +1208,87 @@ fn variable_ui(
             .id_salt(("var", index, &var.name, parent))
             .show(ui, |ui| {
                 for (i, child) in var.children.iter().enumerate() {
-                    variable_ui(ui, child, &path, i, watch, None);
+                    variable_ui(ui, child, &path, i, rows, None);
                 }
             });
-        response.header_response.context_menu(|ui| menu(ui, watch));
+        response
+            .header_response
+            .context_menu(|ui| value_menu(ui, &path, var, rows, true));
     }
+}
+
+/// A value, or the field that changes it. `sense`: the label takes clicks
+/// (for a context menu and double-click).
+fn value_ui(
+    ui: &mut Ui,
+    path: &str,
+    var: &Variable,
+    rows: &mut Rows,
+    stale: bool,
+    sense: bool,
+) -> Option<egui::Response> {
+    if let Some(edit) = rows.edit.as_mut().filter(|e| e.path == path) {
+        let response = ui
+            .add(
+                egui::TextEdit::singleline(&mut edit.draft)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width((ui.available_width() - 60.0).max(80.0)),
+            )
+            .on_hover_text("Enter sets the value (empty for NULL), Esc cancels");
+        if !edit.focused {
+            response.request_focus();
+            edit.focused = true;
+        }
+        if response.lost_focus() {
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                let value = Some(edit.draft.clone());
+                rows.action = Some(RowAction::Set(path.to_owned(), value));
+            }
+            *rows.edit = None;
+        }
+        return None;
+    }
+    let label = egui::Label::new(value_text(ui, var, stale));
+    Some(if sense {
+        ui.add(label.sense(egui::Sense::click()))
+    } else {
+        ui.add(label)
+    })
+}
+
+/// The context menu of a variable or watch: watch it, change it, copy it.
+fn value_menu(ui: &mut Ui, path: &str, var: &Variable, rows: &mut Rows, watch: bool) {
+    if watch && ui.button(format!("Watch {path}")).clicked() {
+        rows.action = Some(RowAction::Watch(path.to_owned()));
+        ui.close();
+    }
+    if rows.can_edit(var) {
+        if ui.button("Set value…").clicked() {
+            rows.start(path, var);
+            ui.close();
+        }
+        if var.value.is_some() && ui.button("Set to NULL").clicked() {
+            rows.action = Some(RowAction::Set(path.to_owned(), None));
+            ui.close();
+        }
+    }
+    if let Some(v) = &var.value
+        && ui.button("Copy value").clicked()
+    {
+        ui.ctx().copy_text(v.clone());
+        ui.close();
+    }
+}
+
+fn error_ui(ui: &mut Ui, error: &str) {
+    ui.add(
+        egui::Label::new(
+            RichText::new(error)
+                .small()
+                .color(ui.visuals().error_fg_color),
+        )
+        .wrap(),
+    );
 }
 
 /// Hover text for a variable: its value, or its fields/elements.
@@ -1351,7 +1601,152 @@ mod tests {
         assert_eq!(child_path("", "l_map('Key')"), "l_map('Key')", "a watch");
         let path = condition::parse_path(&child_path("l_map", "('Key')")).unwrap();
         let map = var("L_MAP", None, vec![var("('Key')", Some("1"), vec![])]);
-        assert_eq!(condition::lookup(&[map], &path).unwrap().value.as_deref(), Some("1"));
+        assert_eq!(
+            condition::lookup(&[map], &path).unwrap().value.as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn breakpoints_and_watches_are_saved() {
+        let mut s = DebugSession::default();
+        let unit = Unit::new("PYTHIA", "P", UnitType::Procedure);
+        s.toggle_breakpoint(unit.clone(), 5);
+        s.toggle_breakpoint(unit.clone(), 9);
+        let at = |line| Breakpoint {
+            unit: unit.clone(),
+            line,
+        };
+        s.set_enabled(&at(9), false);
+        let options = BreakpointOptions {
+            condition: Some("l_total > 3".into()),
+            hit_count: Some(2),
+        };
+        s.set_options(&at(5), options.clone());
+        s.add_watch("l_rec.name");
+        s.set_break_on_exception(true);
+
+        let saved = s.saved();
+        let mut restored = DebugSession::default();
+        restored.restore(saved.clone());
+        assert_eq!(restored.breakpoints, s.breakpoints);
+        assert_eq!(restored.disabled, s.disabled);
+        assert_eq!(restored.options.get(&at(5)), Some(&options));
+        assert_eq!(restored.watches, ["l_rec.name"]);
+        assert!(restored.break_on_exception);
+        assert_eq!(restored.markers(&unit).0, vec![5], "line 9 is disabled");
+        assert_eq!(restored.saved(), saved);
+    }
+
+    #[test]
+    fn values_change_while_stopped() {
+        let mut s = DebugSession::default();
+        s.set_value("l_total", Some("5".into()));
+        assert!(
+            s.value_error.is_none(),
+            "nothing to change while not stopped"
+        );
+        s.state = State::Suspended {
+            reason: StopReason::Breakpoint,
+        };
+        let mut actions = Vec::new();
+        s.on_event(
+            DebugEvent::ValueSet {
+                expression: "l_np".into(),
+                error: Some("1234.5 is too large for NUMBER(5,2)".into()),
+            },
+            &mut actions,
+        );
+        assert_eq!(
+            s.value_error,
+            Some(("l_np".into(), "1234.5 is too large for NUMBER(5,2)".into()))
+        );
+        assert_eq!(
+            s.log.last().map(String::as_str),
+            Some("Can't set l_np: 1234.5 is too large for NUMBER(5,2)")
+        );
+        // The next stop forgets it.
+        let unit = Unit::new("PYTHIA", "P", UnitType::Procedure);
+        s.on_event(
+            DebugEvent::Suspended {
+                reason: StopReason::Cursor,
+                location: Location {
+                    unit: unit.clone(),
+                    line: Some(4),
+                },
+                stack: vec![frame(&unit, "P", Some(4))],
+                frame: 0,
+                variables: Vec::new(),
+                watches: Vec::new(),
+                exception: None,
+            },
+            &mut actions,
+        );
+        assert!(s.value_error.is_none());
+    }
+
+    /// Renders the panel while a value is changed and another one was
+    /// refused, to `PYTHIA_SCREENSHOT_DIR`.
+    #[test]
+    fn changing_values_screenshot() {
+        let Some(dir) = std::env::var_os("PYTHIA_SCREENSHOT_DIR") else {
+            return;
+        };
+        let unit = Unit::new("PYTHIA", "DBGV_PKG", UnitType::PackageBody);
+        let typed = |name: &str, type_name: &str, value: Option<&str>| Variable {
+            type_name: type_name.into(),
+            ..var(name, value, vec![])
+        };
+        for dark in [true, false] {
+            let mut s = DebugSession {
+                state: State::Suspended {
+                    reason: StopReason::Cursor,
+                },
+                stack: vec![frame(&unit, "RUN", Some(23))],
+                variables: vec![
+                    typed("P_N", "NUMBER", Some("3")),
+                    typed("L_TOTAL", "NUMBER", Some("3")),
+                    typed("L_NAME", "VARCHAR2", None),
+                    typed("L_NP", "NUMBER", Some("1.25")),
+                    typed("L_DATE", "DATE", Some("29-FEB-24 12.00.00 AM")),
+                ],
+                watches: vec!["dbgv_pkg.g_num".into()],
+                watch_values: vec![Watch {
+                    expression: "dbgv_pkg.g_num".into(),
+                    value: Ok(typed("G_NUM", "NUMBER", Some("8"))),
+                }],
+                value_edit: Some(ValueEdit {
+                    path: "l_total".into(),
+                    draft: "100".into(),
+                    focused: false,
+                }),
+                value_error: Some(("l_np".into(), "1234.5 is too large for NUMBER(5,2)".into())),
+                ..Default::default()
+            };
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1100.0, 260.0))
+                .with_pixels_per_point(1.5)
+                .wgpu()
+                .build_ui(move |ui| {
+                    egui::Frame::central_panel(ui.style()).show(ui, |ui| {
+                        s.ui(ui);
+                    });
+                });
+            harness.ctx.set_theme(if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+            harness.run_steps(4);
+            let image = harness.render().expect("render");
+            let name = format!(
+                "debugger-set-value-{}.png",
+                if dark { "dark" } else { "light" }
+            );
+            let path = std::path::Path::new(&dir).join(name);
+            image.save(&path).unwrap();
+            eprintln!("wrote {}", path.display());
+        }
     }
 
     #[test]

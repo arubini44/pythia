@@ -7,6 +7,23 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Debugger: change values while stopped (#117). Double-click a value in
+  Variables or Watches, or right-click it → *Set value…* or *Set to
+  NULL*, to change a local variable, an IN OUT or OUT parameter, a record
+  field, a collection element or a package global; the code goes on with
+  the new value. Numbers are checked against their precision and range
+  first (some wrong values would end the debugged session), dates and
+  timestamps are written as shown (the session's NLS format), and a value
+  the database refuses says why and stays as it was. IN parameters and
+  LOBs can't be changed.
+- Debugger: **Run to Cursor** (Ctrl+F7, *Debug → Run to Cursor*, or the
+  editor's context menu while stopped) continues to the cursor line of a
+  program window, or of the block being debugged in a SQL window, and
+  stops there once, also in a unit that isn't loaded yet. A breakpoint or
+  an exception on the way stops first and ends it (#117).
+- Breakpoints, with whether they're enabled, their conditions and hit
+  counts, the watches and *Break on exceptions* are kept across restarts
+  of Pythia (#117).
 - Errors lead to the code they were raised in. In Messages, each line of a
   PL/SQL error stack (`ORA-06512: at "OWNER.NAME", line N`) is a link that
   opens the package body, procedure, function, type body or trigger at that

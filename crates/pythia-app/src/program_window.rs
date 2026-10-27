@@ -170,13 +170,15 @@ impl ProgramWindow {
     /// Toggles a breakpoint on the cursor line of the active part.
     pub fn toggle_breakpoint(&self) -> Effects {
         let mut effects = Effects::default();
-        if let Some(part) = self.parts.get(self.active) {
-            let line = part.editor.line_col().0 as u32;
-            effects
-                .breakpoints
-                .push((debug_unit(&self.object, part.object_type), line));
-        }
+        effects.breakpoints.extend(self.cursor_line());
         effects
+    }
+
+    /// The debugger's unit of the active part, and the cursor line in it.
+    pub fn cursor_line(&self) -> Option<(pythia_debugger::Unit, u32)> {
+        let part = self.parts.get(self.active)?;
+        let line = part.editor.line_col().0 as u32;
+        Some((debug_unit(&self.object, part.object_type), line))
     }
 
     /// File name for saving the active part, e.g. `emp_pkg.pkb`.

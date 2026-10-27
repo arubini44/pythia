@@ -265,14 +265,14 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 - [x] Privilege check and setup assistant (`DEBUG CONNECT SESSION`, `DEBUG ANY PROCEDURE`, ACL for JDWP)
 - [x] Debug session lifecycle: target session + debugger session
 - [x] Breakpoints in gutter: line, conditional, hit count, enable/disable
-- [ ] Breakpoints persisted per object
-- [x] Step into / over / out, run to cursor, continue, abort (no run to cursor)
+- [x] Breakpoints persisted per object (with the workspace: enabled state, conditions, hit counts; also watches and Break on exceptions)
+- [x] Step into / over / out, run to cursor, continue, abort (run to cursor in an anonymous block steps there: the agent sets no breakpoints in blocks)
 - [x] Break on exception (all / specific ORA codes) (all exceptions only)
 - [x] Call stack panel with navigation
 - [x] Variables panel: locals, parameters, package globals (package globals through watches)
 - [x] Inspect records, collections, objects (tree view)
 - [x] Watches with expressions (variable paths: `rec.field`, `coll(n)`, `pkg.g_var`; no arithmetic)
-- [ ] Modify variable values while paused
+- [x] Modify variable values while paused (scalars: locals, IN OUT/OUT parameters, fields, elements, package globals; numbers checked against precision and range first, as the agent crashes the session on some; not IN parameters or LOBs)
 - [x] Hover over variable shows value while paused
 - [x] DBMS_OUTPUT during debugging (shown when the run ends)
 - [x] Auto-compile with debug info before starting

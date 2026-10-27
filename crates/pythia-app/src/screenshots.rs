@@ -814,6 +814,7 @@ fn debugger_session() {
         run: false,
     });
     h.run_steps(2);
+    let sql = h.state().test_focused();
     h.state_mut()
         .test_command(crate::commands::Command::DebugStart);
     wait_until(&mut h, "breakpoint", |app| app.test_debug().is_suspended());
@@ -877,12 +878,40 @@ fn debugger_session() {
     h.run_steps(6);
     save(&mut h, "12-debugger-dark");
 
+    // The panel says why a value can't be changed (raise_salary has only
+    // IN parameters; changes themselves are pythia-debugger's tests).
     h.state_mut()
         .test_debug_mut()
-        .command(pythia_debugger::DebugCommand::StepOver);
-    wait_until(&mut h, "step", |app| {
+        .set_value("p_percent", Some("5".into()));
+    wait_until(&mut h, "refused change", |app| {
+        app.test_debug().log.last().map(String::as_str)
+            == Some("Can't set p_percent: it can't be changed (IN parameters are read-only)")
+    });
+
+    // Run to the block's `rollback`, from the cursor in the SQL window.
+    h.state_mut().test_focus(sql);
+    {
+        let editor = &mut h.state_mut().test_sql_window().editor;
+        let at = editor.text().find("rollback").unwrap();
+        editor.select(at..at);
+    }
+    h.state_mut()
+        .test_command(crate::commands::Command::DebugRunToCursor);
+    wait_until(&mut h, "run to cursor", |app| {
         app.test_debug().is_suspended() || !app.test_debug_running()
     });
+    let debug = h.state().test_debug();
+    assert_eq!(
+        debug.state,
+        pythia_debugger::ui::State::Suspended {
+            reason: pythia_debugger::StopReason::Cursor
+        },
+        "{:?}",
+        debug.log
+    );
+    let frame = debug.current_frame().unwrap();
+    assert_eq!(frame.location.unit.unit_type, UnitType::Block);
+    assert_eq!(frame.location.line, Some(4), "the block's 4th line");
     h.state_mut()
         .test_debug_mut()
         .command(pythia_debugger::DebugCommand::Resume);

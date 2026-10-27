@@ -17,6 +17,7 @@ use crate::types::{
     Breakpoint, BreakpointOptions, DebugCommand, DebugEvent, Frame, Location, StopReason, Unit,
     UnitType, Variable, Watch,
 };
+use crate::value::{self, Constraints};
 
 /// Handle to a debugger worker.
 pub struct Debugger {
@@ -156,6 +157,14 @@ struct Session {
     /// and its JDWP breakpoints (one per overload) once its unit is loaded.
     entry: Option<(Unit, String)>,
     entry_requests: Vec<i32>,
+    /// The line to stop at once ([`DebugCommand::RunTo`]), and its JDWP
+    /// breakpoint once its unit is loaded. (In an anonymous block, where
+    /// the agent sets no breakpoints, a step goes there instead.)
+    run_to: Option<Breakpoint>,
+    run_to_request: Option<i32>,
+    /// Why the thread stopped last, and the exception, to report the stop
+    /// again when a run to a line can't start.
+    last_stop: Option<(StopReason, Option<String>)>,
     /// The step in progress, if any.
     step: Option<Step>,
     /// Units without debug information loaded during the step into in
@@ -182,6 +191,9 @@ struct Step {
     line: Option<u32>,
     /// Steps taken without leaving the line.
     repeats: u32,
+    /// Stepping on to this line of a block (class, line): see
+    /// [`Session::run_to_in_block`].
+    until: Option<(u64, u32)>,
 }
 
 /// Steps on one line before stopping anyway (a one-line loop).
@@ -189,6 +201,8 @@ const MAX_SAME_LINE_STEPS: u32 = 1000;
 
 /// The selected frame of the stopped thread and its variables.
 struct SelectedFrame {
+    /// Index in [`Session::frames`].
+    index: usize,
     class: u64,
     variables: Vec<Variable>,
 }
@@ -218,6 +232,9 @@ impl Session {
             exception_request: None,
             entry: None,
             entry_requests: Vec::new(),
+            run_to: None,
+            run_to_request: None,
+            last_stop: None,
             step: None,
             stepped_over: Vec::new(),
             frames: Vec::new(),
@@ -310,7 +327,41 @@ impl Session {
                     }
                     false
                 }
+                DebugCommand::SetValue { expression, value } => {
+                    if let Some(thread) = self.stopped {
+                        let error = self.set_value(&expression, value.as_deref()).err();
+                        let changed = error.is_none();
+                        events.send(DebugEvent::ValueSet { expression, error });
+                        if changed && let Some(frame) = self.selected.as_ref().map(|s| s.index) {
+                            let variables = self.select_frame(thread, frame)?;
+                            let watches = self.evaluate_watches();
+                            events.send(DebugEvent::FrameSelected {
+                                frame,
+                                variables,
+                                watches,
+                            });
+                        }
+                    }
+                    false
+                }
                 DebugCommand::Resume => self.stopped.is_some(),
+                DebugCommand::RunTo(target) => {
+                    let Some(thread) = self.stopped else {
+                        return Ok(false);
+                    };
+                    let started = self.start_run_to(thread, target, events);
+                    if !matches!(started, Ok(true)) {
+                        if let Err(e) = started {
+                            events.send(DebugEvent::Error(e.to_string()));
+                        }
+                        // Still stopped where it was (the UI expects it to run).
+                        let (reason, exception) =
+                            self.last_stop.clone().unwrap_or((StopReason::Pause, None));
+                        self.suspended(thread, reason, exception, events)?;
+                        return Ok(false);
+                    }
+                    true
+                }
                 DebugCommand::StepOver | DebugCommand::StepInto | DebugCommand::StepOut => {
                     let Some(thread) = self.stopped else {
                         return Ok(false);
@@ -396,6 +447,7 @@ impl Session {
             let mut exception: Option<(u64, String)> = None;
             let mut stepped: Option<u64> = None;
             let mut entered: Option<u64> = None;
+            let mut reached: Option<u64> = None;
             for event in batch {
                 debug!(?event, "debug event");
                 match event {
@@ -426,12 +478,18 @@ impl Session {
                             if self.entry.as_ref().is_some_and(|(u, _)| *u == unit) {
                                 self.bind_entry(class, events)?;
                             }
+                            if self.run_to.as_ref().is_some_and(|b| b.unit == unit) {
+                                self.bind_run_to(class, events)?;
+                            }
                         }
                     }
                     Event::SingleStep { thread, .. } => stepped = Some(thread),
                     Event::Breakpoint {
                         request, thread, ..
                     } if self.entry_requests.contains(&request) => entered = Some(thread),
+                    Event::Breakpoint {
+                        request, thread, ..
+                    } if self.run_to_request == Some(request) => reached = Some(thread),
                     Event::Breakpoint {
                         request,
                         thread,
@@ -461,8 +519,15 @@ impl Session {
                 Some((thread, StopReason::Exception, Some(text)))
             } else if let Some(thread) = entered {
                 Some((thread, StopReason::Entry, None))
+            } else if let Some(thread) = reached {
+                Some((thread, StopReason::Cursor, None))
             } else if let Some(thread) = stepped {
-                (!self.step_again(thread)?).then_some((thread, StopReason::Step, None))
+                let reason = if self.step.as_ref().is_some_and(|s| s.until.is_some()) {
+                    StopReason::Cursor
+                } else {
+                    StopReason::Step
+                };
+                (!self.step_again(thread)?).then_some((thread, reason, None))
             } else {
                 None
             };
@@ -507,6 +572,7 @@ impl Session {
             method,
             line,
             repeats,
+            until: None,
         });
         Ok(())
     }
@@ -537,11 +603,15 @@ impl Session {
     }
 
     /// After a step event: whether it landed on the line it started from
-    /// in the same frame, in which case the step goes on.
+    /// in the same frame, in which case the step goes on. Stepping on to a
+    /// line of a block goes on until it's there.
     fn step_again(&mut self, thread: u64) -> Result<bool, JdwpError> {
         let Some(step) = self.step.as_ref() else {
             return Ok(false);
         };
+        if let Some(until) = step.until {
+            return self.step_toward(thread, until);
+        }
         if step.depth == jdwp::step::OUT
             || step.thread != thread
             || step.line.is_none()
@@ -571,33 +641,97 @@ impl Session {
         Ok(same)
     }
 
+    /// Starts a run to a line ([`DebugCommand::RunTo`]) from a stop.
+    /// Returns whether to resume: not when there's no code to stop at.
+    fn start_run_to(
+        &mut self,
+        thread: u64,
+        target: Breakpoint,
+        events: &Events,
+    ) -> Result<bool, JdwpError> {
+        self.clear_run_to()?;
+        let class = self.classes.get(&target.unit).copied();
+        if target.unit.unit_type == UnitType::Block {
+            let Some(class) = class else {
+                events.send(DebugEvent::Error(format!(
+                    "Can't run to line {}: that block isn't running",
+                    target.line
+                )));
+                return Ok(false);
+            };
+            return self.run_to_in_block(thread, class, target, events);
+        }
+        self.run_to = Some(target);
+        match class {
+            Some(class) => self.bind_run_to(class, events),
+            // Set when the unit is loaded.
+            None => Ok(true),
+        }
+    }
+
+    /// A run to a line of an anonymous block, where the agent sets no
+    /// breakpoints (INVALID_LOCATION): steps out to the block, then over
+    /// its lines until the line is reached. Breakpoints and exceptions on
+    /// the way stop it as they would a breakpoint's run.
+    fn run_to_in_block(
+        &mut self,
+        thread: u64,
+        class: u64,
+        target: Breakpoint,
+        events: &Events,
+    ) -> Result<bool, JdwpError> {
+        let Some((line, _)) = self.code_at(class, target.line)? else {
+            events.send(DebugEvent::Error(format!(
+                "Can't run to line {} of the block: no code at or after it",
+                target.line
+            )));
+            return Ok(false);
+        };
+        self.cancel_step();
+        self.stepped_over.clear();
+        self.step_toward(thread, (class, line))?;
+        Ok(true)
+    }
+
+    /// Takes the next step toward a line of a block (class, line): over
+    /// lines of the block, out of what it called. Returns false when the
+    /// thread is there.
+    fn step_toward(&mut self, thread: u64, until: (u64, u32)) -> Result<bool, JdwpError> {
+        let (class, line) = until;
+        let stack = self.jdwp.frames(thread)?;
+        let Some((_, loc)) = stack.first() else {
+            return Ok(false);
+        };
+        let in_block = loc.class == class;
+        // The line it is on when the run starts doesn't count.
+        let started = self.step.as_ref().is_some_and(|s| s.until.is_some());
+        if started && in_block && self.line_of(loc)? == Some(line) {
+            return Ok(false);
+        }
+        let depth = if in_block {
+            jdwp::step::OVER
+        } else {
+            jdwp::step::OUT
+        };
+        self.start_step(thread, depth, 0)?;
+        if let Some(step) = self.step.as_mut() {
+            step.until = Some(until);
+        }
+        Ok(true)
+    }
+
     /// Sets a JDWP breakpoint for `bp` in a loaded class.
     fn bind(&mut self, bp: &Breakpoint, class: u64, events: &Events) -> Result<(), JdwpError> {
         if let Some(old) = self.bound.remove(bp) {
             let _ = self.jdwp.clear_event(jdwp::kind::BREAKPOINT, old);
         }
-        // The first line at or after the requested one that has code.
-        let mut best: Option<(i32, u64, u64)> = None;
-        for method in self.jdwp.methods(class)? {
-            for (index, line) in self.line_table(class, method.id)? {
-                if line >= bp.line as i32 && best.is_none_or(|(l, ..)| line < l) {
-                    best = Some((line, method.id, index));
-                }
-            }
-        }
-        let Some((line, method, index)) = best else {
+        let Some((line, location)) = self.code_at(class, bp.line)? else {
             events.send(DebugEvent::BreakpointBound {
                 breakpoint: bp.clone(),
                 line: None,
                 error: Some("no code at or after this line (compiled with debug info?)".into()),
             });
             return Ok(());
-        };
-        let location = jdwp::Location {
-            type_tag: 1,
-            class,
-            method,
-            index,
         };
         let modifier = self.jdwp.modifier_location(&location);
         let request =
@@ -606,9 +740,82 @@ impl Session {
         self.bound.insert(bp.clone(), request);
         events.send(DebugEvent::BreakpointBound {
             breakpoint: bp.clone(),
-            line: Some(line as u32),
+            line: Some(line),
             error: None,
         });
+        Ok(())
+    }
+
+    /// The first line at or after `line` in a loaded class that has code,
+    /// and its location.
+    fn code_at(
+        &mut self,
+        class: u64,
+        line: u32,
+    ) -> Result<Option<(u32, jdwp::Location)>, JdwpError> {
+        let mut best: Option<(i32, u64, u64)> = None;
+        for method in self.jdwp.methods(class)? {
+            for (index, l) in self.line_table(class, method.id)? {
+                if l >= line as i32 && best.is_none_or(|(b, ..)| l < b) {
+                    best = Some((l, method.id, index));
+                }
+            }
+        }
+        Ok(best.map(|(line, method, index)| {
+            let location = jdwp::Location {
+                type_tag: 1,
+                class,
+                method,
+                index,
+            };
+            (line as u32, location)
+        }))
+    }
+
+    /// Sets the JDWP breakpoint of the line to run to in its loaded class.
+    /// Returns whether there is code to stop at; if not, it's dropped.
+    fn bind_run_to(&mut self, class: u64, events: &Events) -> Result<bool, JdwpError> {
+        let Some(target) = self.run_to.clone() else {
+            return Ok(false);
+        };
+        let Some((_, location)) = self.code_at(class, target.line)? else {
+            self.run_to = None;
+            events.send(DebugEvent::Error(format!(
+                "Can't run to line {} of {}: no code at or after it",
+                target.line, target.unit
+            )));
+            return Ok(false);
+        };
+        let modifier = self.jdwp.modifier_location(&location);
+        match self
+            .jdwp
+            .set_event(jdwp::kind::BREAKPOINT, jdwp::suspend::ALL, vec![modifier])
+        {
+            Ok(request) => {
+                self.run_to_request = Some(request);
+                Ok(true)
+            }
+            // Refused there: the run goes on (or stays stopped) without it.
+            Err(JdwpError::Reply { code }) => {
+                self.run_to = None;
+                events.send(DebugEvent::Error(format!(
+                    "Can't run to line {} of {}: {}",
+                    target.line,
+                    target.unit,
+                    jdwp::error_name(code)
+                )));
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Forgets the line to run to and clears its breakpoint.
+    fn clear_run_to(&mut self) -> Result<(), JdwpError> {
+        self.run_to = None;
+        if let Some(request) = self.run_to_request.take() {
+            self.jdwp.clear_event(jdwp::kind::BREAKPOINT, request)?;
+        }
         Ok(())
     }
 
@@ -741,6 +948,9 @@ impl Session {
         exception: Option<String>,
         events: &Events,
     ) -> Result<(), JdwpError> {
+        // Any stop ends a run to a line.
+        self.clear_run_to()?;
+        self.last_stop = Some((reason, exception.clone()));
         self.stopped = Some(thread);
         let frames = self.jdwp.frames(thread)?;
         let mut stack = Vec::new();
@@ -792,6 +1002,7 @@ impl Session {
         };
         let variables = self.frame_variables(thread, frame, &loc)?;
         self.selected = Some(SelectedFrame {
+            index,
             class: loc.class,
             variables: variables.clone(),
         });
@@ -952,6 +1163,20 @@ impl Session {
     /// package that isn't instantiated in the session yet: its globals have
     /// no values (they aren't NULL either).
     fn static_variable(&mut self, class: u64, name: &str) -> Result<Option<Variable>, String> {
+        let Some((field, value)) = self.static_value(class, name)? else {
+            return Ok(None);
+        };
+        self.variable(field.name, &field.signature, &value, 0)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The field and value of [`Self::static_variable`].
+    fn static_value(
+        &mut self,
+        class: u64,
+        name: &str,
+    ) -> Result<Option<(jdwp::FieldInfo, Value)>, String> {
         let fields = match self.jdwp.fields(class) {
             Ok(f) => f,
             Err(JdwpError::Reply { .. }) => return Ok(None),
@@ -984,9 +1209,7 @@ impl Session {
                 package.name.to_lowercase()
             ));
         }
-        self.variable(field.name, &field.signature, &value, 0)
-            .map(Some)
-            .map_err(|e| e.to_string())
+        Ok(Some((field, value)))
     }
 
     /// Whether the package state behind `class` exists in the session.
@@ -1006,6 +1229,238 @@ impl Session {
             Err(JdwpError::Reply { .. }) => Ok(true),
             Err(e) => Err(e),
         }
+    }
+
+    /// Changes a scalar of the selected frame ([`DebugCommand::SetValue`]).
+    /// The agent keeps a scalar as an object whose `_value` field holds
+    /// its text; it parses what is written there.
+    fn set_value(&mut self, expression: &str, value: Option<&str>) -> Result<(), String> {
+        let path = condition::parse_path(expression)
+            .ok_or_else(|| format!("not a variable: {}", expression.trim()))?;
+        let holder = self.holder(&path)?;
+        let (_, class) = self.jdwp.object_type(holder).map_err(|e| e.to_string())?;
+        let type_name = type_name(&self.jdwp.signature(class).map_err(|e| e.to_string())?);
+        let fields = self.jdwp.fields(class).map_err(|e| e.to_string())?;
+        let Some(value_field) = fields.iter().find(|f| f.name == "_value").map(|f| f.id) else {
+            return Err(format!(
+                "{} is a {type_name}: change its fields or elements",
+                expression.trim()
+            ));
+        };
+        let ids: Vec<u64> = fields.iter().map(|f| f.id).collect();
+        let values = self
+            .jdwp
+            .object_values(holder, &ids)
+            .map_err(|e| e.to_string())?;
+        let mut constraints = Constraints::default();
+        let mut current = None;
+        for (field, v) in fields.iter().zip(values) {
+            let int = |v: &Value| match v {
+                Value::Int(i) => *i as i32,
+                _ => 0,
+            };
+            match field.name.as_str() {
+                "_value" => {
+                    if let Value::String(id) = v
+                        && id != 0
+                    {
+                        current = Some(self.jdwp.string_value(id).map_err(|e| e.to_string())?);
+                    }
+                }
+                "_canBeNull" => constraints.can_be_null = v != Value::Bool(false),
+                "_precision" => constraints.precision = int(&v),
+                "_scale" => constraints.scale = int(&v),
+                "_minValue" => constraints.min = int(&v),
+                "_maxValue" => constraints.max = int(&v),
+                "_maxLength" | "_length" => constraints.length = int(&v),
+                _ => {}
+            }
+        }
+        let texts = value::prepare(&type_name, &constraints, value, current.as_deref())?;
+        let mut refused = 0;
+        for text in texts {
+            match self.write_value(holder, value_field, text.as_deref()) {
+                Ok(()) => return Ok(()),
+                Err(JdwpError::Reply { code }) => refused = code,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        // A DATE the agent can't parse is changed anyway; put it back. (Its
+        // text has a two-digit year where the session's format has one, so
+        // a date outside 1950-2049 comes back in another century.)
+        let _ = self.write_value(holder, value_field, current.as_deref());
+        Err(value::refusal(
+            &type_name,
+            &constraints,
+            refused,
+            current.as_deref(),
+        ))
+    }
+
+    /// Writes a scalar's `_value` (`None` = NULL).
+    fn write_value(
+        &mut self,
+        holder: u64,
+        field: u64,
+        text: Option<&str>,
+    ) -> Result<(), JdwpError> {
+        let value = match text {
+            Some(text) => Value::String(self.jdwp.create_string(text)?),
+            None => Value::String(0),
+        };
+        self.jdwp.set_object_values(holder, &[(field, value)])
+    }
+
+    /// The object behind a path in the selected frame, like a watch: one of
+    /// its variables, a global of its package or `package.variable`, then
+    /// fields and elements.
+    fn holder(&mut self, path: &[String]) -> Result<u64, String> {
+        let (first, rest) = path.split_first().expect("non-empty path");
+        let (mut object, rest) = self.root_object(first, rest)?;
+        let mut name = first.to_lowercase();
+        for segment in rest {
+            object = self.member_object(object, &name, segment)?;
+            name = shown_segment(segment);
+        }
+        Ok(object)
+    }
+
+    /// The object a path starts with, and the rest of the path.
+    fn root_object<'p>(
+        &mut self,
+        first: &str,
+        rest: &'p [String],
+    ) -> Result<(u64, &'p [String]), String> {
+        let (Some(thread), Some(index)) = (self.stopped, self.selected.as_ref().map(|s| s.index))
+        else {
+            return Err("not stopped".into());
+        };
+        let (frame, loc) = self.frames[index];
+        let object = |value: Value| match value {
+            Value::Object { id, .. } if id != 0 => Ok(id),
+            _ => Err(format!("{} has no value to change", first.to_lowercase())),
+        };
+        let vars = match self.jdwp.variable_table(loc.class, loc.method) {
+            Ok((_, vars)) => vars,
+            Err(JdwpError::Reply { .. }) => Vec::new(),
+            Err(e) => return Err(e.to_string()),
+        };
+        if let Some(var) = vars.iter().find(|v| {
+            v.name.eq_ignore_ascii_case(first)
+                && v.code_index <= loc.index
+                && loc.index < v.code_index + v.length.max(0) as u64
+        }) {
+            let tag = var.signature.as_bytes().first().copied().unwrap_or(b'L');
+            let mut values = self
+                .jdwp
+                .frame_values(thread, frame, &[(var.slot, tag)])
+                .map_err(|e| e.to_string())?;
+            return Ok((object(values.pop().unwrap_or(Value::Void))?, rest));
+        }
+        // Globals of the frame's package (body and spec).
+        let unit = self.unit_of(loc.class).map_err(|e| e.to_string())?;
+        for class in self.package_classes(&unit.owner, &unit.name) {
+            if let Some((_, value)) = self.static_value(class, first)? {
+                return Ok((object(value)?, rest));
+            }
+        }
+        // `package.variable`, preferring the frame's schema.
+        if let Some((name, rest)) = rest.split_first() {
+            let mut classes = self.package_classes(&unit.owner, first);
+            if classes.is_empty() {
+                classes = self.package_classes("", first);
+            }
+            for class in classes {
+                if let Some((_, value)) = self.static_value(class, name)? {
+                    return Ok((object(value)?, rest));
+                }
+            }
+        }
+        Err(format!("{} is unknown here", first.to_lowercase()))
+    }
+
+    /// A field (`segment` is a name) or element (`(n)`, `('key')`) of a
+    /// record, object or collection.
+    fn member_object(&mut self, object: u64, name: &str, segment: &str) -> Result<u64, String> {
+        let missing = || format!("{name} has no {}", shown_segment(segment));
+        let e = |e: JdwpError| e.to_string();
+        let (_, class) = self.jdwp.object_type(object).map_err(e)?;
+        let fields = self.jdwp.fields(class).map_err(e)?;
+        let field = |name: &str| fields.iter().find(|f| f.name == name).map(|f| f.id);
+        let value = if segment.starts_with('(') {
+            let values = field("_values").ok_or_else(missing)?;
+            let Value::Object { id: array, .. } = self.object_field(object, values)? else {
+                return Err(missing());
+            };
+            let len = self.jdwp.array_length(array).map_err(e)?;
+            let elements = self.jdwp.array_values(array, 0, len).map_err(e)?;
+            // A dense collection has element n at position n - 1: that first.
+            let guess = segment
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .and_then(|n| n.parse::<usize>().ok())
+                .and_then(|n| n.checked_sub(1))
+                .filter(|i| *i < elements.len());
+            let mut found = None;
+            for i in guess.into_iter().chain(0..elements.len()) {
+                let Value::Object { id, .. } = elements[i] else {
+                    continue;
+                };
+                if condition::matches(&self.element_name(id, i)?, segment) {
+                    found = Some(id);
+                    break;
+                }
+            }
+            let element = found.ok_or_else(missing)?;
+            // An element wraps its value (a scalar, record or object).
+            let (_, element_class) = self.jdwp.object_type(element).map_err(e)?;
+            let inner = self
+                .jdwp
+                .fields(element_class)
+                .map_err(e)?
+                .into_iter()
+                .find(|f| f.name == "_value")
+                .ok_or_else(missing)?;
+            self.object_field(element, inner.id)?
+        } else {
+            let id = fields
+                .iter()
+                .find(|f| !f.name.starts_with('_') && f.name.eq_ignore_ascii_case(segment))
+                .map(|f| f.id)
+                .ok_or_else(missing)?;
+            self.object_field(object, id)?
+        };
+        match value {
+            Value::Object { id, .. } if id != 0 => Ok(id),
+            _ => Err(format!("{} has no value to change", shown_segment(segment))),
+        }
+    }
+
+    fn object_field(&mut self, object: u64, field: u64) -> Result<Value, String> {
+        let mut values = self
+            .jdwp
+            .object_values(object, &[field])
+            .map_err(|e| e.to_string())?;
+        values.pop().ok_or_else(|| "no value".into())
+    }
+
+    /// A collection element's name as [`Self::variable`] gives it: by its
+    /// key, or `(n)` by position.
+    fn element_name(&mut self, element: u64, position: usize) -> Result<String, String> {
+        let e = |e: JdwpError| e.to_string();
+        let (_, class) = self.jdwp.object_type(element).map_err(e)?;
+        let fields = self.jdwp.fields(class).map_err(e)?;
+        let Some(key) = fields.iter().find(|f| f.name == "_key").cloned() else {
+            return Ok(format!("({})", position + 1));
+        };
+        let value = self.object_field(element, key.id)?;
+        let key_var = self
+            .variable(String::new(), &key.signature, &value, 1)
+            .map_err(e)?;
+        Ok(match key_var.value {
+            Some(text) => element_name(&text, key_is_text(&key.signature)),
+            None => format!("({})", position + 1),
+        })
     }
 
     /// A readable description of a raised exception object.
@@ -1178,6 +1633,15 @@ impl Session {
             Value::Object { .. } => var.value = Some("…".into()),
         }
         Ok(var)
+    }
+}
+
+/// A path segment for messages: a name lowercase, a key as it is.
+fn shown_segment(segment: &str) -> String {
+    if segment.starts_with('(') {
+        segment.to_owned()
+    } else {
+        segment.to_lowercase()
     }
 }
 

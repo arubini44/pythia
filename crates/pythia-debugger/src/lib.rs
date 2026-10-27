@@ -19,6 +19,7 @@ pub mod jdwp;
 pub mod target;
 mod types;
 pub mod ui;
+pub mod value;
 
 pub use debugger::Debugger;
 pub use types::{
