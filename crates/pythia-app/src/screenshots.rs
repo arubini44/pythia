@@ -3100,7 +3100,7 @@ create table pythia_bnm_t (id number primary key);"
     wait_until(&mut h, "users", |app| !app.test_browser_loading());
     h.get_by_label("pythia").click_secondary();
     h.run_steps(2);
-    assert!(h.query_by_label("Edit user…").is_some());
+    assert!(h.query_by_label("Edit user…").is_none());
     assert!(h.query_by_label("Show schema").is_some());
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
@@ -5475,14 +5475,17 @@ select id, customer, total from app_orders where total < @limit order by id;
 
 /// What every connection to another database checks in the app: a script
 /// ran (its last result has `columns` and `rows` rows) and left a change
-/// pending; Oracle-only menus are gone; the browser has `folders`; tables
-/// open on their columns; completion offers a table's columns after an
-/// alias. Screenshots are named after `tag`.
+/// pending; Oracle-only menus are gone; the browser has `folders`, and
+/// lists `user` among the users; tables open on their columns; completion
+/// offers a table's columns after an alias. Screenshots are named after
+/// `tag`.
 struct OtherDatabase<'a> {
     tag: &'a str,
     connection: &'a str,
     product: &'a str,
     schema: &'a str,
+    /// The connection's user, as the browser lists it.
+    user: &'a str,
     folders: &'a [pythia_db::ObjectType],
 }
 
@@ -5556,6 +5559,26 @@ impl OtherDatabase<'_> {
         assert!(h.query_by_label("Packages").is_none());
         assert!(h.query_by_label_contains("app_orders").is_some());
 
+        // Users and roles below the folders (#130); without editors for
+        // them, a user's menu has what works on every database.
+        assert!(h.query_by_label("Roles").is_some());
+        assert!(h.query_by_label("Profiles").is_none());
+        h.state_mut().test_browser().set_filter(self.user);
+        h.run_steps(2);
+        h.get_by_label("Users").click();
+        h.run_steps(2);
+        wait_until(h, "users", |app| !app.test_browser_loading());
+        h.run_steps(2);
+        h.get_by_label(self.user).click_secondary();
+        h.run_steps(2);
+        save(h, &format!("{}-users", self.tag));
+        assert!(h.query_by_label("Copy name").is_some());
+        assert!(h.query_by_label("Drop…").is_some());
+        assert!(h.query_by_label("Edit user…").is_none());
+        h.key_press(egui::Key::Escape);
+        h.state_mut().test_browser().set_filter("");
+        h.run_steps(2);
+
         h.state_mut().test_open(OpenRequest::Object {
             connection: self.connection.into(),
             object: ObjectRef {
@@ -5625,6 +5648,7 @@ fn postgres_connection() {
         connection: "pythia@postgres",
         product: "PostgreSQL",
         schema: "public",
+        user: "pythia",
         folders: &[
             ObjectType::Table,
             ObjectType::MaterializedView,
@@ -5682,6 +5706,7 @@ fn sqlserver_connection() {
         connection: "pythia@sqlserver",
         product: "SQL Server",
         schema: "dbo",
+        user: "pythia",
         folders: &[
             ObjectType::Table,
             ObjectType::Procedure,
