@@ -41,6 +41,15 @@ All notable changes to Pythia are documented here. The format follows
   doesn't end the statement).
 
 ### Fixed
+- *Export → SQL INSERT* and *Copy as → INSERT* wrote Oracle SQL on every
+  connection (#106). On MySQL, column names went into double quotes (a
+  syntax error), dates into `to_date(…)`, and `VARBINARY` values into
+  quoted hex text that was stored as characters. SQL Server's
+  `datetime` swapped month and day under `DATEFORMAT dmy`. The statements
+  now use the connection's quoting and literals: `X'…'` and backtick names
+  on MySQL, `E'…'` for backslashes on PostgreSQL, and `N'…'`, `0x…` and
+  ISO 8601 dates on SQL Server. A numeric cell like `NaN` or `Inf` is
+  quoted instead of written as a name.
 - Editing another user no longer needs SELECT_CATALOG_ROLE: `ALTER USER`
   and `GRANT` don't need the DBA views, and the form failed with
   *reading users and roles needs SELECT_CATALOG_ROLE* (also when only

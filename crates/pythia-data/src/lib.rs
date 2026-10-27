@@ -2,8 +2,9 @@
 //! Markdown and HTML.
 //!
 //! Cell values arrive as text (see `pythia_db::Cell`); column types decide how
-//! they are written: numbers stay numbers in JSON/XLSX/INSERT, dates become
-//! `TO_DATE`/`TO_TIMESTAMP` literals in INSERT scripts.
+//! they are written: numbers stay numbers in JSON/XLSX/INSERT, INSERT scripts
+//! write values as literals of the database they came from (`TO_DATE` on
+//! Oracle, `X'…'` binary on MySQL, …).
 
 use std::io::Write;
 
@@ -68,6 +69,8 @@ pub struct Options {
     pub header: bool,
     /// Target table for INSERT statements.
     pub table: String,
+    /// Whose SQL INSERT statements are written in.
+    pub dialect: Dialect,
     /// Sheet name for XLSX.
     pub sheet: String,
     /// CSV field separator (default `,`).
@@ -81,6 +84,7 @@ impl Default for Options {
         Self {
             header: true,
             table: "my_table".into(),
+            dialect: Dialect::ORACLE,
             sheet: "Result".into(),
             delimiter: None,
             null_text: String::new(),
@@ -393,12 +397,18 @@ fn kind(col: &Column) -> Kind {
     }
 }
 
-/// Renders a value as a SQL literal for `col`.
+/// A numeric column's value that can go into SQL as it is: `inf` or `NaN`
+/// would be read as names.
+fn is_number(col: &Column, v: &str) -> bool {
+    col.numeric && v.parse::<f64>().is_ok_and(f64::is_finite)
+}
+
+/// Renders a value as a SQL literal for `col` (Oracle's SQL).
 pub fn sql_literal(col: &Column, value: Option<&str>) -> String {
     let Some(v) = value else {
         return "NULL".into();
     };
-    if col.numeric && v.parse::<f64>().is_ok() {
+    if is_number(col, v) {
         return v.to_owned();
     }
     let quoted = format!("'{}'", v.replace('\'', "''"));
@@ -421,8 +431,10 @@ pub fn sql_literal(col: &Column, value: Option<&str>) -> String {
 /// Renders a value as a SQL literal for `col` in `dialect`'s SQL.
 pub fn literal(dialect: Dialect, col: &Column, value: Option<&str>) -> String {
     match dialect.kind() {
+        DbKind::Oracle => sql_literal(col, value),
         DbKind::MySql => mysql_literal(col, value),
-        DbKind::Oracle | DbKind::Postgres | DbKind::SqlServer => sql_literal(col, value),
+        DbKind::Postgres => postgres_literal(col, value),
+        DbKind::SqlServer => sqlserver_literal(col, value),
     }
 }
 
@@ -435,7 +447,7 @@ fn mysql_literal(col: &Column, value: Option<&str>) -> String {
     let Some(v) = value else {
         return "NULL".into();
     };
-    if col.numeric && v.parse::<f64>().is_ok_and(f64::is_finite) {
+    if is_number(col, v) {
         return v.to_owned();
     }
     let binary = matches!(
@@ -452,13 +464,58 @@ fn mysql_literal(col: &Column, value: Option<&str>) -> String {
     }
 }
 
+/// PostgreSQL takes back the text it shows (`\x00ff` bytea, `t`, dates) as
+/// a quoted literal. With a backslash, `E'…'` says how to read it whatever
+/// `standard_conforming_strings` is.
+fn postgres_literal(col: &Column, value: Option<&str>) -> String {
+    let Some(v) = value else {
+        return "NULL".into();
+    };
+    if is_number(col, v) {
+        return v.to_owned();
+    }
+    let quoted = v.replace('\'', "''");
+    if v.contains('\\') {
+        format!("E'{}'", quoted.replace('\\', "\\\\"))
+    } else {
+        format!("'{quoted}'")
+    }
+}
+
+/// SQL Server: Unicode text as `N'…'`, binary as the `0x…` it is shown
+/// as. `datetime` text with a `T` (ISO 8601) is read the same under every
+/// `DATEFORMAT`; with a space, `dmy` swaps month and day.
+fn sqlserver_literal(col: &Column, value: Option<&str>) -> String {
+    let Some(v) = value else {
+        return "NULL".into();
+    };
+    if is_number(col, v) {
+        return v.to_owned();
+    }
+    let hex = v
+        .strip_prefix("0x")
+        .is_some_and(|h| h.chars().all(|c| c.is_ascii_hexdigit()));
+    match col.type_name.as_str() {
+        "binary" | "varbinary" | "image" if hex => v.to_owned(),
+        "datetime" | "smalldatetime" => format!("'{}'", v.replacen(' ', "T", 1)),
+        _ => format!("N'{}'", v.replace('\'', "''")),
+    }
+}
+
 fn inserts(
     columns: &[Column],
     rows: &[Vec<Cell>],
     options: &Options,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let names: Vec<String> = columns.iter().map(|c| identifier(&c.name)).collect();
+    let dialect = options.dialect;
+    let names: Vec<String> = columns
+        .iter()
+        .map(|c| match dialect.kind() {
+            DbKind::Oracle => identifier(&c.name),
+            _ => dialect.quote_ident(&c.name),
+        })
+        .collect();
     let target = if options.table.trim().is_empty() {
         "my_table"
     } else {
@@ -469,14 +526,14 @@ fn inserts(
         let values: Vec<String> = columns
             .iter()
             .zip(row)
-            .map(|(c, v)| sql_literal(c, v.as_deref()))
+            .map(|(c, v)| literal(dialect, c, v.as_deref()))
             .collect();
         writeln!(out, "{head}{});", values.join(", "))?;
     }
     Ok(())
 }
 
-/// Lowercase plain identifiers; quote anything that needs it.
+/// Lowercase plain identifiers; quote anything that needs it (Oracle).
 fn identifier(name: &str) -> String {
     let plain = name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
         && name
@@ -671,6 +728,83 @@ mod tests {
                 Some("2026-01-02 00:00:00")
             ),
             "to_date('2026-01-02 00:00:00', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+    }
+
+    #[test]
+    fn literals_of_each_database() {
+        let col = |t: &str, numeric| Column {
+            name: "C".into(),
+            type_name: t.into(),
+            numeric,
+        };
+        let pg = |c: &Column, v| literal(Dialect::POSTGRES, c, v);
+        assert_eq!(pg(&col("integer", true), Some("7")), "7");
+        assert_eq!(pg(&col("double precision", true), Some("NaN")), "'NaN'");
+        assert_eq!(pg(&col("bytea", false), Some(r"\x00ff")), r"E'\\x00ff'");
+        assert_eq!(pg(&col("text", false), Some("it's")), "'it''s'");
+        assert_eq!(
+            pg(
+                &col("timestamp with time zone", false),
+                Some("2026-01-02 03:04:05+01")
+            ),
+            "'2026-01-02 03:04:05+01'"
+        );
+        let ms = |c: &Column, v| literal(Dialect::SQLSERVER, c, v);
+        assert_eq!(
+            ms(&col("nvarchar", false), Some("grüße 'x'")),
+            "N'grüße ''x'''"
+        );
+        assert_eq!(ms(&col("varbinary", false), Some("0x00FF")), "0x00FF");
+        assert_eq!(
+            ms(&col("varbinary", false), Some("0x; drop")),
+            "N'0x; drop'"
+        );
+        assert_eq!(
+            ms(&col("datetime", false), Some("2026-01-02 03:04:05.123")),
+            "'2026-01-02T03:04:05.123'"
+        );
+        assert_eq!(ms(&col("date", false), Some("2026-01-02")), "N'2026-01-02'");
+        // Oracle too: a name isn't a number.
+        assert_eq!(
+            sql_literal(&col("BINARY_DOUBLE", true), Some("Inf")),
+            "'Inf'"
+        );
+    }
+
+    #[test]
+    fn inserts_in_the_connections_sql() {
+        let col = |name: &str, ty: &str, numeric| Column {
+            name: name.into(),
+            type_name: ty.into(),
+            numeric,
+        };
+        let columns = [
+            col("id", "INT", true),
+            col("order", "VARCHAR", false),
+            col("born", "DATE", false),
+        ];
+        let rows = [vec![
+            Some("1".into()),
+            Some(r"C:\x".into()),
+            Some("2026-01-02".into()),
+        ]];
+        let insert = |dialect| {
+            let options = Options {
+                table: "t".into(),
+                dialect,
+                ..Options::default()
+            };
+            String::from_utf8(export_to_vec(Format::Insert, &columns, &rows, &options).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            insert(Dialect::MYSQL),
+            "insert into t (id, `order`, born) values (1, _utf8mb4 X'433A5C78', '2026-01-02');\n"
+        );
+        assert_eq!(
+            insert(Dialect::SQLSERVER),
+            "insert into t (id, [order], born) values (1, N'C:\\x', N'2026-01-02');\n"
         );
     }
 

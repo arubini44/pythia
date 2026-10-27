@@ -62,6 +62,8 @@ pub struct GridState {
     frozen_width: Option<f32>,
     /// Cell edited in the dialog (long text, dates).
     value_editor: Option<ValueEditor>,
+    /// The database the rows come from: *Copy as* INSERT writes its SQL.
+    pub dialect: pythia_db::Dialect,
 }
 
 /// A header being dragged to another place.
@@ -1489,7 +1491,10 @@ fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut
                     *format,
                     &cols,
                     &data,
-                    &pythia_data::Options::default(),
+                    &pythia_data::Options {
+                        dialect: state.dialect,
+                        ..Default::default()
+                    },
                 ) {
                     ui.ctx()
                         .copy_text(String::from_utf8_lossy(&bytes).into_owned());
