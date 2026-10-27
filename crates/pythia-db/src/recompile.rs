@@ -131,18 +131,24 @@ pub fn invalid_objects(
     let privileges: HashSet<String> = conn
         .query_as::<String>("select privilege from session_privs", &[])?
         .collect::<Result<_, _>>()?;
-    let rows = conn.query_as::<(
-        String,
-        String,
-        String,
-        Option<String>,
-        u32,
-        Option<u32>,
-        Option<String>,
-    )>(&sql, &binds)?;
+    let rows = conn
+        .query_as::<(
+            String,
+            String,
+            String,
+            Option<String>,
+            u32,
+            Option<u32>,
+            Option<String>,
+        )>(&sql, &binds)?
+        .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::new();
-    for row in rows {
-        let (owner, name, object_type, last_ddl, errors, line, text) = row?;
+    for (owner, name, object_type, last_ddl, errors, mut line, text) in rows {
+        if object_type == "TRIGGER"
+            && let Some(line) = &mut line
+        {
+            *line += crate::meta::trigger_body_line(conn, &owner, &name)? - 1;
+        }
         let compilable = owner == user
             || compile_privilege(&object_type).is_some_and(|p| privileges.contains(p));
         out.push(InvalidObject {

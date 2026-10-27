@@ -7,6 +7,10 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- Trigger compile errors were marked too high, by the number of lines of
+  the trigger's header: Oracle counts their lines from the trigger's body.
+  Program windows, SQL windows and the invalid objects window now show them
+  on the right line (#114).
 - The fields of the Variables prompt (binds and `&substitutions`, before
   running or debugging) were only a few characters wide, so what you
   typed couldn't be read (#109).
