@@ -27,6 +27,9 @@ All notable changes to Pythia are documented here. The format follows
   dashboard shows what it can and says what's missing (#92).
 
 ### Fixed
+- Connect dialog: *Connect* no longer stays disabled after *Connect through
+  SSH* was ticked for MySQL and the type changed to one without tunnels;
+  the hidden SSH settings neither hold it up nor go along (#95).
 - Editing another user no longer needs SELECT_CATALOG_ROLE: `ALTER USER`
   and `GRANT` don't need the DBA views, and the form failed with
   *reading users and roles needs SELECT_CATALOG_ROLE* (also when only
