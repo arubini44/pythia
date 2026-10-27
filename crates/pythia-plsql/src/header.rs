@@ -75,7 +75,7 @@ pub fn unit_header(sql: &str) -> Option<UnitHeader> {
         let t = tokens.get(i)?;
         match t.kind {
             TokenKind::Ident | TokenKind::Keyword => Some(text(i).to_ascii_uppercase()),
-            TokenKind::QuotedIdent => Some(text(i).trim_matches('"').to_owned()),
+            TokenKind::QuotedIdent => Some(text(i).trim_matches(['"', '`']).to_owned()),
             _ => None,
         }
     };

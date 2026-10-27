@@ -94,7 +94,7 @@ fn lexer_diagnostics(src: &str, tokens: &[Token], out: &mut Vec<Diagnostic>) {
             {
                 "Unterminated comment"
             }
-            TokenKind::QuotedIdent if text.len() < 2 || !text.ends_with('"') => {
+            TokenKind::QuotedIdent if text.len() < 2 || !text.ends_with(&text[..1]) => {
                 "Unterminated quoted identifier"
             }
             _ => continue,

@@ -4391,6 +4391,31 @@ impl PythiaApp {
         }
     }
 
+    /// Runs `f` on the focused SQL window with a context as a frame gives
+    /// it (its connection's dialect), and applies what it asks for.
+    pub fn test_on_sql_window(&mut self, f: impl FnOnce(&mut SqlWindow, &DocContext) -> Effects) {
+        let id = self.focused.expect("focused document");
+        let connection = self.docs[&id].connection.clone();
+        let dialect = self.dialect_of(connection.as_deref());
+        let settings = self.settings.clone();
+        let cx = DocContext {
+            id,
+            settings: &settings,
+            connected: true,
+            fetch_size: 100,
+            connection,
+            catalog: None,
+            catalog_revision: 0,
+            connections: &[],
+            debug: None,
+            marks: None,
+            privilege: None,
+            dialect,
+        };
+        let effects = f(self.test_sql_window(), &cx);
+        self.apply(Some(id), effects);
+    }
+
     pub fn test_cx(&self) -> (DocId, Settings, Option<String>) {
         let id = self.focused.expect("focused document");
         (id, self.settings.clone(), self.docs[&id].connection.clone())
@@ -4647,6 +4672,10 @@ impl PythiaApp {
 
     pub fn test_commit(&mut self) {
         self.end_transaction(true);
+    }
+
+    pub fn test_rollback(&mut self) {
+        self.end_transaction(false);
     }
 
     pub fn test_pending_tx(&self) -> bool {

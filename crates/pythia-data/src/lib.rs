@@ -9,7 +9,7 @@ use std::io::Write;
 
 pub mod import;
 
-use pythia_db::{Cell, Column};
+use pythia_db::{Cell, Column, DbKind, Dialect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
@@ -418,6 +418,40 @@ pub fn sql_literal(col: &Column, value: Option<&str>) -> String {
     }
 }
 
+/// Renders a value as a SQL literal for `col` in `dialect`'s SQL.
+pub fn literal(dialect: Dialect, col: &Column, value: Option<&str>) -> String {
+    match dialect.kind() {
+        DbKind::MySql => mysql_literal(col, value),
+        DbKind::Oracle | DbKind::Postgres | DbKind::SqlServer => sql_literal(col, value),
+    }
+}
+
+/// MySQL converts text to dates and times itself; binary values (also BIT
+/// and GEOMETRY) are shown as hex and written as `X'…'`. Text with a
+/// backslash goes as hex too: a quoted `\` means one thing with
+/// `NO_BACKSLASH_ESCAPES` and another without, `_utf8mb4 X'…'` the same
+/// either way.
+fn mysql_literal(col: &Column, value: Option<&str>) -> String {
+    let Some(v) = value else {
+        return "NULL".into();
+    };
+    if col.numeric && v.parse::<f64>().is_ok_and(f64::is_finite) {
+        return v.to_owned();
+    }
+    let binary = matches!(
+        col.type_name.as_str(),
+        "BINARY" | "VARBINARY" | "BLOB" | "BIT" | "GEOMETRY"
+    );
+    if binary && v.chars().all(|c| c.is_ascii_hexdigit()) {
+        format!("X'{v}'")
+    } else if v.contains(['\\', '\0']) {
+        let hex: String = v.bytes().map(|b| format!("{b:02X}")).collect();
+        format!("_utf8mb4 X'{hex}'")
+    } else {
+        format!("'{}'", v.replace('\'', "''"))
+    }
+}
+
 fn inserts(
     columns: &[Column],
     rows: &[Vec<Cell>],
@@ -601,6 +635,42 @@ mod tests {
         assert_eq!(
             sql_literal(&tz, Some("2026-07-01 12:00:00 +02:00")),
             "to_timestamp_tz('2026-07-01 12:00:00 +02:00', 'YYYY-MM-DD HH24:MI:SS TZR')"
+        );
+    }
+
+    #[test]
+    fn mysql_literals() {
+        let col = |t: &str, numeric| Column {
+            name: "C".into(),
+            type_name: t.into(),
+            numeric,
+        };
+        let my = |c: &Column, v| literal(Dialect::MYSQL, c, v);
+        assert_eq!(my(&col("INT", true), Some("-12")), "-12");
+        assert_eq!(my(&col("DOUBLE", true), Some("inf")), "'inf'");
+        assert_eq!(my(&col("VARCHAR", false), Some("O'Brien")), "'O''Brien'");
+        assert_eq!(my(&col("VARCHAR", false), None), "NULL");
+        assert_eq!(
+            my(&col("TEXT", false), Some(r"C:\new")),
+            "_utf8mb4 X'433A5C6E6577'"
+        );
+        assert_eq!(
+            my(&col("DATETIME", false), Some("2026-01-02 03:04:05.5")),
+            "'2026-01-02 03:04:05.5'"
+        );
+        assert_eq!(my(&col("DATE", false), Some("2026-01-02")), "'2026-01-02'");
+        assert_eq!(my(&col("VARBINARY", false), Some("00ff")), "X'00ff'");
+        assert_eq!(my(&col("BLOB", false), Some("")), "X''");
+        assert_eq!(my(&col("BIT", false), Some("05")), "X'05'");
+        assert_eq!(my(&col("BLOB", false), Some("no hex")), "'no hex'");
+        // Oracle's stay as they were.
+        assert_eq!(
+            literal(
+                Dialect::ORACLE,
+                &col("DATE", false),
+                Some("2026-01-02 00:00:00")
+            ),
+            "to_date('2026-01-02 00:00:00', 'YYYY-MM-DD HH24:MI:SS')"
         );
     }
 

@@ -334,6 +334,24 @@ fn transactions_and_autocommit() {
     h.ok("drop table tx_t");
 }
 
+/// Rows affected are the rows an UPDATE matched, as on Oracle, also when it
+/// changes nothing: editing a result relies on it to find conflicts.
+#[test]
+fn updates_count_matched_rows() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    h.ok("drop table if exists found_t");
+    h.ok("create table found_t (id int primary key, x int)");
+    h.ok("insert into found_t values (1, 10), (2, 20)");
+    let DbEvent::Executed { summary, .. } = h.run(1, "update found_t set x = x") else {
+        panic!("expected Executed")
+    };
+    assert_eq!(summary.rows_affected, Some(2));
+    h.settle();
+    h.ok("drop table found_t");
+}
+
 /// Like Oracle's: a query neither pins a snapshot nor holds locks.
 #[test]
 fn queries_see_commits_and_lock_nothing() {

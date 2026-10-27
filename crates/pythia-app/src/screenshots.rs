@@ -450,6 +450,225 @@ fn data_editing() {
     );
 }
 
+/// Edits MySQL results (`PYTHIA_TEST_MYSQL`, #101): rows are found by the
+/// table's key, selected or not; values MySQL takes as they are (a date
+/// for a DATETIME) aren't conflicts, rows changed by another session are;
+/// tables without a key and grouped results stay read-only.
+#[test]
+fn mysql_data_editing() {
+    let Some(spec) = std::env::var("PYTHIA_TEST_MYSQL").ok() else {
+        return;
+    };
+    let (credentials, connect_string) = spec.rsplit_once('@').unwrap();
+    let (username, password) = credentials.split_once('/').unwrap();
+    let profile = ConnectionProfile {
+        name: "shop".into(),
+        kind: pythia_config::DbKind::MySql,
+        username: username.into(),
+        connect_string: connect_string.into(),
+        ..Default::default()
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password.into());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let run = |h: &mut Harness<'_, PythiaApp>, sql: &str| {
+        h.state_mut().test_open(OpenRequest::Sql {
+            connection: "shop".into(),
+            text: sql.into(),
+            run: true,
+        });
+        wait_until(h, sql, |app| !app.test_focused_busy());
+        h.state_mut().test_close_focused();
+    };
+    run(
+        &mut h,
+        "drop table if exists pythia_edit_t, pythia_edit_k, pythia_edit_n;\n\
+         create table pythia_edit_t (id int auto_increment primary key, name varchar(20), \
+           born datetime, doc json, price float);\n\
+         insert into pythia_edit_t (name, born, doc, price) values \
+           ('one', '2020-01-01 00:00:00', '{\"a\": 1}', 123456.789), ('two', null, null, 1.1);\n\
+         create table pythia_edit_k (a int not null, b varchar(5) not null, v int, \
+           unique key (a, b));\n\
+         insert into pythia_edit_k values (1, 'x', 10), (1, 'y', 20);\n\
+         create table pythia_edit_n (x int);\n\
+         insert into pythia_edit_n values (1);\n\
+         commit;\n",
+    );
+    let query = |h: &mut Harness<'_, PythiaApp>, sql: &str| {
+        h.state_mut().test_open(OpenRequest::Sql {
+            connection: "shop".into(),
+            text: sql.into(),
+            run: true,
+        });
+        wait_until(h, sql, |app| !app.test_focused_busy());
+        h.state_mut()
+            .test_on_sql_window(|w, cx| w.start_editing(0, cx));
+        wait_until(h, "editing", |app| !app.test_focused_busy());
+    };
+    let apply = |h: &mut Harness<'_, PythiaApp>| {
+        h.state_mut()
+            .test_on_sql_window(|w, cx| w.apply_changes(0, cx));
+        wait_until(h, "apply", |app| !app.test_focused_busy());
+    };
+    let messages = |h: &mut Harness<'_, PythiaApp>| -> Vec<String> {
+        let w = h.state_mut().test_sql_window();
+        w.state.messages.iter().map(|m| m.text.clone()).collect()
+    };
+
+    // The key isn't selected: Pythia adds it, read-only, at the end.
+    query(
+        &mut h,
+        "select name, born, doc, price from pythia_edit_t order by id",
+    );
+    let grid_window = h.state().test_focused();
+    {
+        let w = h.state_mut().test_sql_window();
+        let r = &mut w.state.results[0];
+        assert!(
+            r.grid.is_editable(),
+            "{:?}",
+            w.state.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+        let names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["name", "born", "doc", "price", "pythia$id"]);
+        assert_eq!(r.rows[0][3].as_deref(), Some("123457"));
+        let rows = r.rows.clone();
+        r.grid.edit_cell(&rows, 0, 0, Some(r"C:\new 'one'".into()));
+        r.grid
+            .edit_cell(&rows, 0, 2, Some(r#"{"a": [1, "\u00e9"]}"#.into()));
+        // Shown rounded, still found.
+        r.grid.edit_cell(&rows, 0, 3, Some("2.5".into()));
+        r.grid.edit_cell(&rows, 1, 4, Some("99".into()));
+        r.grid
+            .edit_cell(&rows, 1, 1, Some("2021-02-03 04:05:06".into()));
+    }
+    save(&mut h, "mysql-editing");
+    apply(&mut h);
+    let texts = messages(&mut h);
+    assert!(
+        texts.iter().any(|m| m.contains("Changes applied")),
+        "{texts:?}"
+    );
+    {
+        let w = h.state_mut().test_sql_window();
+        let r = &mut w.state.results[0];
+        assert_eq!(r.rows[0][0].as_deref(), Some(r"C:\new 'one'"));
+        assert_eq!(r.rows[0][1].as_deref(), Some("2020-01-01 00:00:00"));
+        assert_eq!(r.rows[0][2].as_deref(), Some(r#"{"a": [1, "é"]}"#));
+        assert_eq!(r.rows[0][3].as_deref(), Some("2.5"));
+        assert_eq!(r.rows[1][1].as_deref(), Some("2021-02-03 04:05:06"));
+        assert_eq!(
+            r.rows[1][4].as_deref(),
+            Some("2"),
+            "the key can't be edited"
+        );
+        // A new row (the key from AUTO_INCREMENT), a deleted one, and the
+        // same value written differently: its UPDATE changes nothing but
+        // finds the row, which isn't a conflict.
+        let rows = r.rows.clone();
+        r.grid.add_row(&rows, r.columns.len());
+        r.grid.edit_cell(&rows, 2, 0, Some("three".into()));
+        r.grid.delete_row(&rows, 1);
+        r.grid.edit_cell(&rows, 0, 1, Some("2020-01-01".into()));
+    }
+    apply(&mut h);
+    let texts = messages(&mut h);
+    assert!(!texts.iter().any(|m| m.contains("Conflict")), "{texts:?}");
+    {
+        let w = h.state_mut().test_sql_window();
+        let r = &w.state.results[0];
+        let names: Vec<Option<&str>> = r.rows.iter().map(|row| row[0].as_deref()).collect();
+        assert_eq!(names, [Some(r"C:\new 'one'"), Some("three")]);
+        assert_eq!(r.rows[0][1].as_deref(), Some("2020-01-01 00:00:00"));
+    }
+    h.state_mut().test_commit();
+    wait_until(&mut h, "commit", |app| !app.test_pending_tx());
+
+    // Another session changes the row behind our back.
+    run(
+        &mut h,
+        "update pythia_edit_t set name = 'theirs' where name = 'three';\ncommit;",
+    );
+    h.state_mut().test_focus(grid_window);
+    {
+        let w = h.state_mut().test_sql_window();
+        let r = &mut w.state.results[0];
+        let rows = r.rows.clone();
+        r.grid.edit_cell(&rows, 1, 0, Some("mine".into()));
+    }
+    apply(&mut h);
+    let texts = messages(&mut h);
+    assert!(
+        texts.iter().any(|m| m.starts_with("Conflict on row 2")),
+        "{texts:?}"
+    );
+    h.state_mut().test_rollback();
+    wait_until(&mut h, "rollback", |app| !app.test_pending_tx());
+    h.state_mut().test_close_focused();
+
+    // A unique key on NOT NULL columns does, too.
+    query(
+        &mut h,
+        "select v from pythia_edit_k k where a = 1 order by b",
+    );
+    {
+        let w = h.state_mut().test_sql_window();
+        let r = &mut w.state.results[0];
+        let names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["v", "pythia$a", "pythia$b"]);
+        let rows = r.rows.clone();
+        r.grid.edit_cell(&rows, 1, 0, Some("21".into()));
+    }
+    apply(&mut h);
+    {
+        let w = h.state_mut().test_sql_window();
+        let values: Vec<Option<&str>> = w.state.results[0]
+            .rows
+            .iter()
+            .map(|r| r[0].as_deref())
+            .collect();
+        assert_eq!(values, [Some("10"), Some("21")]);
+    }
+    h.state_mut().test_commit();
+    wait_until(&mut h, "commit", |app| !app.test_pending_tx());
+    h.state_mut().test_close_focused();
+
+    // Without a key, rows can't be found again.
+    query(&mut h, "select * from pythia_edit_n");
+    let texts = messages(&mut h);
+    assert!(
+        texts
+            .iter()
+            .any(|m| m.starts_with("The rows of pythia_edit_n can't be edited")),
+        "{texts:?}"
+    );
+    assert!(
+        !h.state_mut().test_sql_window().state.results[0]
+            .grid
+            .is_editable()
+    );
+    h.state_mut().test_close_focused();
+
+    // A count isn't a row of the table.
+    query(&mut h, "select count(*) from pythia_edit_t");
+    let texts = messages(&mut h);
+    assert!(
+        texts.iter().any(|m| m.contains("can't be edited")),
+        "{texts:?}"
+    );
+    assert!(
+        !h.state_mut().test_sql_window().state.results[0]
+            .grid
+            .is_editable()
+    );
+    h.state_mut().test_close_focused();
+
+    run(
+        &mut h,
+        "drop table pythia_edit_t, pythia_edit_k, pythia_edit_n;",
+    );
+}
+
 /// Types `.` after a table alias in a real editor and waits for the
 /// completion popup, which needs a round trip to the dictionary.
 #[test]
