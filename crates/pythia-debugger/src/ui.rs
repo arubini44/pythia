@@ -16,12 +16,14 @@
 //! | Ctrl+F7    | Run to cursor (app)                      |
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, RichText, Ui};
 use serde::{Deserialize, Serialize};
 
 use crate::Debugger;
 use crate::condition;
+use crate::setup::{Ports, Problem};
 use crate::types::{
     Breakpoint, BreakpointOptions, DebugCommand, DebugEvent, Frame, Location, StopReason, Unit,
     UnitType, Variable, Watch,
@@ -60,6 +62,9 @@ pub enum DebugAction {
     },
     /// The session ended: clear execution markers.
     Finished,
+    /// Open the debugger setup, saying why (a failed start) if there is a
+    /// reason.
+    Setup { reason: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -120,7 +125,17 @@ pub struct DebugSession {
     value_edit: Option<ValueEdit>,
     /// Why the last change of a value failed: its path and the reason.
     value_error: Option<(String, String)>,
+    /// Where the database connects to (host and port), while it should.
+    target: Option<(String, u16)>,
+    /// When the debugger started waiting for the session.
+    waiting_since: Option<Instant>,
+    /// Why the last start failed to connect, if it was a setup problem.
+    pub problem: Option<String>,
 }
+
+/// After this long without the session connecting, the panel suggests
+/// checking the setup.
+const SLOW_CONNECT: Duration = Duration::from_secs(8);
 
 /// What the debugger keeps across restarts of Pythia: breakpoints with
 /// their state, conditions and hit counts, the watches and Break on
@@ -163,13 +178,15 @@ impl DebugSession {
         matches!(self.state, State::Suspended { .. })
     }
 
-    /// Starts listening and asks the app to run `block` under the debugger.
-    /// `host` is how the database reaches this machine; `entry` is a
-    /// subprogram to stop in when the block calls it (unit and name).
+    /// Starts listening (on one of `ports`, any free port without) and asks
+    /// the app to run `block` under the debugger. `host` is how the
+    /// database reaches this machine; `entry` is a subprogram to stop in
+    /// when the block calls it (unit and name).
     pub fn start(
         &mut self,
         block: String,
         host: String,
+        ports: Option<&Ports>,
         entry: Option<(Unit, String)>,
         notify: impl Fn() + Send + 'static,
     ) -> Vec<DebugAction> {
@@ -187,7 +204,10 @@ impl DebugSession {
         self.opaque_asked.clear();
         self.block = block.clone();
         self.entry = entry;
-        match Debugger::listen("0.0.0.0:0", notify) {
+        self.problem = None;
+        self.target = None;
+        self.waiting_since = None;
+        match crate::setup::listen(ports).and_then(|l| Debugger::with_listener(l, notify)) {
             Ok(debugger) => {
                 for bp in self.breakpoints.difference(&self.disabled) {
                     debugger.send(DebugCommand::SetBreakpoint(bp.clone()));
@@ -217,6 +237,8 @@ impl DebugSession {
                 let port = debugger.port();
                 self.debugger = Some(debugger);
                 self.state = State::Waiting;
+                self.target = Some((host.clone(), port));
+                self.waiting_since = Some(Instant::now());
                 self.log.push(format!(
                     "Waiting for the session to connect to {host}:{port}…"
                 ));
@@ -225,6 +247,31 @@ impl DebugSession {
             Err(e) => {
                 self.log.push(format!("Could not start the debugger: {e}"));
                 self.state = State::Finished;
+                Vec::new()
+            }
+        }
+    }
+
+    /// The debugged session ended without connecting: `CONNECT_TCP`
+    /// failed with `error`. Stops waiting for it and says why; a setup
+    /// problem asks for the debugger setup.
+    pub fn target_failed(&mut self, error: &pythia_db::DbError) -> Vec<DebugAction> {
+        if let Some(d) = self.debugger.take() {
+            d.send(DebugCommand::Terminate);
+        }
+        self.state = State::Finished;
+        self.waiting_since = None;
+        let (host, port) = self.target.take().unwrap_or_default();
+        match Problem::of(error) {
+            Some(problem) => {
+                let text = problem.explain(&host, port);
+                self.log.push(text.clone());
+                self.problem = Some(text.clone());
+                vec![DebugAction::Setup { reason: Some(text) }]
+            }
+            None => {
+                self.log
+                    .push(format!("The session didn't connect: {}", error.text()));
                 Vec::new()
             }
         }
@@ -535,6 +582,7 @@ impl DebugSession {
             DebugEvent::Listening { .. } => {}
             DebugEvent::Connected { version } => {
                 self.state = State::Running;
+                self.waiting_since = None;
                 self.log.push(format!("Connected: {version}"));
             }
             DebugEvent::BreakpointBound {
@@ -615,6 +663,7 @@ impl DebugSession {
             DebugEvent::Terminated => {
                 self.state = State::Finished;
                 self.debugger = None;
+                self.waiting_since = None;
                 self.stack.clear();
                 self.frame = 0;
                 self.exception = None;
@@ -650,7 +699,8 @@ impl DebugSession {
     /// The debugger panel. Returns actions (e.g. jumping to a stack frame).
     pub fn ui(&mut self, ui: &mut Ui) -> Vec<DebugAction> {
         let mut actions = Vec::new();
-        self.toolbar(ui);
+        actions.extend(self.toolbar(ui));
+        actions.extend(self.connect_hint(ui));
         ui.separator();
         ui.columns(4, |cols| {
             cols[0].strong("Call stack");
@@ -727,9 +777,10 @@ impl DebugSession {
         actions
     }
 
-    fn toolbar(&mut self, ui: &mut Ui) {
+    fn toolbar(&mut self, ui: &mut Ui) -> Option<DebugAction> {
         let suspended = self.is_suspended();
         let active = self.is_active();
+        let mut setup = false;
         ui.horizontal(|ui| {
             let button = |ui: &mut Ui, label: &str, shortcut: &KeyboardShortcut, enabled: bool| {
                 let text = format!("{label}  {}", ui.ctx().format_shortcut(shortcut));
@@ -795,8 +846,52 @@ impl DebugSession {
                 }
                 State::Finished => ("Finished".to_owned(), ui.visuals().weak_text_color()),
             };
-            ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
+            // Right to left, so the state text can take the rest.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                setup = ui
+                    .button("Setup…")
+                    .on_hover_text(
+                        "Check what the database needs to connect to the debugger, and fix it",
+                    )
+                    .clicked();
+                ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
+            });
         });
+        setup.then_some(DebugAction::Setup { reason: None })
+    }
+
+    /// Below the toolbar: why the last start didn't connect, or that the
+    /// session is slow to.
+    fn connect_hint(&mut self, ui: &mut Ui) -> Option<DebugAction> {
+        let slow = match (&self.state, self.waiting_since) {
+            (State::Waiting, Some(since)) => {
+                let waited = since.elapsed();
+                if waited < SLOW_CONNECT {
+                    ui.ctx().request_repaint_after(SLOW_CONNECT - waited);
+                    return None;
+                }
+                let (host, port) = self.target.clone().unwrap_or_default();
+                Some(format!(
+                    "The database hasn't connected to {host}:{port} yet: a firewall may be \
+                     dropping the connection, or {host} isn't how the database reaches this \
+                     computer."
+                ))
+            }
+            _ => None,
+        };
+        let (text, color, button) = match (slow, &self.problem) {
+            (Some(text), _) => (text, ui.visuals().warn_fg_color, "Check setup…"),
+            (None, Some(problem)) if self.state == State::Finished => {
+                (problem.clone(), ui.visuals().error_fg_color, "Fix…")
+            }
+            _ => return None,
+        };
+        let mut clicked = false;
+        ui.horizontal(|ui| {
+            clicked = ui.button(button).clicked();
+            ui.add(egui::Label::new(RichText::new(&text).color(color)).wrap());
+        });
+        clicked.then_some(DebugAction::Setup { reason: Some(text) })
     }
 
     fn row_action(&mut self, action: Option<RowAction>) {
@@ -1324,6 +1419,56 @@ mod tests {
             value: value.map(Into::into),
             children,
         }
+    }
+
+    #[test]
+    fn a_start_that_cannot_connect_ends_and_says_why() {
+        let mut s = DebugSession::default();
+        let actions = s.start(
+            "begin null; end;".into(),
+            "devbox".into(),
+            None,
+            None,
+            || {},
+        );
+        let Some(DebugAction::RunTarget { port, .. }) = actions.first().cloned() else {
+            panic!("{actions:?}")
+        };
+        assert_eq!(s.state, State::Waiting);
+        let error = pythia_db::DbError::new(
+            "ORA-24247: network access denied by access control list (ACL)\n\
+             ORA-06512: at \"SYS.DBMS_DEBUG_JDWP\", line 68",
+        );
+        let actions = s.target_failed(&error);
+        assert_eq!(s.state, State::Finished);
+        assert!(!s.is_active());
+        let reason = format!(
+            "No network ACL entry lets the database connect to devbox port {port} for \
+             debugging (JDWP)."
+        );
+        assert_eq!(s.problem.as_deref(), Some(reason.as_str()));
+        assert_eq!(
+            actions,
+            [DebugAction::Setup {
+                reason: Some(reason)
+            }]
+        );
+        // The next start forgets it; an error that isn't about the setup
+        // is only logged.
+        s.start(
+            "begin null; end;".into(),
+            "devbox".into(),
+            None,
+            None,
+            || {},
+        );
+        assert_eq!(s.problem, None);
+        let actions = s.target_failed(&pythia_db::DbError::new("ORA-03113: end-of-file"));
+        assert!(actions.is_empty());
+        assert_eq!(
+            s.log.last().map(String::as_str),
+            Some("The session didn't connect: ORA-03113: end-of-file")
+        );
     }
 
     #[test]

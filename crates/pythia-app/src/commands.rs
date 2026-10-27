@@ -106,6 +106,7 @@ commands! {
     DebugStepOut => "Debug: Step Out",
     DebugRunToCursor => "Debug: Run to Cursor",
     DebugStop => "Debug: Stop",
+    DebugSetup => "Debug: Debugger Setup…",
     ShowDebugger => "View: Debugger",
     MonitorDashboard => "Monitor: Dashboard",
     MonitorSessions => "Monitor: Sessions",
@@ -189,7 +190,9 @@ impl Command {
             CompareSchemas | CompareData => Feature::Compare,
             SwitchSpecBody => Feature::PlSql,
             DebugStart | ToggleBreakpoint | DebugContinue | DebugStepOver | DebugStepInto
-            | DebugStepOut | DebugRunToCursor | DebugStop | ShowDebugger => Feature::Debugger,
+            | DebugStepOut | DebugRunToCursor | DebugStop | DebugSetup | ShowDebugger => {
+                Feature::Debugger
+            }
             NewTable | NewView | NewMaterializedView | NewSequence | NewSynonym | NewIndex
             | NewTrigger | NewProcedure | NewFunction | NewPackage | NewType | NewJob
             | NewDatabaseLink | NewUser | NewRole | NewProfile | NewDirectory => {

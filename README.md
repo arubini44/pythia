@@ -97,6 +97,20 @@ for Linux, Windows and macOS.
   enters only units that have it (program windows can compile with it,
   Settings → Debugger, and the panel says when a step went over a unit
   without).
+- **Debugger setup** (*Debug → Debugger Setup…*, the panel's *Setup…*,
+  and on its own when a debug run can't connect): the database connects
+  back to Pythia to debug, which takes `DEBUG CONNECT SESSION`, a network
+  ACL entry for the host it connects to, and a way through firewalls.
+  The setup tries every host the database might reach this computer by
+  (the address it sees for it, the computer's names, one you type) and
+  says for each why it fails: no ACL entry, a name the server can't
+  resolve, refused, or dropped on the way. It offers what's missing: a
+  host that works, the grants and ACL entry (run as yourself, through a
+  saved DBA connection or a user and password, or copied for a DBA), and
+  a rule for Windows Firewall, ufw, firewalld or the macOS firewall, run
+  with administrator rights after asking. *Debugger ports* (Settings →
+  Debugger) fixes the ports the debugger listens on, for firewall rules
+  and ACL entries limited to a few.
 - **Profiler** (DBMS_HPROF): profile a block or call and see self and
   total time per subprogram and SQL statement; double-click jumps to the
   code. Needs `EXECUTE` on `DBMS_HPROF`; profiling commits.
@@ -435,7 +449,7 @@ worktree, waits for it instead of failing on the same objects.
 
 The debugger needs `DEBUG CONNECT SESSION`, `DEBUG ANY PROCEDURE` and a JDWP
 network ACL; `pythia_debugger::target::setup_script` prints what a DBA has to
-run. `crates/pythia-debugger/tests/scenario.rs` steps through a larger
+run (the app's *Debugger Setup…* finds and fixes the same). `crates/pythia-debugger/tests/scenario.rs` steps through a larger
 scenario (packages, records, collections, an object type, a trigger).
 
 The tests set up what they need on a new database: the demo schema

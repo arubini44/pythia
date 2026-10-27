@@ -262,7 +262,7 @@ Custom widget, because egui's `TextEdit` doesn't scale to large files or IDE fea
 ### 5.12 Debugger (M6)
 
 - [x] Research: implement `DBMS_DEBUG_JDWP` (JDWP protocol client in Rust, supported going forward) and/or `DBMS_DEBUG` (deprecated, but what PL/SQL Developer uses) – decide on a primary backend
-- [x] Privilege check and setup assistant (`DEBUG CONNECT SESSION`, `DEBUG ANY PROCEDURE`, ACL for JDWP)
+- [x] Privilege check and setup assistant (`DEBUG CONNECT SESSION`, `DEBUG ANY PROCEDURE`, ACL for JDWP): *Debugger Setup…* tries every host end to end, tells ACL, name resolution, refused and dropped connections apart, runs the grants and ACL entry (as the user, a saved DBA connection or a user typed in, in the user's PDB) and adds a local firewall rule with administrator rights (Windows Firewall, ufw, firewalld, macOS); opens on its own when a run can't connect
 - [x] Debug session lifecycle: target session + debugger session
 - [x] Breakpoints in gutter: line, conditional, hit count, enable/disable
 - [x] Breakpoints persisted per object (with the workspace: enabled state, conditions, hit counts; also watches and Break on exceptions)

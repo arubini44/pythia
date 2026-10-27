@@ -1455,6 +1455,11 @@ mod tests {
         let Ok(spec) = std::env::var("PYTHIA_TEST_DB") else {
             return;
         };
+        // Its synonyms and grants deadlock with the account tests' DDL too
+        // (#126).
+        let _accounts = crate::test_db::ACCOUNTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (cred, db) = spec.rsplit_once('@').unwrap();
         let (user, pw) = cred.split_once('/').unwrap();
         let conn = Connection::connect(user, pw, db).unwrap();
@@ -1623,11 +1628,6 @@ mod tests {
             conn.execute(s, &[]).unwrap();
         }
     }
-    /// One test at a time creates and drops users, roles, profiles and
-    /// directories: in parallel, that DDL deadlocks in the dictionary
-    /// (ORA-00060).
-    static ACCOUNTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn connect(var: &str) -> Option<(Connection, String)> {
         let spec = std::env::var(var).ok()?;
         let (cred, db) = spec.rsplit_once('@').unwrap();
@@ -1974,7 +1974,9 @@ mod tests {
         let Some((conn, _)) = connect("PYTHIA_TEST_DB_DBA") else {
             return;
         };
-        let _accounts = ACCOUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let _accounts = crate::test_db::ACCOUNTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cleanup = "begin
                for u in (select username from dba_users where username = 'PYTHIA_OB_USER') loop
                  execute immediate 'drop user pythia_ob_user cascade';
@@ -2106,7 +2108,9 @@ mod tests {
         let Some((dba, spec)) = connect("PYTHIA_TEST_DB_DBA") else {
             return;
         };
-        let _accounts = ACCOUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let _accounts = crate::test_db::ACCOUNTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let db = spec.rsplit_once('@').unwrap().1.to_owned();
         let cleanup = "begin
                for u in (select username from dba_users
@@ -2192,7 +2196,9 @@ mod tests {
         let Some((conn, _)) = connect("PYTHIA_TEST_DB_DBA") else {
             return;
         };
-        let _accounts = ACCOUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let _accounts = crate::test_db::ACCOUNTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let Some((user, _)) = connect("PYTHIA_TEST_DB") else {
             return;
         };
@@ -2283,7 +2289,9 @@ mod tests {
         let Some((conn, _)) = connect("PYTHIA_TEST_DB_DBA") else {
             return;
         };
-        let _accounts = ACCOUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let _accounts = crate::test_db::ACCOUNTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cleanup = "begin
                for u in (select username from dba_users where username = 'PYTHIA_OB_PUSER') loop
                  execute immediate 'drop user pythia_ob_puser cascade';
