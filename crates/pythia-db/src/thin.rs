@@ -217,6 +217,8 @@ impl Connector {
     }
 
     pub fn connect(&self) -> Result<Connection> {
+        crate::install_crypto_provider();
+        crate::wait_for_other_test_runs();
         if self.external_auth {
             return Err(unsupported(
                 "External authentication (OS or wallet, `/@alias`)",

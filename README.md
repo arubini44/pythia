@@ -250,16 +250,27 @@ for Linux, Windows and macOS.
   of it needs `VIEW SERVER STATE` (`VIEW SERVER PERFORMANCE STATE` on
   2022); without it the dashboard shows the login's own sessions and says
   so.
+- Session details from the dashboards: a PostgreSQL backend's connection,
+  statement, transaction (and how far its snapshot holds back VACUUM),
+  locks and who blocks whom, with *Cancel query* and *Terminate*; a SQL
+  Server session's connection, request with its cached plan, transactions
+  with log used, locks and blocking, with *Kill*.
+- *Connect through SSH* as on MySQL: the address is the database as the
+  SSH server sees it, e.g. `localhost:5432/database`. On SQL Server give
+  the port, not `host\instance`: the SQL Server Browser can't be reached
+  through a tunnel.
 - Scripts split the database's way: PostgreSQL's dollar-quoted routine
   bodies stay whole and `::` casts aren't bind variables; on SQL Server,
   `GO` on a line of its own ends a batch, routines and scripts with
   `DECLARE`d variables run up to the next `GO`, and `BEGIN … END` blocks
   keep their `;`. *Edit* opens a routine as `CREATE OR REPLACE` (PostgreSQL)
   or `CREATE OR ALTER` (SQL Server).
-- On SQL Server a batch shows its first result set. After Break, the
-  connection is opened again: the driver can't go on after a cancel, so
-  changes that weren't committed are rolled back. `PRINT` output isn't
-  shown yet.
+- On SQL Server a batch shows its first result set; `PRINT` output and
+  informational messages show as messages, in order with it. After Break,
+  the connection is opened again: the driver can't go on after a cancel,
+  so changes that weren't committed are rolled back. The driver is our
+  fork of [tiberius](https://github.com/ortic/tiberius) (branch `pythia`),
+  which passes those messages on.
 
 ## Installing
 
@@ -317,7 +328,9 @@ flavor yourself: `cargo build --release --features pythia-db/thick`.
 **WSL:** under WSLg, Pythia opens its window through X11 (Xwayland), since
 WSLg's compositor crashes on Wayland windows like Pythia's
 ([microsoft/wslg#1386](https://github.com/microsoft/wslg/issues/1386)).
-`PYTHIA_WAYLAND=1` keeps Wayland.
+`PYTHIA_WAYLAND=1` keeps Wayland. Through X11 the window starts at 96 DPI
+whatever Windows' display scaling; on a scaled display, size the UI with
+Settings → UI scale (or Ctrl + / Ctrl −).
 
 ## Building from source
 
@@ -326,6 +339,14 @@ Requirements: Rust (stable).
 ```sh
 cargo build --release
 ./target/release/pythia
+```
+
+To run an optimized build while working on Pythia, use the `fast` profile:
+a change rebuilds in 5–15 seconds, where a release build takes about two
+minutes for its link-time optimization.
+
+```sh
+cargo run --profile fast -p pythia-app
 ```
 
 The database driver is our fork of
@@ -362,12 +383,19 @@ PYTHIA_TEST_DB=pythia/pythia@localhost:1521/FREEPDB1 cargo test
 (set `LD_LIBRARY_PATH`); `cargo run -p pythia-db --example thin_probe
 --features thick` compares the two drivers.
 
+Test runs on one machine share the test databases: the first connection
+of a run takes a lock (`pythia-test-databases.lock` in the temp
+directory) that the test process keeps, so a second run, e.g. in another
+worktree, waits for it instead of failing on the same objects.
+
 | Variable | Used by |
 |---|---|
 | `PYTHIA_TEST_DB` | integration tests (app user) |
 | `PYTHIA_TEST_MYSQL` | MySQL tests, e.g. `pythia/pythia@localhost:3306/pythia` for `docker compose up -d mysql` |
 | `PYTHIA_TEST_MYSQL_DBA` | MySQL dashboard tests that need privileges, e.g. `root/mysql@localhost:3306/pythia` |
 | `PYTHIA_TEST_SSH`, `PYTHIA_TEST_MYSQL_VIA_SSH` | SSH tunnel tests: `pythia:pythia@localhost:2222` and `pythia/pythia@mysql:3306/pythia` for `docker compose up -d mysql ssh` |
+| `PYTHIA_TEST_POSTGRES_VIA_SSH` | PostgreSQL through the SSH tunnel test (with `PYTHIA_TEST_SSH`): `pythia/pythia@postgres:5432/pythia` for `docker compose up -d postgres ssh` |
+| `PYTHIA_TEST_MSSQL_VIA_SSH` | SQL Server through the SSH tunnel test (with `PYTHIA_TEST_SSH`): `pythia/pythia@mssql:1433/pythia?trust` for `docker compose up -d mssql ssh` |
 | `PYTHIA_TEST_POSTGRES` | PostgreSQL tests (a superuser), e.g. `pythia/pythia@localhost:5432/pythia` for `docker compose up -d postgres`, which loads `pg_stat_statements` |
 | `PYTHIA_TEST_MSSQL` | SQL Server tests, e.g. `pythia/pythia@localhost:1433/pythia?trust` for `docker compose up -d mssql mssql-init` |
 | `PYTHIA_TEST_MSSQL_DBA` | SQL Server dashboard tests that need VIEW SERVER STATE, e.g. `sa/Pythia-2026@localhost:1433/pythia?trust` |
