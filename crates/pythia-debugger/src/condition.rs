@@ -104,7 +104,7 @@ pub fn lookup<'a>(vars: &'a [Variable], path: &[String]) -> Option<&'a Variable>
 
 /// Whether a field or element name matches a path segment: names ignore
 /// case, text keys don't.
-fn matches(name: &str, segment: &str) -> bool {
+pub fn matches(name: &str, segment: &str) -> bool {
     if segment.starts_with("('") {
         name == segment
     } else {

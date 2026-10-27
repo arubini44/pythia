@@ -123,6 +123,10 @@ pub fn show(
                 ui.close();
             }
         };
+        if cx.debug.is_some_and(|d| d.is_suspended()) {
+            command(ui, Command::DebugRunToCursor);
+            ui.separator();
+        }
         command(ui, Command::GoToSymbol);
         if assist.companion_is_spec().is_some() {
             command(ui, Command::SwitchSpecBody);

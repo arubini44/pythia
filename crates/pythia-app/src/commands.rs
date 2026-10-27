@@ -104,6 +104,7 @@ commands! {
     DebugStepOver => "Debug: Step Over",
     DebugStepInto => "Debug: Step Into",
     DebugStepOut => "Debug: Step Out",
+    DebugRunToCursor => "Debug: Run to Cursor",
     DebugStop => "Debug: Stop",
     ShowDebugger => "View: Debugger",
     MonitorDashboard => "Monitor: Dashboard",
@@ -188,7 +189,7 @@ impl Command {
             CompareSchemas | CompareData => Feature::Compare,
             SwitchSpecBody => Feature::PlSql,
             DebugStart | ToggleBreakpoint | DebugContinue | DebugStepOver | DebugStepInto
-            | DebugStepOut | DebugStop | ShowDebugger => Feature::Debugger,
+            | DebugStepOut | DebugRunToCursor | DebugStop | ShowDebugger => Feature::Debugger,
             NewTable | NewView | NewMaterializedView | NewSequence | NewSynonym | NewIndex
             | NewTrigger | NewProcedure | NewFunction | NewPackage | NewType | NewJob
             | NewDatabaseLink | NewUser | NewRole | NewProfile | NewDirectory => {
@@ -255,6 +256,10 @@ impl Keymap {
                 (
                     Command::ToggleBreakpoint,
                     KeyboardShortcut::new(ctrl, Key::B),
+                ),
+                (
+                    Command::DebugRunToCursor,
+                    KeyboardShortcut::new(ctrl, Key::F7),
                 ),
                 (
                     Command::SaveFileAs,

@@ -79,9 +79,13 @@ for Linux, Windows and macOS.
   package members, in the object browser and in the editors, also on a
   subprogram's name in its own package spec or body.
 - **Debugger** (DBMS_DEBUG_JDWP): breakpoints with conditions and hit
-  counts, break on exception, step over/into/out (also through the debugged
-  block itself), call stack with subprograms, variables of any frame
-  including records, `%ROWTYPE` and collections, watches, values on hover.
+  counts, kept across restarts; break on exception, step over/into/out
+  (also through the debugged block itself), run to cursor (Ctrl+F7), call
+  stack with subprograms, variables of any frame including records,
+  `%ROWTYPE` and collections, watches, values on hover. **Change values
+  while stopped**: double-click a variable, field, element or package
+  global and the code goes on with the new value (checked against its type
+  and precision first; IN parameters and LOBs can't be changed).
   Units with breakpoints are compiled with debug information; Step into
   enters only units that have it (program windows can compile with it,
   Settings → Debugger, and the panel says when a step went over a unit
@@ -468,6 +472,7 @@ See [CONCEPT.md](CONCEPT.md) for the full plan and status.
 | Ctrl+F9 | Debug block under cursor |
 | Ctrl+B | Toggle breakpoint |
 | F9 / F6 / F7 / Shift+F7 / Shift+F9 | Continue / step over / into / out / stop |
+| Ctrl+F7 | Run to cursor (while debugging) |
 | Ctrl+O / Ctrl+S | Open / save file |
 | Shift+F6 | Rename symbol |
 | Ctrl+Shift+[ / ] | Fold / unfold |

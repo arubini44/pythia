@@ -2,9 +2,11 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Kind of PL/SQL unit, as Oracle's JDWP agent names its classes:
 /// `$Oracle.<Kind>.<OWNER>.<NAME>` (anonymous blocks: `$Oracle.Block.<OWNER>.<hash>`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum UnitType {
     Procedure,
     Function,
@@ -65,7 +67,7 @@ impl UnitType {
 }
 
 /// A PL/SQL unit (stored object or anonymous block).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Unit {
     pub owner: String,
     pub name: String,
@@ -119,14 +121,14 @@ impl fmt::Display for Unit {
 }
 
 /// A line breakpoint in a unit (1-based source line).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Breakpoint {
     pub unit: Unit,
     pub line: u32,
 }
 
 /// When a breakpoint actually stops execution.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BreakpointOptions {
     /// Stop only while this holds, e.g. `l_total > 3 and l_name is not null`.
     pub condition: Option<String>,
@@ -180,6 +182,8 @@ pub enum StopReason {
     Exception,
     /// Entered the subprogram of [`DebugCommand::BreakOnEntry`].
     Entry,
+    /// Reached the line of [`DebugCommand::RunTo`].
+    Cursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +212,21 @@ pub enum DebugCommand {
         unit: Unit,
         subprogram: String,
     },
+    /// While stopped, changes a scalar of the selected frame: a variable,
+    /// `record.field`, `collection(n)` or `package.variable`, as watches
+    /// name them; `None` sets NULL. Dates, timestamps and intervals are
+    /// written as shown (the session's NLS format). Answered by
+    /// [`DebugEvent::ValueSet`], and when the value changed by
+    /// [`DebugEvent::FrameSelected`] with the frame read again.
+    SetValue {
+        expression: String,
+        value: Option<String>,
+    },
     Resume,
+    /// While stopped, continues to a line (the first with code at or after
+    /// it) and stops there once, even if the unit isn't loaded yet. Any
+    /// stop before (a breakpoint, an exception, Pause) drops it.
+    RunTo(Breakpoint),
     StepOver,
     StepInto,
     StepOut,
@@ -251,6 +269,12 @@ pub enum DebugEvent {
     },
     /// Watches were changed while stopped: their values.
     Watches(Vec<Watch>),
+    /// Answers [`DebugCommand::SetValue`]: `error` says why the value
+    /// stayed as it was.
+    ValueSet {
+        expression: String,
+        error: Option<String>,
+    },
     /// Another frame was selected ([`DebugCommand::SelectFrame`]): its
     /// variables and the watches evaluated there.
     FrameSelected {
