@@ -29,8 +29,12 @@ pub fn first_rows(sql: &str, n: usize) -> String {
 /// The declared type of an `ALL_ARGUMENTS a` row: `owner.table%ROWTYPE`
 /// (18c+ names the table; before, it is a bare `PL/SQL RECORD`), `pkg.rec_t`
 /// for package types, `owner.obj_t` for object types, else the scalar type.
-pub const ARGUMENT_TYPE: &str = "case when a.type_name is null then nvl(a.pls_type, a.data_type) \
-     else decode(a.type_owner, a.owner, null, a.type_owner || '.') || a.type_name \
+/// Cursors are `REF CURSOR` (a strong one's type names its row type, not
+/// the cursor's); types found through a public synonym (`XMLTYPE`) have no
+/// owner (theirs is `PUBLIC`).
+pub const ARGUMENT_TYPE: &str = "case when a.data_type = 'REF CURSOR' then 'REF CURSOR' \
+     when a.type_name is null then nvl(a.pls_type, a.data_type) \
+     else decode(a.type_owner, a.owner, null, 'PUBLIC', null, a.type_owner || '.') || a.type_name \
           || nvl2(a.type_subname, '.' || a.type_subname, null) \
           || decode(a.pls_type, 'ROWTYPE', '%ROWTYPE') end";
 

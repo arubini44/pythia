@@ -72,8 +72,11 @@ for Linux, Windows and macOS.
   directories and grants.
 - Program windows with spec and body, compile with clickable errors
   (gutter markers and squiggles), unsaved-change tracking, save to file.
-- **Test…** generates a ready-to-run block for any procedure or function
-  (IN parameters as binds, OUT parameters printed). **Debug…** runs that
+- **Test…** generates a ready-to-run block for any procedure or function:
+  IN parameters as binds, OUT parameters and the result printed, also
+  collections (element by element), records, `%ROWTYPE` and objects (field
+  by field), ref cursors (row by row), LOBs and XMLTYPE. What a bind can't
+  carry, such as a collection or a record, is a local to fill in. **Debug…** runs that
   block under the debugger right away and stops on entry to the
   subprogram. Both are on the right-click menu of procedures, functions and
   package members, in the object browser and in the editors, also on a

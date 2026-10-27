@@ -46,6 +46,18 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- *Test…* and *Debug…* generated a block that didn't compile when the
+  function returned, or an OUT parameter was, a collection, record,
+  `%ROWTYPE`, object, BLOB, XMLTYPE or ref cursor (#120). The block now
+  prints those too: collections element by element (the first 100),
+  records and objects field by field, ref cursors row by row, LOBs and
+  XML as text. IN parameters a text bind can't carry are locals with a
+  `-- TODO` to fill them in; BOOLEAN, BLOB (hex) and XMLTYPE binds are
+  converted. Signatures no longer show `PUBLIC.XMLTYPE` or a strong
+  cursor as its row type.
+- *Test…* and *Debug…* on a package, procedure or function with a quoted
+  mixed-case name (`"MyPkg"`) called the name lowercased, which doesn't
+  exist (#121).
 - The object browser's favorites and recently opened objects, and the open
   project, were lost when Pythia was closed with no document open (#118).
 - Debugger: *Watch* on an element of a collection with text keys
