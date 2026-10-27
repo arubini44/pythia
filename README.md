@@ -312,7 +312,9 @@ flavor yourself: `cargo build --release --features pythia-db/thick`.
 **WSL:** under WSLg, Pythia opens its window through X11 (Xwayland), since
 WSLg's compositor crashes on Wayland windows like Pythia's
 ([microsoft/wslg#1386](https://github.com/microsoft/wslg/issues/1386)).
-`PYTHIA_WAYLAND=1` keeps Wayland.
+`PYTHIA_WAYLAND=1` keeps Wayland. Through X11 the window starts at 96 DPI
+whatever Windows' display scaling; on a scaled display, size the UI with
+Settings → UI scale (or Ctrl + / Ctrl −).
 
 ## Building from source
 
@@ -321,6 +323,14 @@ Requirements: Rust (stable).
 ```sh
 cargo build --release
 ./target/release/pythia
+```
+
+To run an optimized build while working on Pythia, use the `fast` profile:
+a change rebuilds in 5–15 seconds, where a release build takes about two
+minutes for its link-time optimization.
+
+```sh
+cargo run --profile fast -p pythia-app
 ```
 
 The database driver is our fork of
