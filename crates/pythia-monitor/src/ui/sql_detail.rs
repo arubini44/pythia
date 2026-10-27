@@ -283,7 +283,7 @@ fn totals(ui: &mut Ui, s: &crate::queries::SqlStats) {
 
 /// The child cursors; returns the one clicked.
 fn children(ui: &mut Ui, d: &SqlDetail) -> Option<i64> {
-    let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+    let h = super::style::row_height(ui);
     // A click on a cell selects the row, not text.
     ui.style_mut().interaction.selectable_labels = false;
     let mut clicked = None;

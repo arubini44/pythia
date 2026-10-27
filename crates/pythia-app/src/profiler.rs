@@ -181,7 +181,7 @@ pub fn ui(ui: &mut Ui, profile: &Profile) -> Option<(ObjectRef, usize)> {
     }
     let total = profile.total_us.max(1) as f32;
     let bar_color = ui.visuals().hyperlink_color;
-    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+    let row_height = pythia_ui::row_height(ui);
     TableBuilder::new(ui)
         .id_salt("profile")
         .striped(true)

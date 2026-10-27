@@ -739,8 +739,54 @@ fn handle_keys(ui: &mut Ui, state: &mut GridState, columns: &[Column], rows: &[V
     }
 }
 
+/// How result grids look, from the settings; see [`set_grid_style`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridStyle {
+    /// Font of the cells (none: the monospace text style).
+    pub font: Option<egui::FontId>,
+    /// Every other row shaded.
+    pub striped: bool,
+    /// Lines between rows.
+    pub row_lines: bool,
+    /// What a NULL shows.
+    pub null_text: String,
+    /// Color of NULL (none: weak text).
+    pub null_color: Option<egui::Color32>,
+}
+
+impl Default for GridStyle {
+    fn default() -> Self {
+        Self {
+            font: None,
+            striped: true,
+            row_lines: false,
+            null_text: "NULL".to_owned(),
+            null_color: None,
+        }
+    }
+}
+
+fn grid_style_id() -> egui::Id {
+    egui::Id::new("pythia-grid-style")
+}
+
+/// Sets how every result grid looks.
+pub fn set_grid_style(ctx: &egui::Context, style: GridStyle) {
+    ctx.data_mut(|d| d.insert_temp(grid_style_id(), std::sync::Arc::new(style)));
+}
+
+fn grid_style(ctx: &egui::Context) -> std::sync::Arc<GridStyle> {
+    ctx.data(|d| d.get_temp(grid_style_id()))
+        .unwrap_or_default()
+}
+
 /// Colors and sizes of the table, from the style.
 struct Look {
+    font: egui::FontId,
+    striped: bool,
+    /// Between rows, if they have lines.
+    row_line: Option<egui::Stroke>,
+    null_text: String,
     null_color: egui::Color32,
     selected_bg: egui::Color32,
     cursor_stroke: egui::Stroke,
@@ -757,9 +803,20 @@ impl Look {
     fn new(ui: &mut Ui) -> Self {
         let visuals = ui.visuals().clone();
         let tint = |c: egui::Color32| c.gamma_multiply(if visuals.dark_mode { 0.22 } else { 0.18 });
-        let mono = egui::TextStyle::Monospace.resolve(ui.style());
+        let grid = grid_style(ui.ctx());
+        let font = grid
+            .font
+            .clone()
+            .unwrap_or_else(|| egui::TextStyle::Monospace.resolve(ui.style()));
+        let (text_height, char_width) =
+            ui.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, '0')));
         Self {
-            null_color: visuals.weak_text_color(),
+            striped: grid.striped,
+            row_line: grid
+                .row_lines
+                .then_some(visuals.widgets.noninteractive.bg_stroke),
+            null_text: grid.null_text.clone(),
+            null_color: grid.null_color.unwrap_or(visuals.weak_text_color()),
             selected_bg: visuals.selection.bg_fill,
             cursor_stroke: egui::Stroke::new(1.5, visuals.hyperlink_color),
             header_bg: visuals.faint_bg_color,
@@ -767,9 +824,33 @@ impl Look {
             inserted_bg: tint(egui::Color32::from_rgb(0x3f, 0xb9, 0x50)),
             deleted_bg: tint(visuals.error_fg_color),
             drop_stroke: egui::Stroke::new(2.0, visuals.selection.stroke.color),
-            row_height: ui.text_style_height(&egui::TextStyle::Monospace) + 6.0,
-            char_width: ui.fonts_mut(|f| f.glyph_width(&mono, '0')),
+            row_height: text_height + 2.0 * ui.spacing().button_padding.y,
+            char_width,
+            font,
         }
+    }
+
+    /// A cell's text in the grid's font.
+    fn text(&self, text: impl Into<String>) -> RichText {
+        RichText::new(text).font(self.font.clone())
+    }
+
+    fn null(&self) -> RichText {
+        self.text(&self.null_text).italics().color(self.null_color)
+    }
+
+    /// The line above a cell, if rows have lines: in the gap to the row
+    /// before, across the gaps between columns. Above, not below: the next
+    /// row's stripe would cover it.
+    fn row_line(&self, ui: &Ui) {
+        let Some(stroke) = self.row_line else {
+            return;
+        };
+        let gap = ui.spacing().item_spacing * 0.5;
+        let rect = ui.max_rect().expand2(gap);
+        let mut painter = ui.painter().clone();
+        painter.set_clip_rect(ui.clip_rect().expand2(gap));
+        painter.hline(rect.x_range(), rect.top(), stroke);
     }
 }
 
@@ -1071,7 +1152,7 @@ fn table_builder<'u>(
 ) -> TableBuilder<'u> {
     let mut builder = TableBuilder::new(ui)
         .id_salt(id)
-        .striped(true)
+        .striped(d.look.striped)
         .resizable(true)
         .auto_shrink(false)
         .sense(Sense::click_and_drag())
@@ -1120,11 +1201,12 @@ fn draw_part(
             }
             if numbers {
                 let (_, number) = row.col(|ui| {
+                    d.look.row_line(ui);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
-                            RichText::new((view_row + 1).to_string())
-                                .monospace()
-                                .color(d.look.null_color),
+                            d.look
+                                .text((view_row + 1).to_string())
+                                .color(ui.visuals().weak_text_color()),
                         );
                     });
                 });
@@ -1311,6 +1393,7 @@ fn data_cell(
     let mut edit_done = None;
     let (_, response) = row.col(|ui| {
         let rect = ui.max_rect();
+        look.row_line(ui);
         let tint = match cell_state {
             CellState::Changed => Some(look.changed_bg),
             CellState::Inserted => Some(look.inserted_bg),
@@ -1326,7 +1409,7 @@ fn data_cell(
         {
             let r = ui.add(
                 egui::TextEdit::singleline(text)
-                    .font(egui::TextStyle::Monospace)
+                    .font(look.font.clone())
                     .desired_width(f32::INFINITY)
                     .margin(egui::Margin::symmetric(2, 0)),
             );
@@ -1368,9 +1451,8 @@ fn data_cell(
             Some(text) if binary => {
                 ui.add(
                     egui::Label::new(
-                        RichText::new(binary_summary(text))
-                            .monospace()
-                            .color(look.null_color),
+                        look.text(binary_summary(text))
+                            .color(ui.visuals().weak_text_color()),
                     )
                     .truncate()
                     .selectable(false),
@@ -1379,19 +1461,14 @@ fn data_cell(
             Some(text) => {
                 let first = text.lines().next().unwrap_or_default();
                 let more = if first.len() < text.len() { " …" } else { "" };
-                let mut rich = RichText::new(format!("{first}{more}")).monospace();
+                let mut rich = look.text(format!("{first}{more}"));
                 if strike {
                     rich = rich.strikethrough();
                 }
                 ui.add(egui::Label::new(rich).truncate().selectable(false));
             }
             _ => {
-                ui.label(
-                    RichText::new("NULL")
-                        .monospace()
-                        .italics()
-                        .color(look.null_color),
-                );
+                ui.add(egui::Label::new(look.null()).truncate().selectable(false));
             }
         });
     });
@@ -1673,7 +1750,7 @@ fn record_view(
     let Some(row) = rows.get(state.row_index(r)) else {
         return;
     };
-    let null_color = ui.visuals().weak_text_color();
+    let look = Look::new(ui);
     egui::ScrollArea::vertical()
         .id_salt(id.with("record"))
         .auto_shrink(false)
@@ -1688,10 +1765,8 @@ fn record_view(
                         ui.label(RichText::new(&col.name).strong());
                         ui.weak(&col.type_name);
                         match row.get(c).and_then(|v| v.as_deref()) {
-                            Some(v) => {
-                                ui.add(egui::Label::new(RichText::new(v).monospace()).wrap())
-                            }
-                            None => ui.label(RichText::new("NULL").italics().color(null_color)),
+                            Some(v) => ui.add(egui::Label::new(look.text(v)).wrap()),
+                            None => ui.label(look.null()),
                         };
                         ui.end_row();
                     }
@@ -2178,6 +2253,70 @@ mod tests {
         assert_eq!(updates[&0].as_deref(), Some("9"));
         assert_eq!(updates[&1].as_deref(), Some("z"));
         assert!(!updates.contains_key(&2));
+    }
+
+    /// The grid style sets the cells' font, the NULL text and the lines; rows
+    /// follow the font and the padding.
+    #[test]
+    fn grid_style() {
+        let (c, r) = (cols(), rows());
+        let ctx = egui::Context::default();
+        let mut state = GridState::default();
+        // The texts drawn and the grid's look, with the buttons' vertical
+        // padding at `padding`.
+        let mut frame = |padding: f32| {
+            let mut look = None;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.spacing_mut().button_padding.y = padding;
+                look = Some(Look::new(ui));
+                ResultGrid::new(&c, &r, &mut state, "grid").show(ui);
+            });
+            output.textures_delta.clear();
+            let texts: Vec<String> = output
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+            (texts, look.unwrap())
+        };
+        let (texts, look) = frame(3.0);
+        assert_eq!(
+            texts.iter().filter(|t| *t == "NULL").count(),
+            2,
+            "{texts:?}"
+        );
+        assert_eq!(look.font, egui::FontId::monospace(13.0));
+        assert!(look.striped && look.row_line.is_none());
+        let text_height = look.row_height - 6.0;
+
+        set_grid_style(
+            &ctx,
+            GridStyle {
+                font: Some(egui::FontId::proportional(20.0)),
+                striped: false,
+                row_lines: true,
+                null_text: "(null)".into(),
+                null_color: Some(egui::Color32::RED),
+            },
+        );
+        let (texts, look) = frame(1.0);
+        assert_eq!(
+            texts.iter().filter(|t| *t == "(null)").count(),
+            2,
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t == "NULL"), "{texts:?}");
+        assert_eq!(look.font, egui::FontId::proportional(20.0));
+        assert_eq!(look.null_color, egui::Color32::RED);
+        assert!(!look.striped && look.row_line.is_some());
+        assert!(
+            look.row_height - 2.0 > text_height * 1.4,
+            "{} for a 20 pt font",
+            look.row_height
+        );
     }
 
     /// Columns drawn before the first rows arrive are fitted again once

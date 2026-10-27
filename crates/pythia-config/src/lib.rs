@@ -16,8 +16,9 @@ pub mod tns;
 
 pub use connections::{ConnectionProfile, Connections, DbKind, Privilege, SshTunnel};
 pub use settings::{
-    AiBackend, AiKind, AiSettings, EditorSettings, FormatTriggers, InvalidObjectSettings,
-    InvalidScope, KeymapPreset, Settings, ThemeChoice,
+    AiBackend, AiKind, AiSettings, AppearanceSettings, CursorShape, Density, EditorSettings,
+    FormatTriggers, GridSettings, InvalidObjectSettings, InvalidScope, KeymapPreset, ScrollBars,
+    Settings, ThemeChoice,
 };
 
 /// Platform directories used by Pythia.
@@ -131,6 +132,41 @@ mod tests {
             Settings::default()
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Settings from before the appearance options keep today's look; the
+    /// new ones survive a round trip.
+    #[test]
+    fn appearance_settings() {
+        let old: Settings = toml::from_str("theme = \"dark\"\nui_scale = 1.25\n").unwrap();
+        assert_eq!(old.appearance, AppearanceSettings::default());
+        assert_eq!(old.appearance.density, Density::COMFORTABLE);
+        assert_eq!(old.grid, GridSettings::default());
+        assert_eq!(old.editor.cursor_shape, CursorShape::Line);
+
+        let mut settings = Settings::default();
+        settings.appearance.font_file = "/fonts/Inter.ttf".into();
+        settings.appearance.density = Density::COMPACT;
+        settings.appearance.accent = Some([0x10, 0x80, 0x40]);
+        settings.appearance.scroll_bars = ScrollBars::Visible;
+        settings.grid.null_text = "(null)".into();
+        settings.grid.null_color = Some([1, 2, 3]);
+        settings.editor.cursor_shape = CursorShape::Block;
+        settings.editor.line_spacing = 2.0;
+        let text = toml::to_string_pretty(&settings).unwrap();
+        assert!(text.contains("scroll_bars = \"visible\""), "{text}");
+        assert!(text.contains("cursor_shape = \"block\""), "{text}");
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
+
+        // A partial density keeps the other values.
+        let partial: Settings = toml::from_str("[appearance.density]\npadding = 1.0\n").unwrap();
+        assert_eq!(
+            partial.appearance.density,
+            Density {
+                padding: 1.0,
+                ..Density::COMFORTABLE
+            }
+        );
     }
 
     #[test]

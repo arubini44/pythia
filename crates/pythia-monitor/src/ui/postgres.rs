@@ -755,7 +755,7 @@ fn top_statements(ui: &mut Ui, snap: &PgSnapshot, wants: &mut Wants) {
                 return;
             }
             let analyze = wants.analyze;
-            let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+            let h = super::style::row_height(ui);
             let mut table = TableBuilder::new(ui)
                 .id_salt("postgres-top-statements")
                 .striped(true)

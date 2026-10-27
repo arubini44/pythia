@@ -3,6 +3,12 @@
 use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke, Ui};
 use egui_extras::{Column, TableBuilder};
 
+/// Height of a table row of body text: the text and the vertical padding of
+/// buttons, which Pythia's density setting sets.
+pub fn row_height(ui: &Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Body) + 2.0 * ui.spacing().button_padding.y
+}
+
 /// Wait class colors, following Oracle Enterprise Manager conventions.
 pub fn wait_class_color(class: &str) -> Color32 {
     match class {
@@ -420,7 +426,7 @@ pub(crate) fn text_table(
     link_hover: &str,
 ) -> Option<i64> {
     let mut clicked = None;
-    let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+    let h = row_height(ui);
     let mut builder = TableBuilder::new(ui)
         .id_salt(id)
         .striped(true)

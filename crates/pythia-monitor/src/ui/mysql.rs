@@ -686,7 +686,7 @@ fn tables(ui: &mut Ui, storage: &Storage) {
 fn top_statements(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
     section(ui, "Top statements by total time (since startup)", |ui| {
         let analyze = wants.analyze;
-        let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let h = super::style::row_height(ui);
         let mut table = TableBuilder::new(ui)
             .id_salt("mysql-top-statements")
             .striped(true)

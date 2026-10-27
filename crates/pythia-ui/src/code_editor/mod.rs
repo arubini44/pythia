@@ -43,6 +43,11 @@ pub struct EditorConfig {
     pub show_whitespace: bool,
     /// Highlight the line the cursor is on.
     pub highlight_current_line: bool,
+    /// Extra space between lines in points.
+    pub line_spacing: f32,
+    pub caret: CaretShape,
+    /// The caret blinks while the editor has focus.
+    pub caret_blink: bool,
     pub read_only: bool,
     /// Identifier chars typed before completion is requested automatically.
     pub auto_complete_min_chars: usize,
@@ -62,6 +67,9 @@ impl Default for EditorConfig {
             show_line_numbers: true,
             show_whitespace: false,
             highlight_current_line: true,
+            line_spacing: 0.0,
+            caret: CaretShape::Line,
+            caret_blink: true,
             read_only: false,
             auto_complete_min_chars: 2,
             auto_complete_delay_ms: 150,
@@ -69,6 +77,17 @@ impl Default for EditorConfig {
             completion_rows: 15,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaretShape {
+    /// A thin bar between characters.
+    #[default]
+    Line,
+    /// A box over the character.
+    Block,
+    /// A line under the character.
+    Underline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

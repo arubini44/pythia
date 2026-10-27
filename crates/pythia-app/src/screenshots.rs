@@ -1626,6 +1626,99 @@ fn code_font() {
     );
 }
 
+/// Settings → Appearance applies right away: Compact tightens the layout,
+/// a changed value makes it Custom, and an interface font replaces the
+/// built-in one (a bad file is reported, not loaded).
+#[test]
+fn appearance_settings() {
+    use pythia_config::Density;
+    let mut h = harness(true);
+    h.state_mut().test_settings_page(0);
+    h.run_steps(3);
+    let margin = |h: &Harness<'_, PythiaApp>| h.ctx.global_style().spacing.window_margin.left;
+    assert_eq!(margin(&h), 14);
+    assert!(h.query_by_label("Custom").is_none());
+    h.get_by_label("Compact").click();
+    h.run_steps(3);
+    assert_eq!(
+        h.state_mut().test_settings_mut().appearance.density,
+        Density::COMPACT
+    );
+    assert_eq!(margin(&h), 6);
+    h.state_mut().test_settings_mut().appearance.density.indent = 20.0;
+    h.state_mut().test_settings_page(0);
+    h.run_steps(3);
+    assert!(h.query_by_label("Custom").is_some());
+
+    let font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+    if std::path::Path::new(font).exists() {
+        h.state_mut().test_settings_mut().appearance.font_file = font.into();
+        h.state_mut().test_settings_mut().appearance.font_size = 12.0;
+        let ctx = h.ctx.clone();
+        h.state_mut().test_apply_settings(&ctx);
+        h.run_steps(3);
+        let first = h
+            .ctx
+            .fonts(|f| f.definitions().families[&egui::FontFamily::Proportional][0].clone());
+        assert_eq!(first, "ui");
+        assert_eq!(
+            h.ctx.global_style().text_styles[&egui::TextStyle::Body].size,
+            12.0
+        );
+        save(&mut h, "settings-appearance");
+    }
+    h.state_mut().test_settings_mut().appearance.font_file = "/etc/hostname".into();
+    let ctx = h.ctx.clone();
+    h.state_mut().test_apply_settings(&ctx);
+    h.run_steps(2);
+    assert!(
+        h.state()
+            .test_log()
+            .iter()
+            .any(|l| l.contains("/etc/hostname is not a TrueType or OpenType font"))
+    );
+    let first = h
+        .ctx
+        .fonts(|f| f.definitions().families[&egui::FontFamily::Proportional][0].clone());
+    assert_ne!(first, "ui");
+}
+
+/// The SQL window, object browser and result grid as they come, and with
+/// the Compact density, a smaller interface font, object names in it and
+/// lines between rows.
+#[test]
+fn compact_layout() {
+    if out_dir().is_none() {
+        return;
+    }
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: QUERY.into(),
+        run: true,
+    });
+    wait_until(&mut h, "query", |app| !app.test_focused_busy());
+    h.state_mut()
+        .test_expand_browser(&[pythia_db::ObjectType::Table, pythia_db::ObjectType::Package]);
+    wait_until(&mut h, "browser", |app| !app.test_browser_loading());
+    save(&mut h, "comfortable-layout");
+    let settings = h.state_mut().test_settings_mut();
+    settings.appearance.density = pythia_config::Density::COMPACT;
+    settings.appearance.font_size = 12.0;
+    settings.appearance.names_in_code_font = false;
+    settings.grid.font_size = 12.0;
+    settings.grid.row_lines = true;
+    settings.grid.null_text = "(null)".into();
+    let ctx = h.ctx.clone();
+    h.state_mut().test_apply_settings(&ctx);
+    save(&mut h, "compact-layout");
+}
+
 /// While a menu of the bar is open, moving onto another title opens that
 /// menu; without an open menu, hovering a title does nothing.
 #[test]

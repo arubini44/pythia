@@ -455,7 +455,7 @@ impl InvalidObjectsWindow {
 
         let mut open = None;
         let mut toggle = None;
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let row_height = pythia_ui::row_height(ui);
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)

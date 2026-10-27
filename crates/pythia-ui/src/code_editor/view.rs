@@ -19,7 +19,8 @@ use super::text::{
     col_from_visual, is_word_char, line_end, line_start, line_text, pos_of, visual_col, word_range,
 };
 use super::{
-    CodeEditor, Drag, EditorConfig, EditorOutput, HoverProbe, MarkerKind, PendingCompletion,
+    CaretShape, CodeEditor, Drag, EditorConfig, EditorOutput, HoverProbe, MarkerKind,
+    PendingCompletion,
 };
 use crate::editor::SyntaxTheme;
 
@@ -119,6 +120,8 @@ pub(super) struct Layout {
     /// Visible part of the content, relative to `origin`.
     viewport: Rect,
     row_h: f32,
+    /// From the top of a row to the top of its text: half the line spacing.
+    text_dy: f32,
     char_w: f32,
     gutter_w: f32,
     marker_w: f32,
@@ -136,6 +139,11 @@ impl Layout {
     /// Top of the row showing `line` (a hidden line maps to its fold's row).
     fn row_y(&self, line: usize) -> f32 {
         self.origin.y + self.map.line_to_row(line) as f32 * self.row_h
+    }
+
+    /// Top of the text of the row showing `line`.
+    fn text_y(&self, line: usize) -> f32 {
+        self.row_y(line) + self.text_dy
     }
 
     /// Display row under a screen y (unclamped; may be past the last row).
@@ -200,7 +208,10 @@ impl CodeEditor {
         let id = self.id_salt.unwrap_or_else(|| ui.id().with("code-editor"));
         let revision_before = self.state.revision;
         let font = FontId::monospace(config.font_size);
-        let (row_h, char_w) = ui.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, 'M')));
+        let (text_h, char_w) = ui.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, 'M')));
+        let spacing = config.line_spacing.clamp(0.0, text_h);
+        let row_h = text_h + spacing;
+        let text_dy = (spacing / 2.0).round();
         let theme = SyntaxTheme::for_visuals(ui.visuals());
         let pal = Palette::new(ui.visuals());
         let time = ui.input(|i| i.time);
@@ -259,6 +270,7 @@ impl CodeEditor {
                     origin: rect.min,
                     viewport,
                     row_h,
+                    text_dy,
                     char_w,
                     gutter_w,
                     marker_w,
@@ -1424,7 +1436,7 @@ impl CodeEditor {
             let text = text_of(l);
             if !text.is_empty() {
                 painter.galley(
-                    pos2(layout.text_x(), layout.row_y(l)),
+                    pos2(layout.text_x(), layout.text_y(l)),
                     highlighted(text, l),
                     pal.text,
                 );
@@ -1492,7 +1504,11 @@ impl CodeEditor {
                 let closing = closing.trim();
                 if !closing.is_empty() && closing.chars().count() <= 40 {
                     let galley = highlighted(closing, end);
-                    painter.galley(pos2(pill.max.x + layout.char_w * 0.6, y), galley, pal.text);
+                    painter.galley(
+                        pos2(pill.max.x + layout.char_w * 0.6, y + layout.text_dy),
+                        galley,
+                        pal.text,
+                    );
                 }
             }
         }
@@ -1500,7 +1516,11 @@ impl CodeEditor {
         // Ctrl+hover link underline.
         if let Some(link) = &self.link {
             for rect in range_rects(link.clone()) {
-                painter.hline(rect.x_range(), rect.max.y - 1.5, Stroke::new(1.0, pal.link));
+                painter.hline(
+                    rect.x_range(),
+                    rect.max.y - layout.text_dy - 1.5,
+                    Stroke::new(1.0, pal.link),
+                );
             }
         }
 
@@ -1522,7 +1542,7 @@ impl CodeEditor {
                 visual_col(text, indent, tw),
                 visual_col(text, len, tw).max(visual_col(text, indent, tw) + 1),
             );
-            let y = layout.row_y(l) + layout.row_h - 2.0;
+            let y = layout.row_y(l) + layout.row_h - layout.text_dy - 2.0;
             let (x0, x1) = (
                 layout.text_x() + v0 as f32 * layout.char_w,
                 layout.text_x() + v1 as f32 * layout.char_w,
@@ -1540,9 +1560,11 @@ impl CodeEditor {
         }
 
         // Carets.
-        let blink_on = ((time - self.blink_epoch) % BLINK_PERIOD) < BLINK_PERIOD * 0.6;
+        let blink_on =
+            !config.caret_blink || ((time - self.blink_epoch) % BLINK_PERIOD) < BLINK_PERIOD * 0.6;
         if focused {
             if blink_on {
+                let text_h = layout.row_h - 2.0 * layout.text_dy;
                 for s in &self.state.sels {
                     let (line, col) = super::text::line_col(rope, s.head);
                     if !shown(line) {
@@ -1550,21 +1572,42 @@ impl CodeEditor {
                     }
                     let vcol = visual_col(text_of(line), col, tw);
                     let x = layout.text_x() + vcol as f32 * layout.char_w;
-                    let r = Rect::from_min_size(
-                        pos2(x - 0.5, layout.row_y(line)),
-                        vec2(2.0, layout.row_h),
-                    );
-                    painter.rect_filled(r, 0.0, pal.caret);
+                    match config.caret {
+                        CaretShape::Line => {
+                            let r = Rect::from_min_size(
+                                pos2(x - 0.5, layout.row_y(line)),
+                                vec2(2.0, layout.row_h),
+                            );
+                            painter.rect_filled(r, 0.0, pal.caret);
+                        }
+                        // See-through, so the character stays readable.
+                        CaretShape::Block => {
+                            let r = Rect::from_min_size(
+                                pos2(x, layout.text_y(line)),
+                                vec2(layout.char_w, text_h),
+                            );
+                            painter.rect_filled(r, 0.0, pal.caret.gamma_multiply(0.45));
+                        }
+                        CaretShape::Underline => {
+                            let r = Rect::from_min_size(
+                                pos2(x, layout.text_y(line) + text_h - 2.0),
+                                vec2(layout.char_w, 2.0),
+                            );
+                            painter.rect_filled(r, 0.0, pal.caret);
+                        }
+                    }
                 }
             }
-            let phase = (time - self.blink_epoch) % BLINK_PERIOD;
-            let next = if blink_on {
-                BLINK_PERIOD * 0.6 - phase
-            } else {
-                BLINK_PERIOD - phase
-            };
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(next.max(0.01)));
+            if config.caret_blink {
+                let phase = (time - self.blink_epoch) % BLINK_PERIOD;
+                let next = if blink_on {
+                    BLINK_PERIOD * 0.6 - phase
+                } else {
+                    BLINK_PERIOD - phase
+                };
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(next.max(0.01)));
+            }
         }
 
         self.paint_gutter(ui, layout, config, pal, font, &lines, caret_line, &regions);
@@ -1607,7 +1650,7 @@ impl CodeEditor {
                     pal.line_number
                 };
                 painter.text(
-                    pos2(right, layout.row_y(l)),
+                    pos2(right, layout.text_y(l)),
                     egui::Align2::RIGHT_TOP,
                     (l + 1).to_string(),
                     font.clone(),
@@ -2155,8 +2198,19 @@ mod tests {
     use crate::code_editor::CompletionKind;
 
     /// Runs frames of an editor filling a 1000×800 window; `events` go to the first.
-    fn frames(ctx: &egui::Context, editor: &mut CodeEditor, n: usize, mut events: Vec<Event>) {
-        let config = EditorConfig::default();
+    fn frames(ctx: &egui::Context, editor: &mut CodeEditor, n: usize, events: Vec<Event>) {
+        frames_with(ctx, editor, n, events, &EditorConfig::default());
+    }
+
+    /// [`frames`] with `config`; returns the last frame's output.
+    fn frames_with(
+        ctx: &egui::Context,
+        editor: &mut CodeEditor,
+        n: usize,
+        mut events: Vec<Event>,
+        config: &EditorConfig,
+    ) -> egui::FullOutput {
+        let mut last = None;
         for _ in 0..n {
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
@@ -2164,10 +2218,69 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(input, |ui| {
-                editor.ui(ui, &config);
+                editor.ui(ui, config);
             });
             output.textures_delta.clear();
+            last = Some(output);
         }
+        last.expect("a frame")
+    }
+
+    /// Line spacing adds room between lines, with the text in the middle;
+    /// clicks still land on the line drawn there.
+    #[test]
+    fn line_spacing() {
+        let ctx = egui::Context::default();
+        let mut editor = CodeEditor::new("one\ntwo\nthree");
+        frames(&ctx, &mut editor, 2, vec![]);
+        let plain = editor.last_layout.as_ref().unwrap().row_h;
+        let config = EditorConfig {
+            line_spacing: 6.0,
+            ..EditorConfig::default()
+        };
+        let output = frames_with(&ctx, &mut editor, 2, vec![], &config);
+        let layout = editor.last_layout.as_ref().unwrap();
+        assert_eq!(layout.row_h, plain + 6.0);
+        assert_eq!(layout.text_y(1), layout.row_y(1) + 3.0);
+        let two = output
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                Shape::Text(t) if t.galley.text() == "two" => Some(t.pos.y),
+                _ => None,
+            })
+            .expect("line 2 drawn");
+        assert_eq!(two, layout.text_y(1));
+        // The bottom of line 2's row, in the spacing below its text.
+        let at = pos2(layout.text_x() + 1.0, layout.row_y(2) - 1.0);
+        frames_with(
+            &ctx,
+            &mut editor,
+            2,
+            vec![pointer(at, true), pointer(at, false)],
+            &config,
+        );
+        assert_eq!(editor.line_col().0, 2);
+    }
+
+    /// A blinking caret asks for the next blink; a steady one doesn't.
+    #[test]
+    fn caret_blink() {
+        let ctx = egui::Context::default();
+        let mut editor = CodeEditor::new("x");
+        editor.request_focus();
+        let repaint = |output: &egui::FullOutput| {
+            output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+        };
+        let blinking = frames_with(&ctx, &mut editor, 3, vec![], &EditorConfig::default());
+        assert!(repaint(&blinking) < std::time::Duration::from_secs(2));
+        let config = EditorConfig {
+            caret_blink: false,
+            caret: CaretShape::Block,
+            ..EditorConfig::default()
+        };
+        let steady = frames_with(&ctx, &mut editor, 3, vec![], &config);
+        assert_eq!(repaint(&steady), std::time::Duration::MAX);
     }
 
     fn entry(label: &str) -> CompletionEntry {

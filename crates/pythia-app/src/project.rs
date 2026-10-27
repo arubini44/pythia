@@ -353,7 +353,7 @@ impl Project {
                 "Empty folder"
             });
         }
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let row_height = pythia_ui::row_height(ui);
         let mut toggles = Vec::new();
         egui::ScrollArea::both().auto_shrink(false).show_rows(
             ui,

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use egui::{Color32, RichText, Ui};
-use egui_dock::{DockArea, DockState, NodeIndex, Style as DockStyle, TabStyle, TabViewer};
+use egui_dock::{DockArea, DockState, NodeIndex, TabStyle, TabViewer};
 use pythia_config::{
     ConnectionProfile, Connections as SavedConnections, Paths, Settings, ThemeChoice, load_toml,
     save_toml,
@@ -65,8 +65,8 @@ pub struct PythiaApp {
     settings: Settings,
     saved: SavedConnections,
     keymap: Keymap,
-    /// Code font file currently installed.
-    loaded_font: Option<String>,
+    /// The code and interface font files installed.
+    loaded_fonts: Option<(String, String)>,
     notify: Notify,
 
     dock: DockState<Tab>,
@@ -174,7 +174,7 @@ impl PythiaApp {
         let mut app = Self {
             paths,
             keymap: Keymap::with_overrides(settings.keymap, &settings.keybindings),
-            loaded_font: None,
+            loaded_fonts: None,
             settings,
             saved,
             notify: Notify(cc.egui_ctx.clone()),
@@ -271,26 +271,17 @@ impl PythiaApp {
     }
 
     fn apply_settings(&mut self, ctx: &egui::Context) {
-        let font = self.settings.editor.font_file.trim().to_owned();
-        if self.loaded_font.as_deref() != Some(font.as_str()) {
-            let bytes = if font.is_empty() {
-                None
-            } else {
-                match std::fs::read(&font) {
-                    Ok(bytes) if is_font(&bytes) => Some(bytes),
-                    Ok(_) => {
-                        self.log(format!("{font} is not a TrueType or OpenType font"));
-                        None
-                    }
-                    Err(e) => {
-                        self.log(format!("Could not load font {font}: {e}"));
-                        None
-                    }
-                }
-            };
-            theme::set_fonts(ctx, bytes);
-            self.loaded_font = Some(font);
+        let fonts = (
+            self.settings.editor.font_file.trim().to_owned(),
+            self.settings.appearance.font_file.trim().to_owned(),
+        );
+        if self.loaded_fonts.as_ref() != Some(&fonts) {
+            let code = self.read_font(&fonts.0);
+            let ui = self.read_font(&fonts.1);
+            theme::set_fonts(ctx, code, ui);
+            self.loaded_fonts = Some(fonts);
         }
+        theme::apply(ctx, &self.settings.appearance, &self.settings.grid);
         ctx.set_theme(match self.settings.theme {
             ThemeChoice::System => egui::ThemePreference::System,
             ThemeChoice::Dark => egui::ThemePreference::Dark,
@@ -298,6 +289,25 @@ impl PythiaApp {
         });
         ctx.set_zoom_factor(self.settings.ui_scale);
         self.sync_autocommit();
+    }
+
+    /// The bytes of a font file; `None` for an empty path or a file that
+    /// can't be used, which is logged.
+    fn read_font(&mut self, path: &str) -> Option<Vec<u8>> {
+        if path.is_empty() {
+            return None;
+        }
+        match std::fs::read(path) {
+            Ok(bytes) if is_font(&bytes) => Some(bytes),
+            Ok(_) => {
+                self.log(format!("{path} is not a TrueType or OpenType font"));
+                None
+            }
+            Err(e) => {
+                self.log(format!("Could not load font {path}: {e}"));
+                None
+            }
+        }
     }
 
     fn save_user_reports(&self) {
@@ -4163,7 +4173,7 @@ impl eframe::App for PythiaApp {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 DockArea::new(&mut self.dock)
-                    .style(DockStyle::from_egui(ui.style().as_ref()))
+                    .style(theme::dock_style(ui.style()))
                     .show_leaf_collapse_buttons(false)
                     .show_inside(ui, &mut viewer);
             });
@@ -4583,6 +4593,10 @@ impl PythiaApp {
 
     pub fn test_code_font(&mut self, ctx: &egui::Context, file: &str) {
         self.settings.editor.font_file = file.to_owned();
+        self.apply_settings(ctx);
+    }
+
+    pub fn test_apply_settings(&mut self, ctx: &egui::Context) {
         self.apply_settings(ctx);
     }
 

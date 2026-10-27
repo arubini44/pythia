@@ -7,6 +7,16 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Settings → Appearance: the interface's font (a TrueType/OpenType file)
+  and size, apart from the zoom, which still scales everything. A Compact
+  density shrinks padding, gaps, margins and tree indent, which can also be
+  set one by one; rows of the object browser, lists and tables, the
+  toolbar, the status bar and the tabs follow. An accent color, square
+  corners, shadows, scroll bars that are always visible, animations off,
+  and object names in the browser in the interface font. The result grid
+  gets its own font and size, striped rows on or off, lines between rows
+  and the text and color of NULL; the editor gets line spacing and a
+  block or underline cursor that need not blink (#105).
 - PostgreSQL and SQL Server connections (experimental): *Type: PostgreSQL*
   and *Type: SQL Server*, with the same tools as MySQL except the SSH
   tunnel and the dashboard (#36). Scripts split the database's way:

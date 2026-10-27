@@ -888,7 +888,7 @@ impl Browser {
             return effects;
         }
         let rows = self.rows(&owner);
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let row_height = pythia_ui::row_height(ui);
         let mut toggles = Vec::new();
         let mut actions = Vec::new();
         let revealed = self.reveal.as_ref().and_then(|target| {
@@ -1158,7 +1158,11 @@ impl Browser {
         toggles: &mut Vec<Node>,
         actions: &mut Vec<ObjectAction>,
     ) {
-        const INDENT: f32 = 18.0;
+        // A level of the tree: the indent setting and a little more, for
+        // the chevron.
+        let indent = ui.spacing().indent + 2.0;
+        let names = crate::theme::object_names(ui.style());
+        let name = |text: String| RichText::new(text).font(names.clone());
         let small = IconSize::Small;
         // Chevron toggle, or the same space when there's nothing to expand.
         let chevron = |ui: &mut Ui, open: bool, expandable: bool| -> bool {
@@ -1226,7 +1230,7 @@ impl Browser {
                     open,
                     expandable,
                 } => {
-                    ui.add_space(INDENT);
+                    ui.add_space(indent);
                     let r = object_ref(object);
                     if chevron(ui, *open, *expandable) {
                         toggles.push(Node::Object(r.clone()));
@@ -1237,7 +1241,7 @@ impl Browser {
                     if !object.valid {
                         paint_invalid_badge(ui, icon_response.rect);
                     }
-                    let mut text = RichText::new(object.name.to_lowercase()).monospace();
+                    let mut text = name(object.name.to_lowercase());
                     if !object.valid {
                         text = text.color(ui.visuals().error_fg_color);
                     }
@@ -1264,7 +1268,7 @@ impl Browser {
                     response.context_menu(|ui| self.context_menu(ui, &r, actions));
                 }
                 Row::Column(c, fk) => {
-                    ui.add_space(INDENT * 2.0 + small.points());
+                    ui.add_space(indent * 2.0 + small.points());
                     let icon = if c.pk_position.is_some() {
                         Icon::PrimaryKey
                     } else if *fk {
@@ -1273,13 +1277,13 @@ impl Browser {
                         Icon::Column
                     };
                     ui.add(icon.sized(ui, small));
-                    let name = c.name.to_lowercase();
+                    let column = c.name.to_lowercase();
                     let label = ui.add(
-                        egui::Label::new(RichText::new(&name).monospace())
+                        egui::Label::new(name(column.clone()))
                             .sense(Sense::drag())
                             .selectable(false),
                     );
-                    drag_text(ui, &label, name);
+                    drag_text(ui, &label, column);
                     let null = if c.nullable { "" } else { " not null" };
                     let label = ui.weak(format!("{}{null}", c.data_type.to_lowercase()));
                     if let Some(comment) = &c.comment {
@@ -1292,7 +1296,7 @@ impl Browser {
                     count,
                     open,
                 } => {
-                    ui.add_space(INDENT * 2.0);
+                    ui.add_space(indent * 2.0);
                     if chevron(ui, *open, true) {
                         toggles.push(Node::Group(table.clone(), *group));
                     }
@@ -1309,7 +1313,7 @@ impl Browser {
                     ui.weak(count.to_string());
                 }
                 Row::Part(part, table) => {
-                    ui.add_space(INDENT * 3.0 + small.points());
+                    ui.add_space(indent * 3.0 + small.points());
                     let icon = match part.kind {
                         PartKind::Index { .. } => Icon::Index,
                         PartKind::Constraint { kind: 'P' } => Icon::PrimaryKey,
@@ -1318,7 +1322,7 @@ impl Browser {
                         PartKind::Trigger => Icon::Trigger,
                     };
                     ui.add(icon.sized(ui, small));
-                    let mut text = RichText::new(part.name.to_lowercase()).monospace();
+                    let mut text = name(part.name.to_lowercase());
                     if !part.enabled {
                         text = text.strikethrough().color(ui.visuals().weak_text_color());
                     }
@@ -1356,17 +1360,15 @@ impl Browser {
                     });
                 }
                 Row::Member(m, package) => {
-                    ui.add_space(INDENT * 2.0 + small.points());
+                    ui.add_space(indent * 2.0 + small.points());
                     let icon = if m.is_function {
                         Icon::Function
                     } else {
                         Icon::Procedure
                     };
                     ui.add(icon.sized(ui, small));
-                    let label = ui.add(
-                        egui::Label::new(RichText::new(m.name.to_lowercase()).monospace())
-                            .sense(Sense::click()),
-                    );
+                    let label =
+                        ui.add(egui::Label::new(name(m.name.to_lowercase())).sense(Sense::click()));
                     ui.weak(&m.signature);
                     label.context_menu(|ui| {
                         let subprogram = || Subprogram {
@@ -1427,7 +1429,7 @@ impl Browser {
                     }
                 }
                 Row::Account(name, detail, object_type) => {
-                    ui.add_space(INDENT);
+                    ui.add_space(indent);
                     ui.add_space(small.points());
                     let icon =
                         Icon::for_object_type(object_type.dictionary_name()).unwrap_or(Icon::Text);
@@ -1440,7 +1442,7 @@ impl Browser {
                     let selected = self.selected.as_ref() == Some(&account);
                     let response = ui.add(egui::Button::selectable(
                         selected,
-                        RichText::new(name.to_lowercase()).monospace(),
+                        RichText::new(name.to_lowercase()).font(names.clone()),
                     ));
                     if response.clicked() {
                         actions.push(ObjectAction::Select(account.clone()));
@@ -1451,25 +1453,25 @@ impl Browser {
                     response.context_menu(|ui| account_menu(ui, &account, actions));
                     if !detail.is_empty() {
                         ui.add(
-                            egui::Label::new(RichText::new(*detail).weak().monospace()).truncate(),
+                            egui::Label::new(RichText::new(*detail).weak().font(names.clone()))
+                                .truncate(),
                         );
                     }
                 }
                 Row::Shortcut(object) => {
-                    ui.add_space(INDENT);
+                    ui.add_space(indent);
                     ui.add_space(small.points());
                     let icon = Icon::for_object_type(object.object_type.dictionary_name())
                         .unwrap_or(Icon::Text);
                     ui.add(icon.sized(ui, small));
                     let selected = self.selected.as_ref() == Some(*object);
-                    let mut text = RichText::new(object.name.to_lowercase()).monospace();
+                    let mut text = name(object.name.to_lowercase());
                     if Some(object.owner.as_str()) != self.schema.as_deref() {
-                        text = RichText::new(format!(
+                        text = name(format!(
                             "{}.{}",
                             object.owner.to_lowercase(),
                             object.name.to_lowercase()
-                        ))
-                        .monospace();
+                        ));
                     }
                     let response = self.drag_source(ui, object, |ui| {
                         ui.add(
@@ -1490,7 +1492,7 @@ impl Browser {
                     response.context_menu(|ui| self.context_menu(ui, object, actions));
                 }
                 Row::Message { depth, text, error } => {
-                    ui.add_space(INDENT * *depth as f32 + small.points());
+                    ui.add_space(indent * *depth as f32 + small.points());
                     if *error {
                         ui.colored_label(ui.visuals().error_fg_color, text);
                     } else {
@@ -2581,7 +2583,7 @@ fn drag_text(ui: &Ui, response: &egui::Response, text: String) {
             .interactable(false)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.label(RichText::new(text).monospace());
+                    ui.label(RichText::new(text).font(crate::theme::object_names(ui.style())));
                 });
             });
     }
