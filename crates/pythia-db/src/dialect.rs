@@ -95,13 +95,21 @@ impl Dialect {
             // Its connect strings (TNS aliases, descriptors) aren't pointed
             // at a tunnel yet.
             DbKind::Oracle => feature != Feature::SshTunnel,
-            DbKind::MySql | DbKind::Postgres | DbKind::SqlServer => matches!(
+            DbKind::MySql => matches!(
                 feature,
                 Feature::ExplainPlan
                     | Feature::Completion
                     | Feature::SshTunnel
                     | Feature::Dashboard
                     | Feature::EditResults
+            ),
+            // Rows found by key: MySQL's way, not yet theirs (#101).
+            DbKind::Postgres | DbKind::SqlServer => matches!(
+                feature,
+                Feature::ExplainPlan
+                    | Feature::Completion
+                    | Feature::SshTunnel
+                    | Feature::Dashboard
             ),
         }
     }
