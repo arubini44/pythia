@@ -28,7 +28,9 @@ for Linux, Windows and macOS.
 **SQL windows**
 - Run the statement under the cursor (Ctrl+Enter), the selection or the
   whole script (F8); SQL\*Plus `exec`, `prompt`, `define`, `desc`, `&vars`.
-- Bind and substitution variables are prompted and remembered.
+- Bind and substitution variables in a panel next to the editor, with
+  their values (or NULL), which the window keeps. A statement with a
+  variable that has no value yet waits there for it; Enter or F8 runs it.
 - Results in a virtualized grid: sorting, rectangular selection, aggregates,
   record view, value viewer, copy and export (CSV, TSV, JSON, Excel,
   INSERT statements, Markdown, HTML). Columns can be resized, hidden,

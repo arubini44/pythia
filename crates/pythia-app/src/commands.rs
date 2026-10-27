@@ -123,6 +123,7 @@ commands! {
     ShowBrowser => "View: Object Browser",
     ShowProject => "View: Project",
     ShowLog => "View: Log",
+    ShowVariables => "View: Variables (SQL window)",
     ThemeDark => "View: Dark Theme",
     ThemeLight => "View: Light Theme",
     ThemeSystem => "View: System Theme",

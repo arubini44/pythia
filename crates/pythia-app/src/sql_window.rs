@@ -28,6 +28,9 @@ pub struct SqlWindow {
     pub defines: BTreeMap<String, String>,
     #[serde(default = "yes")]
     pub substitution: bool,
+    /// The Variables panel shows while the text has variables (#110).
+    #[serde(default = "yes")]
+    pub show_variables: bool,
     /// File the window was opened from or saved to.
     #[serde(default)]
     pub path: Option<std::path::PathBuf>,
@@ -86,9 +89,13 @@ pub struct RunState {
     pub output: Vec<String>,
     pub bottom: BottomTab,
     pub line_col: (usize, usize),
+    /// A statement waiting for values in the Variables panel.
     pub prompt: Option<VariablePrompt>,
-    /// The open variable prompt is for a debug run.
+    /// The waiting statement is for a debug run.
     pub prompt_for_debug: bool,
+    /// Variables of the text, and the text revision, substitution setting
+    /// and syntax they were found with.
+    variables: Option<((u64, bool, Syntax), Vec<Variable>)>,
     /// Editor line where the debugged block starts, while this window's
     /// block is the one being debugged.
     pub debug_start: Option<usize>,
@@ -249,14 +256,29 @@ impl ResultBar {
     const MIN_LEFT: f32 = 190.0;
 }
 
-/// Values the user must enter before a statement runs.
+/// A statement that waits for variables without a value.
 pub struct VariablePrompt {
     statement: PendingStatement,
-    /// `&var` substitutions: (lowercase name, value).
-    substitutions: Vec<(String, String)>,
-    /// `:bind` variables: (name as written, value, is_null).
-    binds: Vec<(String, String, bool)>,
-    focus_first: bool,
+    /// Focus the first variable without a value (once).
+    focus: bool,
+}
+
+/// A variable the Variables panel lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Variable {
+    /// `:name`, as first written; values are kept by lowercase name.
+    Bind(String),
+    /// `&name` / `&&name`, lowercase.
+    Substitution(String),
+}
+
+impl Variable {
+    fn label(&self) -> String {
+        match self {
+            Variable::Bind(name) => format!(":{name}"),
+            Variable::Substitution(name) => format!("&{name}"),
+        }
+    }
 }
 
 impl SqlWindow {
@@ -267,6 +289,7 @@ impl SqlWindow {
             bind_values: BTreeMap::new(),
             defines: BTreeMap::new(),
             substitution: true,
+            show_variables: true,
             path: None,
             saved_text: String::new(),
             encoding: Default::default(),
@@ -390,6 +413,10 @@ impl SqlWindow {
 
     /// Starts executing the selection / whole text, or the current statement.
     pub fn execute(&mut self, current_only: bool, cx: &DocContext) -> Effects {
+        // Executing again runs the statement waiting for values.
+        if self.waiting_for_values() {
+            return self.run_prompted(cx);
+        }
         if self.is_running() {
             return Effects::default();
         }
@@ -446,46 +473,13 @@ impl SqlWindow {
             self.state.bottom = BottomTab::Messages;
             return effects;
         }
-        let missing: Vec<String> = if self.substitution {
-            dedup(
-                find_substitutions(&stmt.sql)
-                    .into_iter()
-                    .filter(|s| !self.defines.contains_key(&s.name))
-                    .map(|s| s.name),
-            )
-        } else {
-            Vec::new()
-        };
-        let binds = dedup(find_binds(&stmt.sql).into_iter());
-        if missing.is_empty() && binds.is_empty() {
-            let sql = if self.substitution {
-                substitute(&stmt.sql, &self.defines)
-            } else {
-                stmt.sql
-            };
-            self.state.debug_start = Some(self.line_of(stmt.start));
-            effects.debug = Some(sql);
+        if self.needs_values(&stmt.sql) {
+            self.wait_for_values(stmt, true);
             return effects;
         }
-        let binds = binds
-            .into_iter()
-            .map(|name| {
-                let remembered = self.bind_values.get(&name.to_lowercase());
-                let is_null = matches!(remembered, Some(None));
-                (
-                    name.clone(),
-                    remembered.cloned().flatten().unwrap_or_default(),
-                    is_null,
-                )
-            })
-            .collect();
-        self.state.prompt_for_debug = true;
-        self.state.prompt = Some(VariablePrompt {
-            statement: stmt,
-            substitutions: missing.into_iter().map(|n| (n, String::new())).collect(),
-            binds,
-            focus_first: true,
-        });
+        let (sql, binds) = self.with_values(&stmt.sql);
+        self.state.debug_start = Some(self.line_of(stmt.start));
+        effects.debug = Some(inline_binds(&sql, &binds));
         effects
     }
 
@@ -722,46 +716,109 @@ impl SqlWindow {
                     }
                 }
             }
-            let substitutions = if self.substitution {
-                find_substitutions(&stmt.sql)
-            } else {
-                Vec::new()
-            };
-            let missing = dedup(
-                substitutions
-                    .iter()
-                    .filter(|s| !self.defines.contains_key(&s.name))
-                    .map(|s| s.name.clone()),
-            );
-            let binds = dedup(find_binds(&stmt.sql).into_iter());
-            if !missing.is_empty() || !binds.is_empty() {
-                let binds = binds
-                    .into_iter()
-                    .map(|name| {
-                        let remembered = self.bind_values.get(&name.to_lowercase());
-                        let is_null = matches!(remembered, Some(None));
-                        let value = remembered.cloned().flatten().unwrap_or_default();
-                        (name, value, is_null)
-                    })
-                    .collect();
-                let substitutions = missing.into_iter().map(|n| (n, String::new())).collect();
-                self.state.prompt = Some(VariablePrompt {
-                    statement: stmt,
-                    substitutions,
-                    binds,
-                    focus_first: true,
-                });
+            if self.needs_values(&stmt.sql) {
+                self.wait_for_values(stmt, false);
                 return effects;
             }
-            let sql = if self.substitution {
-                substitute(&stmt.sql, &self.defines)
-            } else {
-                stmt.sql.clone()
-            };
-            self.send(stmt.start, sql, Vec::new(), cx, &mut effects);
+            let (sql, binds) = self.with_values(&stmt.sql);
+            self.send(stmt.start, sql, binds, cx, &mut effects);
             return effects;
         }
         effects
+    }
+
+    /// Variables a statement uses: substitutions first, then binds.
+    fn statement_variables(&self, sql: &str) -> Vec<Variable> {
+        let substitutions = if self.substitution {
+            dedup(find_substitutions(sql).into_iter().map(|s| s.name))
+        } else {
+            Vec::new()
+        };
+        let binds = dedup(find_binds(sql).into_iter());
+        substitutions
+            .into_iter()
+            .map(Variable::Substitution)
+            .chain(binds.into_iter().map(Variable::Bind))
+            .collect()
+    }
+
+    /// Whether a variable has been given a value (NULL counts).
+    fn has_value(&self, variable: &Variable) -> bool {
+        match variable {
+            Variable::Bind(name) => self.bind_values.contains_key(&name.to_lowercase()),
+            Variable::Substitution(name) => self.defines.contains_key(name),
+        }
+    }
+
+    /// Whether a statement uses a variable that has no value yet.
+    fn needs_values(&self, sql: &str) -> bool {
+        self.statement_variables(sql)
+            .iter()
+            .any(|v| !self.has_value(v))
+    }
+
+    /// The statement with its substitutions replaced, and its binds with
+    /// their values (empty if none was entered).
+    fn with_values(&self, sql: &str) -> (String, Vec<(String, Option<String>)>) {
+        let text = if self.substitution {
+            substitute(sql, &self.defines)
+        } else {
+            sql.to_owned()
+        };
+        let binds = dedup(find_binds(sql).into_iter())
+            .into_iter()
+            .map(|name| {
+                let value = self
+                    .bind_values
+                    .get(&name.to_lowercase())
+                    .cloned()
+                    .unwrap_or(Some(String::new()));
+                (name, value)
+            })
+            .collect();
+        (text, binds)
+    }
+
+    /// Holds the run until the Variables panel's Execute (or F8).
+    fn wait_for_values(&mut self, statement: PendingStatement, debug: bool) {
+        self.state.prompt_for_debug = debug;
+        self.state.prompt = Some(VariablePrompt {
+            statement,
+            focus: true,
+        });
+    }
+
+    /// Whether a statement waits for values in the Variables panel.
+    pub fn waiting_for_values(&self) -> bool {
+        self.state.prompt.is_some()
+    }
+
+    /// Drops the statement waiting for values, and the rest of the run.
+    pub fn cancel_waiting(&mut self) {
+        if self.state.prompt.take().is_some() {
+            self.state.prompt_for_debug = false;
+            self.state.queue.clear();
+            self.info("Execution cancelled");
+        }
+    }
+
+    /// Variables of the whole text, in order of appearance; worked out
+    /// again when the text changes.
+    pub fn variables(&mut self) -> &[Variable] {
+        let key = (self.editor.revision(), self.substitution, self.state.syntax);
+        if self.state.variables.as_ref().is_none_or(|(k, _)| *k != key) {
+            let mut found: Vec<Variable> = Vec::new();
+            let text = self.editor.text();
+            for stmt in split_statements_in(text, self.state.syntax) {
+                for v in self.statement_variables(stmt.text(text)) {
+                    if !found.iter().any(|f| same_variable(f, &v)) {
+                        found.push(v);
+                    }
+                }
+            }
+            self.state.variables = Some((key, found));
+        }
+        &self.state.variables.as_ref().expect("variables").1
     }
 
     fn send(
@@ -1627,6 +1684,13 @@ impl SqlWindow {
             .default_size(ui.available_height() * 0.45)
             .min_size(80.0)
             .show(ui, |ui| effects.extend(self.bottom_ui(ui, cx)));
+        if self.waiting_for_values() || (self.show_variables && !self.variables().is_empty()) {
+            egui::Panel::right(egui::Id::new(("sql-variables", cx.id)))
+                .resizable(true)
+                .default_size(340.0)
+                .min_size(200.0)
+                .show(ui, |ui| effects.extend(self.variables_ui(ui, cx)));
+        }
         // The editor fills the tab to its edges.
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut out = self
@@ -1679,13 +1743,14 @@ impl SqlWindow {
                 ui.ctx().request_repaint();
             }
         });
-        effects.extend(self.prompt_ui(ui.ctx(), cx));
         effects
     }
 
     fn bottom_ui(&mut self, ui: &mut Ui, cx: &DocContext) -> Effects {
         let mut effects = self.poll_to_file(ui);
         let mut edit_action = None;
+        let variables = self.variables().len();
+        let show_variables = &mut self.show_variables;
         let state = &mut self.state;
         ui.horizontal(|ui| {
             for (i, result) in state.results.iter().enumerate() {
@@ -1748,6 +1813,12 @@ impl SqlWindow {
                 {
                     effects.cancel = true;
                 }
+            }
+            if variables > 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.toggle_value(show_variables, format!("Variables ({variables})"))
+                        .on_hover_text("Show or hide the Variables panel");
+                });
             }
         });
         if let Some(rx) = &state.export
@@ -2180,110 +2251,212 @@ impl SqlWindow {
         effects
     }
 
-    fn prompt_ui(&mut self, ctx: &egui::Context, cx: &DocContext) -> Effects {
-        let Some(prompt) = self.state.prompt.as_mut() else {
-            return Effects::default();
-        };
+    /// The Variables panel: the text's variables with their values, and
+    /// the statement waiting for values, if any (#110).
+    fn variables_ui(&mut self, ui: &mut Ui, cx: &DocContext) -> Effects {
+        let waiting = self
+            .state
+            .prompt
+            .as_ref()
+            .map(|p| self.statement_variables(&p.statement.sql))
+            .unwrap_or_default();
+        // A statement from an `@script` can have variables the text hasn't.
+        let mut variables = waiting.clone();
+        for v in self.variables().to_vec() {
+            if !variables.iter().any(|w| same_variable(w, &v)) {
+                variables.push(v);
+            }
+        }
         let mut decision = None;
-        let modal = egui::Modal::new(egui::Id::new(("variables", cx.id))).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.heading("Variables");
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(first_line(&prompt.statement.sql))
-                    .monospace()
-                    .weak(),
+        ui.horizontal(|ui| {
+            ui.strong("Variables").on_hover_text(
+                "Runs use these values, and the window keeps them. A statement with a \
+                 variable that has no value waits here for it.",
             );
-            ui.add_space(8.0);
-            let mut first = prompt.focus_first;
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            // A minimum, not a desired width: a grid column offers only last
-            // frame's width, so the fields would never grow past the first (#109).
-            let field = |value| egui::TextEdit::singleline(value).min_size(egui::vec2(260.0, 0.0));
-            egui::Grid::new("vars")
-                .num_columns(3)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    for (name, value) in &mut prompt.substitutions {
-                        ui.label(format!("&{name}"));
-                        let r = ui.add(field(value));
-                        if std::mem::take(&mut first) {
-                            r.request_focus();
-                        }
-                        ui.label("");
-                        ui.end_row();
-                    }
-                    for (name, value, is_null) in &mut prompt.binds {
-                        ui.label(format!(":{name}"));
-                        let r = ui.add_enabled(!*is_null, field(value));
-                        if std::mem::take(&mut first) {
-                            r.request_focus();
-                        }
-                        ui.checkbox(is_null, "NULL");
-                        ui.end_row();
+            if self.state.prompt.is_none() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(
+                        ui,
+                        Icon::Close,
+                        "Hide; Variables below the editor shows it again",
+                    )
+                    .clicked()
+                    {
+                        self.show_variables = false;
                     }
                 });
-            prompt.focus_first = false;
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Execute").clicked() || enter {
-                    decision = Some(true);
-                }
-                if ui.button("Cancel").clicked() {
-                    decision = Some(false);
+            }
+        });
+        if let Some(prompt) = &self.state.prompt {
+            egui::Frame::new()
+                .fill(ui.visuals().faint_bg_color)
+                .stroke(egui::Stroke::new(1.0, ui.visuals().warn_fg_color))
+                .corner_radius(4)
+                .inner_margin(6)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let place = match &prompt.statement.origin {
+                        Some(path) => path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        None => format!("line {}", self.line_of(prompt.statement.start)),
+                    };
+                    ui.label(format!(
+                        "Waiting for values to run the statement at {place}:"
+                    ));
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(first_line(&prompt.statement.sql))
+                                .monospace()
+                                .weak(),
+                        )
+                        .truncate(),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.button("Execute").on_hover_text("Enter or F8").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            decision = Some(false);
+                        }
+                    });
+                });
+            ui.add_space(4.0);
+        }
+        let mut focus = self
+            .state
+            .prompt
+            .as_mut()
+            .is_some_and(|p| std::mem::take(&mut p.focus));
+        let mut enter = false;
+        // One row per variable: name, value, NULL. Names take what the
+        // longest needs, up to 45% of the panel.
+        let gap = ui.spacing().item_spacing.x;
+        let height = ui.spacing().interact_size.y;
+        let null_width = text_width(ui, RichText::new("NULL").small());
+        let name_width = variables
+            .iter()
+            .map(|v| text_width(ui, RichText::new(v.label()).monospace()))
+            .fold(0.0, f32::max)
+            .min(ui.available_width() * 0.45);
+        let value_width = (ui.available_width() - name_width - null_width - 2.0 * gap).max(40.0);
+        let cell = |ui: &mut Ui, width: f32, add: &mut dyn FnMut(&mut Ui)| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(width);
+                    add(ui)
+                },
+            );
+        };
+        ui.horizontal(|ui| {
+            cell(ui, name_width, &mut |ui| {
+                ui.label(RichText::new("Name").small().weak());
+            });
+            cell(ui, value_width, &mut |ui| {
+                ui.label(RichText::new("Value").small().weak());
+            });
+            ui.label(RichText::new("NULL").small().weak());
+        });
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                for v in &variables {
+                    let missing = !self.has_value(v);
+                    let asked = missing && waiting.iter().any(|w| same_variable(w, v));
+                    let label = v.label();
+                    let mut name = RichText::new(&label).monospace();
+                    if asked {
+                        name = name.color(ui.visuals().warn_fg_color);
+                    }
+                    let hint = if missing { "no value" } else { "" };
+                    ui.horizontal(|ui| {
+                        cell(ui, name_width, &mut |ui| {
+                            ui.add(egui::Label::new(name.clone()).truncate())
+                                .on_hover_text(&label);
+                        });
+                        let response = match v {
+                            Variable::Bind(bind) => {
+                                let key = bind.to_lowercase();
+                                let current = self.bind_values.get(&key).cloned();
+                                let mut is_null = matches!(current, Some(None));
+                                let mut text = current.flatten().unwrap_or_default();
+                                let field = egui::TextEdit::singleline(&mut text)
+                                    .id_salt(("bind", &key))
+                                    .hint_text(hint);
+                                let r = ui.add_enabled_ui(!is_null, |ui| {
+                                    ui.add_sized([value_width, height], field)
+                                });
+                                let r = r.inner;
+                                if r.changed() {
+                                    self.bind_values.insert(key.clone(), Some(text.clone()));
+                                }
+                                if ui
+                                    .checkbox(&mut is_null, "")
+                                    .on_hover_text("NULL")
+                                    .changed()
+                                {
+                                    self.bind_values.insert(key, (!is_null).then_some(text));
+                                }
+                                r
+                            }
+                            Variable::Substitution(subst) => {
+                                let mut text = self.defines.get(subst).cloned().unwrap_or_default();
+                                let field = egui::TextEdit::singleline(&mut text)
+                                    .id_salt(("substitution", subst))
+                                    .hint_text(hint);
+                                let r = ui.add_sized([value_width, height], field);
+                                if r.changed() {
+                                    self.defines.insert(subst.clone(), text);
+                                }
+                                r
+                            }
+                        };
+                        if asked && std::mem::take(&mut focus) {
+                            response.request_focus();
+                            response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            enter = true;
+                        }
+                    });
                 }
             });
-        });
-        if modal.should_close() && decision.is_none() {
-            decision = Some(false);
+        if enter && self.state.prompt.is_some() {
+            decision = Some(true);
         }
-        let mut effects = Effects::default();
         match decision {
-            Some(true) => effects = self.run_prompted(cx),
+            Some(true) => self.run_prompted(cx),
             Some(false) => {
-                self.state.prompt_for_debug = false;
-                self.state.prompt = None;
-                self.state.queue.clear();
-                self.info("Execution cancelled");
+                self.cancel_waiting();
+                Effects::default()
             }
-            None => {}
+            None => Effects::default(),
         }
-        effects
     }
 
-    /// Runs (or debugs) the statement the prompt is for with its values.
+    /// Runs (or debugs) the waiting statement. Variables still without a
+    /// value run empty, and keep that value.
     fn run_prompted(&mut self, cx: &DocContext) -> Effects {
         let mut effects = Effects::default();
         let Some(prompt) = self.state.prompt.take() else {
             return effects;
         };
-        let doubles: Vec<String> = find_substitutions(&prompt.statement.sql)
-            .into_iter()
-            .filter(|s| s.double)
-            .map(|s| s.name)
-            .collect();
-        let mut values = self.defines.clone();
-        for (name, value) in &prompt.substitutions {
-            values.insert(name.clone(), value.clone());
-            // `&&var` keeps its value for the window, `&var` only for this run.
-            if doubles.contains(name) {
-                self.defines.insert(name.clone(), value.clone());
+        for v in self.statement_variables(&prompt.statement.sql) {
+            match v {
+                Variable::Bind(name) => {
+                    self.bind_values
+                        .entry(name.to_lowercase())
+                        .or_insert(Some(String::new()));
+                }
+                Variable::Substitution(name) => {
+                    self.defines.entry(name).or_default();
+                }
             }
         }
-        let sql = if self.substitution {
-            substitute(&prompt.statement.sql, &values)
-        } else {
-            prompt.statement.sql.clone()
-        };
-        let binds: Vec<(String, Option<String>)> = prompt
-            .binds
-            .into_iter()
-            .map(|(name, value, is_null)| {
-                let value = (!is_null).then_some(value);
-                self.bind_values.insert(name.to_lowercase(), value.clone());
-                (name, value)
-            })
-            .collect();
+        let (sql, binds) = self.with_values(&prompt.statement.sql);
         if std::mem::take(&mut self.state.prompt_for_debug) {
             self.state.debug_start = Some(self.line_of(prompt.statement.start));
             effects.debug = Some(inline_binds(&sql, &binds));
@@ -2549,6 +2722,27 @@ pub(crate) fn client_command(sql: &str) -> bool {
                 | "REMARK"
                 | "WHENEVER"
         )
+}
+
+/// Width of a line of text as `ui` lays it out.
+fn text_width(ui: &Ui, text: RichText) -> f32 {
+    egui::WidgetText::from(text)
+        .into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            egui::TextStyle::Body,
+        )
+        .size()
+        .x
+}
+
+/// Binds are the same in any case.
+fn same_variable(a: &Variable, b: &Variable) -> bool {
+    match (a, b) {
+        (Variable::Bind(a), Variable::Bind(b)) => a.eq_ignore_ascii_case(b),
+        _ => a == b,
+    }
 }
 
 /// Removes case-insensitive duplicates, keeping the first spelling.
@@ -3056,46 +3250,68 @@ mod tests {
         assert_eq!(object.object_type, ObjectType::PackageBody);
     }
 
-    /// The variable prompt's fields are wide enough to read what's typed,
-    /// not squeezed to the grid's first-frame column width (#109).
+    /// The panel lists the text's variables in fields wide enough to read
+    /// (#109). A run waits for the one without a value, focused, and Enter
+    /// in its field runs the statement with it (#110).
     #[test]
-    fn variable_fields_are_wide() {
+    fn variables_panel_runs_with_entered_values() {
         use egui::accesskit::Role;
         use egui_kittest::kittest::Queryable;
+        struct State {
+            w: SqlWindow,
+            execute: bool,
+            sent: Vec<(u64, String)>,
+        }
         let settings = pythia_config::Settings::default();
         let mut w = SqlWindow::new(
             "SQL 1".into(),
-            "select :email_address, &&tab from dual".into(),
+            "select :email_address from t where x = &&tab".into(),
         );
+        w.defines.insert("tab".into(), "1".into());
+        let state = State {
+            w,
+            execute: false,
+            sent: Vec::new(),
+        };
         let mut h = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(800.0, 600.0))
-            .build_ui(move |ui| {
-                let cx = DocContext {
-                    id: crate::documents::DocId(1),
-                    settings: &settings,
-                    connected: true,
-                    fetch_size: 100,
-                    connection: Some("db".into()),
-                    catalog: None,
-                    catalog_revision: 0,
-                    connections: &[],
-                    debug: None,
-                    marks: None,
-                    privilege: None,
-                    dialect: pythia_db::Dialect::ORACLE,
-                    read_only: false,
-                };
-                if w.state.prompt.is_none() {
-                    w.execute(true, &cx);
-                }
-                w.prompt_ui(ui.ctx(), &cx);
-            });
-        h.run_steps(4);
+            .with_size(egui::vec2(900.0, 600.0))
+            .build_ui_state(
+                move |ui, st: &mut State| {
+                    let cx = test_cx(&settings, false);
+                    let mut effects = Effects::default();
+                    if std::mem::take(&mut st.execute) {
+                        effects = st.w.execute(false, &cx);
+                    }
+                    effects.extend(st.w.ui(ui, &cx));
+                    st.sent.extend(sent(&effects));
+                },
+                state,
+            );
+        h.run_steps(3);
         let fields: Vec<_> = h.get_all_by_role(Role::TextInput).collect();
         assert_eq!(fields.len(), 2);
-        for field in fields {
-            assert!(field.rect().width() >= 250.0, "{:?}", field.rect());
+        assert_eq!(fields[0].value().as_deref(), Some("1"));
+        for field in &fields {
+            assert!(field.rect().width() >= 150.0, "{:?}", field.rect());
         }
+        drop(fields);
+
+        h.state_mut().execute = true;
+        h.run_steps(3);
+        assert!(h.state().w.waiting_for_values());
+        assert!(h.state().sent.is_empty());
+        h.get_by_label("Waiting for values to run the statement at line 1:");
+        let email = h.get_all_by_role(Role::TextInput).nth(1).unwrap();
+        assert!(email.is_focused());
+        email.type_text("a@b.c");
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        let st = h.state();
+        assert!(!st.w.waiting_for_values());
+        assert_eq!(st.sent.len(), 1);
+        assert_eq!(st.sent[0].1, "select :email_address from t where x = 1");
+        assert_eq!(st.w.bind_values["email_address"], Some("a@b.c".into()));
     }
 
     /// A document context on an Oracle connection for tests.
@@ -3162,7 +3378,6 @@ mod tests {
 
         // With a variable, the statement waits for its value first.
         let mut w = SqlWindow::new("t".into(), "delete from t where id = :id".into());
-        w.bind_values.insert("id".into(), Some("1".into()));
         let mut effects = w.execute(false, &cx);
         assert!(w.state.prompt.is_some());
         effects.extend(w.run_prompted(&cx));
@@ -3187,5 +3402,111 @@ mod tests {
                 .any(|m| m.text.contains("read-only"))
         );
         assert_eq!(w.profile(false).requests.len(), 1);
+    }
+
+    /// Every variable of the text, once, whatever the selection; not the
+    /// `:new` of a trigger.
+    #[test]
+    fn variables_of_the_whole_text() {
+        let text = "select :a, &&t from dual;\nselect :A, :b, '&t' from x;\n\
+                    create trigger tr before insert on x for each row begin :new.id := 1; end;\n/\n";
+        let mut w = SqlWindow::new("t".into(), text.into());
+        w.editor.select(0..10);
+        assert_eq!(
+            w.variables(),
+            [
+                Variable::Substitution("t".into()),
+                Variable::Bind("a".into()),
+                Variable::Bind("b".into()),
+            ]
+        );
+        w.substitution = false;
+        assert_eq!(
+            w.variables(),
+            [Variable::Bind("a".into()), Variable::Bind("b".into())]
+        );
+        w.editor.set_text("select 1 from dual");
+        assert!(w.variables().is_empty());
+    }
+
+    /// Statements run with the values the window has; one with a variable
+    /// that has none waits, and Execute again runs it (#110).
+    #[test]
+    fn runs_with_stored_values_and_waits_for_missing_ones() {
+        let settings = pythia_config::Settings::default();
+        let cx = test_cx(&settings, false);
+        let mut w = SqlWindow::new(
+            "t".into(),
+            "select 1 from dual;\nselect :a, :b from t where x = &x;\n".into(),
+        );
+        w.bind_values.insert("a".into(), None);
+        let first = sent(&w.execute(false, &cx));
+        assert_eq!(first.len(), 1);
+        let id = first[0].0;
+        w.on_event(
+            DbEvent::QueryStarted {
+                id,
+                columns: Vec::new(),
+            },
+            &cx,
+        );
+        let done = DbEvent::Rows {
+            id,
+            rows: Vec::new(),
+            more: false,
+            elapsed: Duration::ZERO,
+        };
+        // :b and &x have no value: the second statement waits.
+        assert_eq!(sent(&w.on_event(done, &cx)), []);
+        assert!(w.waiting_for_values() && w.is_running());
+        w.defines.insert("x".into(), "3".into());
+        let effects = w.execute(false, &cx);
+        let Some((_, DbRequest::Execute { sql, binds, .. })) = effects.requests.first() else {
+            panic!("not run");
+        };
+        assert_eq!(sql, "select :a, :b from t where x = 3");
+        // :a is NULL; :b ran empty and keeps that.
+        assert_eq!(
+            binds,
+            &[
+                ("a".to_owned(), None),
+                ("b".to_owned(), Some(String::new()))
+            ]
+        );
+        assert_eq!(w.bind_values["b"], Some(String::new()));
+        assert!(!w.waiting_for_values());
+
+        // Values known: no waiting.
+        let mut w = SqlWindow::new("t".into(), "select :a from dual".into());
+        w.bind_values.insert("A".to_lowercase(), Some("7".into()));
+        let effects = w.execute(false, &cx);
+        assert_eq!(sent(&effects).len(), 1);
+
+        // Cancel drops the statement and the rest of the script.
+        let mut w = SqlWindow::new(
+            "t".into(),
+            "select :z from dual;\nselect 2 from dual;\n".into(),
+        );
+        w.execute(false, &cx);
+        assert!(w.waiting_for_values());
+        w.cancel_waiting();
+        assert!(!w.is_running() && w.state.queue.is_empty());
+    }
+
+    /// Debug waits for values too, and runs the block with them inlined.
+    #[test]
+    fn debug_waits_for_values() {
+        let settings = pythia_config::Settings::default();
+        let cx = test_cx(&settings, false);
+        let mut w = SqlWindow::new("t".into(), "begin\n  p(:n, :s);\nend;".into());
+        w.bind_values.insert("s".into(), Some("x".into()));
+        assert!(w.debug_current().debug.is_none());
+        assert!(w.waiting_for_values());
+        w.bind_values.insert("n".into(), Some("5".into()));
+        let effects = w.execute(false, &cx);
+        assert_eq!(effects.debug.as_deref(), Some("begin\n  p(5, 'x');\nend;"));
+        assert!(effects.requests.is_empty());
+        // Known values: straight to the debugger.
+        assert!(w.debug_current().debug.is_some());
     }
 }

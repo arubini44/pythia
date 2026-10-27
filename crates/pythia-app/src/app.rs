@@ -2154,6 +2154,15 @@ impl PythiaApp {
             Command::DebugStepOut => self.debug.command(pythia_debugger::DebugCommand::StepOut),
             Command::DebugStop => self.debug.stop(),
             Command::ShowDebugger => self.open_tab(Tab::Debugger),
+            Command::ShowVariables => {
+                if let Some(id) = self.focused
+                    && let Some(w) = self.docs.get_mut(&id).and_then(Document::sql_window)
+                {
+                    w.show_variables = !w.show_variables;
+                } else {
+                    self.log("The Variables panel belongs to a SQL window");
+                }
+            }
             Command::OpenFile => self.file_dialog(FileAction::Open, None),
             Command::SaveFile | Command::SaveFileAs => {
                 let Some(id) = self.focused else { return };
@@ -2244,6 +2253,11 @@ impl PythiaApp {
                 }
             }
             Command::Cancel => {
+                if let Some(id) = self.focused
+                    && let Some(w) = self.docs.get_mut(&id).and_then(Document::sql_window)
+                {
+                    w.cancel_waiting();
+                }
                 if let Some((id, name)) = self.focused_session()
                     && let Some(s) = self.conns.get(&name).and_then(|c| c.docs.get(&id))
                 {
@@ -3281,6 +3295,7 @@ impl PythiaApp {
                             Command::ShowBrowser,
                             Command::ShowLog,
                             Command::ShowAssistant,
+                            Command::ShowVariables,
                         ],
                         &[
                             Command::ThemeSystem,
@@ -3308,6 +3323,9 @@ impl PythiaApp {
         let focused_id = self.focused;
         let focused = focused_id.and_then(|id| self.docs.get(&id));
         let running = focused.is_some_and(Document::is_busy);
+        // Execute runs a statement that waits for values.
+        let waiting =
+            focused.is_some_and(|d| matches!(&d.kind, DocKind::Sql(w) if w.waiting_for_values()));
         let is_sql = focused.is_some_and(|d| matches!(d.kind, DocKind::Sql(_)));
         let is_program = focused.is_some_and(|d| matches!(d.kind, DocKind::Program(_)));
         let connection = self.current_connection();
@@ -3460,7 +3478,7 @@ impl PythiaApp {
             // Running statements, or compiling in a program window.
             let not_running = if !is_sql && !is_program {
                 Err("This window doesn't run statements")
-            } else if running {
+            } else if running && !waiting {
                 Err("Running")
             } else {
                 need_connection()

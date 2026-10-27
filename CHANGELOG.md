@@ -17,6 +17,17 @@ All notable changes to Pythia are documented here. The format follows
   the editor. A program window with unsaved changes notes that the line is
   the one in the database (#112).
 
+### Changed
+- SQL windows show their bind and substitution variables in a Variables
+  panel next to the editor instead of asking in a dialog before each run
+  (#110). The values (or NULL) stay visible and can be changed at any
+  time; runs use them as they are. Only a statement with a variable that
+  has no value yet waits, with that variable focused in the panel, until
+  Execute, Enter or F8 (Break cancels). Debug works the same way. The
+  panel shows while the text has variables; *Variables* below the editor
+  or *View → Variables* hides or shows it. `&var` keeps its value for
+  the window like `&&var`, instead of being asked for every run.
+
 ### Fixed
 - Trigger compile errors were marked too high, by the number of lines of
   the trigger's header: Oracle counts their lines from the trigger's body.

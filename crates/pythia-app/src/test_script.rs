@@ -1,7 +1,7 @@
 //! "Test" scripts: an anonymous block that calls a procedure or function.
 //!
-//! IN parameters become bind variables (prompted, values remembered per
-//! window), OUT/IN OUT parameters and function results are declared as
+//! IN parameters become bind variables (entered in the SQL window's
+//! Variables panel, which keeps them), OUT/IN OUT parameters and function results are declared as
 //! locals and printed with DBMS_OUTPUT.
 
 use pythia_lsp_core::{CatalogMember, MemberKind, ParamMode};
@@ -35,7 +35,7 @@ pub fn test_block(qualified: &str, member: &CatalogMember) -> String {
 
     let mut declare = Vec::new();
     let mut args = Vec::new();
-    // IN OUT locals start with the prompted bind value.
+    // IN OUT locals start with the bind value.
     let mut init = Vec::new();
     for p in &member.params {
         let name = p.name.to_lowercase();
