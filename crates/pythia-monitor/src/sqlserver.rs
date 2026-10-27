@@ -11,6 +11,7 @@
 use pythia_db::{Client, DbError};
 
 use crate::cells::{all_counts, int, num, opt, plural, text, top_counts};
+use crate::connections::{Connection, ConnectionList};
 use crate::insights::{Insight, Severity};
 use crate::queries::{SectionError, SystemEvent};
 use crate::ui::style::{bytes, duration};
@@ -1133,6 +1134,93 @@ pub fn plan_outline(xml: &str) -> Vec<String> {
         }
     }
     out.into_iter().map(|op| op.line).collect()
+}
+
+/// Every session, for the Sessions tab: idle ones too, system sessions only
+/// with `background`, and who waits for whom.
+pub fn connections(c: &mut dyn Client, background: bool) -> Result<ConnectionList, DbError> {
+    let user_only = if background {
+        ""
+    } else {
+        "and s.is_user_process = 1"
+    };
+    // Requests, statements and transactions need VIEW SERVER STATE;
+    // without, only the login's own sessions are listed, from
+    // dm_exec_sessions alone.
+    let full = format!(
+        "select s.session_id, s.login_name, s.host_name, s.program_name, \
+                db_name(s.database_id), coalesce(r.status, s.status), r.wait_type, \
+                case when r.session_id is null \
+                     then datediff(second, s.last_request_end_time, sysdatetime()) \
+                     else r.total_elapsed_time / 1000.0 end, \
+                (select datediff(second, min(at.transaction_begin_time), sysdatetime()) \
+                   from sys.dm_tran_session_transactions st \
+                   join sys.dm_tran_active_transactions at \
+                     on at.transaction_id = st.transaction_id \
+                  where st.session_id = s.session_id), \
+                r.blocking_session_id, r.wait_time / 1000.0, \
+                case when r.session_id is null then lt.text else {STATEMENT} end, \
+                cast(s.is_user_process as int), r.command \
+           from sys.dm_exec_sessions s \
+           left join sys.dm_exec_requests r on r.session_id = s.session_id \
+           left join sys.dm_exec_connections c on c.session_id = s.session_id \
+           outer apply sys.dm_exec_sql_text(r.sql_handle) t \
+           outer apply sys.dm_exec_sql_text(c.most_recent_sql_handle) lt \
+          where s.session_id <> @@spid {user_only}"
+    );
+    let mut list = ConnectionList::default();
+    let rows = match c.query(&full, &[]) {
+        Err(e) if is_privilege_error(&e) => {
+            list.notes.push(format!(
+                "Only this login's sessions are listed, without their statements and \
+                 transactions: the others need {SERVER_STATE} (on SQL Server 2022, VIEW \
+                 SERVER PERFORMANCE STATE)."
+            ));
+            c.query(
+                &format!(
+                    "select s.session_id, s.login_name, s.host_name, s.program_name, \
+                            db_name(s.database_id), s.status, null, \
+                            datediff(second, s.last_request_end_time, sysdatetime()), \
+                            null, null, null, null, cast(s.is_user_process as int), null \
+                       from sys.dm_exec_sessions s \
+                      where s.session_id <> @@spid {user_only}"
+                ),
+                &[],
+            )?
+        }
+        rows => rows?,
+    };
+    list.rows = rows
+        .iter()
+        .map(|r| {
+            // Negative: an orphaned distributed transaction, a latch.
+            let blocked_by = Some(int(r, 9)).filter(|b| *b > 0);
+            // A request (its command), or without the privilege the
+            // session's status.
+            let running = opt(r, 13).is_some() || text(r, 5) == "running";
+            Connection {
+                id: int(r, 0),
+                user: opt(r, 1),
+                host: opt(r, 2).filter(|h| !h.is_empty()),
+                database: opt(r, 4),
+                program: opt(r, 3).filter(|p| !p.is_empty()),
+                status: text(r, 5),
+                active: running,
+                wait: opt(r, 6).or_else(|| opt(r, 13)),
+                seconds: num(r, 7),
+                transaction_secs: opt(r, 8).map(|_| num(r, 8)),
+                blocked_by,
+                wait_secs: if blocked_by.is_some() {
+                    num(r, 10)
+                } else {
+                    0.0
+                },
+                query: opt(r, 11).filter(|q| !q.is_empty()),
+                background: int(r, 12) == 0,
+            }
+        })
+        .collect();
+    Ok(list)
 }
 
 /// Ends a session (`KILL`): its connection closes and its open transaction

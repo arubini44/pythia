@@ -199,7 +199,8 @@ impl Command {
                 Feature::ObjectEditors
             }
             MonitorDashboard => Feature::Dashboard,
-            MonitorSessions | MonitorBlocking | MonitorAwr | MonitorTrace => Feature::Monitor,
+            MonitorSessions | MonitorBlocking => Feature::Sessions,
+            MonitorAwr | MonitorTrace => Feature::Monitor,
             AiAnalyzePlan => Feature::ExplainPlan,
             _ => return None,
         })

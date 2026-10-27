@@ -21,6 +21,7 @@
 //! ```
 
 mod awr;
+mod connections;
 mod dashboard;
 mod detail;
 mod history;
@@ -41,10 +42,12 @@ use std::path::PathBuf;
 use egui::{RichText, Ui};
 use pythia_db::{DbError, DbKind, Dialect, RunFn, TaskFn, TaskResult};
 
+use crate::connections::{ConnectionFilter, ConnectionList};
 use crate::queries::{self, Capabilities};
 
 pub use crate::queries::DetailTab;
 pub use awr::AwrView;
+pub use connections::ConnectionsView;
 pub use dashboard::{DashboardView, Refresh};
 pub use detail::SessionDetailView;
 pub use mysql::MySqlDashboardView;
@@ -190,6 +193,14 @@ pub(crate) enum Want {
     },
     /// The sessions using the most PGA.
     PgaUsers,
+    /// Every session of MySQL, PostgreSQL or SQL Server, the server's own
+    /// with `background`.
+    Connections {
+        background: bool,
+    },
+    /// Switch to their list, filtered to one user, host, database or
+    /// program (handled by the driver, no task).
+    ShowConnections(Option<ConnectionFilter>),
     /// Open the details tab of a connection: a MySQL thread, a PostgreSQL
     /// backend, a SQL Server session (handled by the driver, no task).
     OpenConnection {
@@ -327,6 +338,7 @@ enum Job {
     PostgresDashboard,
     SqlServerDashboard,
     Sessions,
+    Connections,
     Detail(i64, i64),
     SqlDetail(String),
     EventHistogram(String),
@@ -360,9 +372,11 @@ impl Wants {
 
 pub struct Monitor {
     /// The connection's database: MySQL, PostgreSQL and SQL Server have
-    /// their dashboard only.
+    /// their dashboard and sessions only.
     dialect: Dialect,
     tab: MonitorTab,
+    /// Where closing a details tab goes back to.
+    list_tab: MonitorTab,
     show_tabs: bool,
     caps: Option<Result<Capabilities, String>>,
     caps_pending: bool,
@@ -371,6 +385,8 @@ pub struct Monitor {
     pub postgres: PostgresDashboardView,
     pub sqlserver: SqlServerDashboardView,
     pub sessions: SessionsView,
+    /// The sessions of MySQL, PostgreSQL and SQL Server.
+    pub connections: ConnectionsView,
     pub awr: AwrView,
     pub trace: TraceView,
     details: Vec<DetailView>,
@@ -396,6 +412,7 @@ impl Monitor {
         Self {
             dialect: Dialect::ORACLE,
             tab,
+            list_tab: MonitorTab::Sessions,
             show_tabs: true,
             caps: None,
             caps_pending: false,
@@ -404,6 +421,7 @@ impl Monitor {
             postgres: PostgresDashboardView::default(),
             sqlserver: SqlServerDashboardView::default(),
             sessions: SessionsView::default(),
+            connections: ConnectionsView::default(),
             awr: AwrView::default(),
             trace: TraceView::default(),
             details: Vec::new(),
@@ -423,12 +441,15 @@ impl Monitor {
     }
 
     /// The connection's database. A MySQL, PostgreSQL or SQL Server
-    /// connection gets its dashboard, whatever the tab.
+    /// connection gets its dashboard and sessions; other tabs show the
+    /// dashboard.
     pub fn set_dialect(&mut self, dialect: Dialect) {
         self.dialect = dialect;
+        self.connections.set_kind(dialect.kind());
     }
 
-    /// The database has its dashboard (and what opens from it) only.
+    /// The database has its dashboard and sessions (and what opens from
+    /// them) only.
     fn dashboard_only(&self) -> bool {
         self.dialect.kind() != DbKind::Oracle
     }
@@ -485,16 +506,24 @@ impl Monitor {
         let mut out = MonitorOutput::default();
 
         if self.dashboard_only() {
-            // The dashboard, and the connections opened from it.
-            if !self.details.is_empty() || self.toast.is_some() {
+            // The dashboard, the sessions, and the connections opened from
+            // them.
+            if matches!(self.tab, MonitorTab::Awr | MonitorTab::Trace) {
+                self.tab = MonitorTab::Dashboard;
+            }
+            if self.show_tabs {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.tab, MonitorTab::Dashboard, "Dashboard");
+                    ui.selectable_value(&mut self.tab, MonitorTab::Sessions, "Sessions");
                     self.detail_tabs(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         self.toast_ui(ui, now);
                     });
                 });
                 ui.separator();
+            }
+            if matches!(self.tab, MonitorTab::Dashboard | MonitorTab::Sessions) {
+                self.list_tab = self.tab;
             }
             match self.tab {
                 MonitorTab::Detail(i) => {
@@ -503,9 +532,10 @@ impl Monitor {
                         .get_mut(i)
                         .is_some_and(|d| d.connection_ui(ui, &mut wants));
                     if !shown {
-                        self.tab = MonitorTab::Dashboard;
+                        self.tab = self.list_tab;
                     }
                 }
+                MonitorTab::Sessions => self.connections.ui(ui, now, &mut wants),
                 _ => match self.dialect.kind() {
                     DbKind::Postgres => self.postgres.ui(ui, now, &mut wants),
                     DbKind::SqlServer => self.sqlserver.ui(ui, now, &mut wants),
@@ -572,9 +602,18 @@ impl Monitor {
                 self.sessions.show_table(filter);
                 continue;
             }
+            if let Want::ShowConnections(filter) = want {
+                self.tab = MonitorTab::Sessions;
+                self.connections.show_table(filter);
+                continue;
+            }
             if let Want::ShowBlocking = want {
                 self.tab = MonitorTab::Sessions;
-                self.sessions.show_blocking();
+                if self.dashboard_only() {
+                    self.connections.show_blocking();
+                } else {
+                    self.sessions.show_blocking();
+                }
                 continue;
             }
             if let Want::OpenDetail { sid, serial, tab } = want {
@@ -645,7 +684,7 @@ impl Monitor {
         if let Some(i) = close {
             self.details.remove(i);
             let back = if self.dashboard_only() {
-                MonitorTab::Dashboard
+                self.list_tab
             } else {
                 MonitorTab::Sessions
             };
@@ -717,6 +756,21 @@ impl Monitor {
                 task: MonitorTask::Client(Box::new(move |c| {
                     boxed(Ok(crate::sqlserver::snapshot(c, storage)))
                 })),
+            });
+        }
+        if let Want::Connections { background } = want {
+            let task: RunFn = match self.dialect.kind() {
+                DbKind::Postgres => {
+                    Box::new(move |c| boxed(crate::postgres::connections(c, background)))
+                }
+                DbKind::SqlServer => {
+                    Box::new(move |c| boxed(crate::sqlserver::connections(c, background)))
+                }
+                _ => Box::new(move |c| boxed(crate::mysql::connections(c, background))),
+            };
+            return Some(MonitorRequest {
+                token: self.token(Job::Connections),
+                task: MonitorTask::Client(task),
             });
         }
         if let Want::ConnectionDetail { id } = want {
@@ -928,6 +982,8 @@ impl Monitor {
             | Want::Analyze(_)
             | Want::Act(_)
             | Want::OpenConnection { .. }
+            | Want::Connections { .. }
+            | Want::ShowConnections(_)
             | Want::ConnectionDetail { .. }
             | Want::KillConnection { .. }
             | Want::MySqlDashboard { .. }
@@ -966,6 +1022,17 @@ impl Monitor {
             Job::PostgresDashboard => self.postgres.on_snapshot(take(result), now),
             Job::SqlServerDashboard => self.sqlserver.on_snapshot(take(result), now),
             Job::Sessions => self.sessions.on_sessions(take(result)),
+            Job::Connections => {
+                let result =
+                    take::<ConnectionList>(result).map_err(|e| match self.dialect.kind() {
+                        DbKind::Postgres => {
+                            crate::postgres::explain(&e, crate::postgres::STATS_ROLE)
+                        }
+                        DbKind::SqlServer => crate::sqlserver::explain(&e),
+                        _ => crate::mysql::explain(&e, "the PROCESS privilege"),
+                    });
+                self.connections.on_connections(result);
+            }
             Job::Detail(sid, serial) => {
                 let result = take(result);
                 if let Some(d) = self
@@ -1043,6 +1110,7 @@ impl Monitor {
                 Ok(()) => {
                     self.toast(message, false, now);
                     self.sessions.refresh_now();
+                    self.connections.refresh_now();
                     for d in self.session_details() {
                         d.refresh();
                     }

@@ -7,6 +7,17 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Monitor → Sessions** and **Blocking Sessions** for MySQL/MariaDB,
+  PostgreSQL and SQL Server (#131). Every session is listed, idle ones too
+  (the server's own with *Background*), with its user, host, database,
+  program, status, wait, time, open transaction, blocker and statement;
+  filter, sort, and *Active only* as on Oracle. The blocking tree shows who
+  waits for whose locks, idle blockers with an open transaction marked.
+  Double-click opens the session's details; the menu cancels its statement
+  or ends the session after asking, and opens the statement in a SQL
+  window. The dashboard's "connections by …" bars open the sessions they
+  count. Without `PROCESS`, `pg_read_all_stats` or `VIEW SERVER STATE`,
+  the list says what is missing.
 - The object browser lists users and roles on MySQL/MariaDB, PostgreSQL
   and SQL Server too (#130), not only on Oracle. MySQL's users show as
   `user@host`; without `SELECT` on `mysql.user` the browser shows your own

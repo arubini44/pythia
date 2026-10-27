@@ -12,6 +12,7 @@
 use pythia_db::{Cell, Client, DbError};
 
 use crate::cells::{all_counts, int, num, opt, plural, text, top_counts};
+use crate::connections::{Connection, ConnectionList};
 use crate::insights::{Insight, Severity};
 use crate::queries::SectionError;
 use crate::ui::style::{bytes, compact, duration};
@@ -935,6 +936,82 @@ pub fn backend_detail(c: &mut dyn Client, pid: i64) -> BackendDetail {
     );
     d.errors = errors;
     d
+}
+
+/// Every session, for the Sessions tab: idle ones too, the server's own
+/// processes only with `background`, and who waits for whose locks.
+pub fn connections(c: &mut dyn Client, background: bool) -> Result<ConnectionList, DbError> {
+    // pg_locks.waitstart came with PostgreSQL 14; before, the statement's
+    // start stands in.
+    let sql = |waitstart: &str| {
+        format!(
+            "select a.pid, a.usename, a.datname, a.application_name, \
+                    coalesce(a.client_hostname, host(a.client_addr), 'local'), \
+                    a.state, a.wait_event_type || ': ' || a.wait_event, \
+                    extract(epoch from now() - case when a.state = 'active' \
+                        then a.query_start else a.state_change end), \
+                    extract(epoch from now() - a.xact_start), \
+                    a.query, a.backend_type, b.pid, \
+                    extract(epoch from now() - coalesce(b.waitstart, a.query_start)) \
+               from pg_stat_activity a \
+               left join lateral ( \
+                    select (pg_blocking_pids(a.pid))[1] as pid, {waitstart} as waitstart \
+                     where a.wait_event_type = 'Lock') b on true \
+              where a.pid <> pg_backend_pid()"
+        )
+    };
+    let rows = c
+        .query(
+            &sql("(select min(l.waitstart) from pg_locks l \
+                    where l.pid = a.pid and not l.granted)"),
+            &[],
+        )
+        .or_else(|e| match sqlstate(&e) {
+            Some("42703") => c.query(&sql("null::timestamptz"), &[]),
+            _ => Err(e),
+        })?;
+    let mut list = ConnectionList::default();
+    let mut hidden = false;
+    for r in &rows {
+        let system = match opt(r, 10).as_deref() {
+            Some(kind) => kind != "client backend",
+            // Hidden with the statement without pg_read_all_stats: a
+            // client's has its user, the server's own processes have none.
+            None => opt(r, 1).is_none(),
+        };
+        if system && !background {
+            continue;
+        }
+        hidden |= opt(r, 9).as_deref() == Some(HIDDEN);
+        let state = opt(r, 5);
+        let blocked_by = opt(r, 11).map(|_| int(r, 11));
+        list.rows.push(Connection {
+            id: int(r, 0),
+            user: opt(r, 1),
+            host: opt(r, 4),
+            database: opt(r, 2),
+            program: opt(r, 3).filter(|a| !a.is_empty()),
+            active: state.as_deref() == Some("active"),
+            status: state.or_else(|| opt(r, 10)).unwrap_or_default(),
+            wait: opt(r, 6),
+            seconds: num(r, 7),
+            transaction_secs: float(r, 8),
+            blocked_by,
+            wait_secs: if blocked_by.is_some() {
+                num(r, 12)
+            } else {
+                0.0
+            },
+            query: opt(r, 9).filter(|q| q.as_str() != HIDDEN && !q.is_empty()),
+            background: system,
+        });
+    }
+    if hidden {
+        list.notes.push(format!(
+            "Other users' statements are hidden: they need {STATS_ROLE}."
+        ));
+    }
+    Ok(list)
 }
 
 /// Signals a backend: cancels the statement it runs, or (`terminate`) ends

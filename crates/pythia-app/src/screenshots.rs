@@ -5190,6 +5190,33 @@ fn mysql_dashboard() {
     }
     assert_eq!(h.state().test_focused_title().as_deref(), Some("Dashboard"));
     save(&mut h, "mysql-dashboard");
+    sessions(&mut h, "mysql");
+}
+
+/// Monitor: Sessions on a MySQL, PostgreSQL or SQL Server connection
+/// (#131): every session, idle ones too, in a tab of its own; a session
+/// opens its details. Screenshots are named after `tag`.
+fn sessions(h: &mut Harness<'_, PythiaApp>, tag: &str) {
+    use crate::commands::Command;
+    h.state_mut().test_command(Command::MonitorSessions);
+    let start = Instant::now();
+    while h.query_by_label_contains(" sessions · ").is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "timed out waiting for the sessions"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("Sessions"));
+    assert!(h.query_by_label("Blocking tree").is_some());
+    assert!(h.query_by_label("Statement").is_some());
+    assert!(
+        h.query_by_label_contains("Sessions are not available").is_none(),
+        "the list loads"
+    );
+    save(h, &format!("{tag}-sessions"));
 }
 
 /// The PostgreSQL dashboard (`PYTHIA_TEST_POSTGRES`, #92): server KPIs,
@@ -5251,6 +5278,7 @@ fn postgres_dashboard() {
     }
     assert_eq!(h.state().test_focused_title().as_deref(), Some("Dashboard"));
     save(&mut h, "postgres-dashboard");
+    sessions(&mut h, "postgres");
 }
 
 /// A MySQL connection without a database (#81): the toolbar, status bar
@@ -5405,7 +5433,7 @@ select id, customer, total from app_orders where total < @limit order by id;
     h.get_by_label("Monitor").click();
     h.run_steps(2);
     assert!(h.query_by_label_contains("Dashboard").is_some());
-    assert!(h.query_by_label_contains("Blocking Sessions").is_none());
+    assert!(h.query_by_label_contains("Blocking Sessions").is_some());
     assert!(h.query_by_label_contains("AWR").is_none());
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
@@ -5418,10 +5446,10 @@ select id, customer, total from app_orders where total < @limit order by id;
     h.run_steps(2);
 
     // A shortcut to something hidden explains instead of running it.
-    h.state_mut().test_command(Command::MonitorSessions);
+    h.state_mut().test_command(Command::MonitorAwr);
     assert_eq!(
         h.state().test_log().last().map(String::as_str),
-        Some("Sessions isn't available for MySQL connections")
+        Some("AWR / ASH Reports isn't available for MySQL connections")
     );
 
     // The browser has MySQL's folders.
@@ -5534,16 +5562,16 @@ impl OtherDatabase<'_> {
         });
 
         // Oracle-only menus are gone; a shortcut to one explains. Monitor
-        // has the dashboard (#92).
+        // has the dashboard (#92) and sessions (#131).
         for menu in ["Debug", "Reports"] {
             assert!(h.query_by_label(menu).is_none(), "{menu}");
         }
         assert!(h.query_by_label("Monitor").is_some());
-        h.state_mut().test_command(Command::MonitorSessions);
+        h.state_mut().test_command(Command::MonitorAwr);
         assert_eq!(
             h.state().test_log().last().cloned(),
             Some(format!(
-                "Sessions isn't available for {} connections",
+                "AWR / ASH Reports isn't available for {} connections",
                 self.product
             ))
         );
@@ -5799,6 +5827,7 @@ fn sqlserver_dashboard() {
     }
     assert_eq!(h.state().test_focused_title().as_deref(), Some("Dashboard"));
     save(&mut h, "sqlserver-dashboard");
+    sessions(&mut h, "sqlserver");
 }
 
 /// An error raised in a package called from a trigger: one click opens the
