@@ -13,7 +13,7 @@ use pythia_ui::icons::{Icon, icon_button, icon_text_button};
 use pythia_ui::{GridState, ResultGrid, selection_data, shown_data, to_tsv};
 use serde::{Deserialize, Serialize};
 
-use crate::documents::{DocContext, Effects, Target, request_id};
+use crate::documents::{DocContext, Effects, ObjectRef, OpenRequest, Target, request_id};
 use crate::editor::{Editor, Marker, MarkerKind};
 
 #[derive(Serialize, Deserialize)]
@@ -104,7 +104,13 @@ pub struct RunState {
     /// Where the connection's scripts end their statements (from the
     /// document context, each frame).
     pub syntax: Syntax,
+    /// Error stacks to look up, not sent yet.
+    stack_lookups: Vec<StackLookup>,
 }
+
+/// A task id and the `(owner, name, line)` of each stored unit in an error's
+/// stack.
+type StackLookup = (u64, Vec<(String, String, u32)>);
 
 #[derive(Debug, Clone)]
 pub struct PendingStatement {
@@ -177,6 +183,39 @@ pub struct Message {
     pub text: String,
     /// Clicking the message selects this range in the editor.
     pub jump: Option<Range<usize>>,
+    /// The lines of an Oracle error's PL/SQL stack that lead to code.
+    pub stack: Vec<Frame>,
+}
+
+/// An `ORA-06512` line of an error, and the code it points at (#112).
+pub struct Frame {
+    /// Index of the frame's line in the message text.
+    pub text_line: usize,
+    pub target: FrameTarget,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameTarget {
+    /// The task looking up the stored unit's code.
+    Pending(u64),
+    /// A line of a stored unit's part, and its text.
+    Program {
+        object: ObjectRef,
+        line: usize,
+        text: String,
+    },
+    /// A line of the statement that ran, as a range in the editor, and its
+    /// text.
+    Statement { range: Range<usize>, text: String },
+    /// Why the code can't be shown.
+    Hidden(String),
+}
+
+impl FrameTarget {
+    /// The code can be shown.
+    pub fn opens(&self) -> bool {
+        matches!(self, Self::Program { .. } | Self::Statement { .. })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1056,6 +1095,7 @@ impl SqlWindow {
             level: Level::Info,
             text: text.into(),
             jump: None,
+            stack: Vec::new(),
         });
     }
 
@@ -1064,6 +1104,7 @@ impl SqlWindow {
             level: Level::Warning,
             text: text.into(),
             jump: None,
+            stack: Vec::new(),
         });
     }
 
@@ -1082,15 +1123,131 @@ impl SqlWindow {
         if let Some(jump) = &jump {
             self.editor.select(jump.clone());
         }
+        let stack = self.stack(error);
         self.state.messages.push(Message {
             level: Level::Error,
             text,
             jump,
+            stack,
         });
         self.state.bottom = BottomTab::Messages;
     }
 
+    /// The frames of an error's PL/SQL stack that lead to code: stored units
+    /// (looked up by a task [`Self::on_event`] sends) and the line of the
+    /// statement that ran. Other anonymous blocks ran by dynamic SQL.
+    fn stack(&mut self, error: &DbError) -> Vec<Frame> {
+        let frames = error.stack();
+        let id = request_id();
+        let mut units = Vec::new();
+        let mut stack = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            let target = match &frame.unit {
+                Some((owner, name)) => {
+                    units.push((owner.clone(), name.clone(), frame.line));
+                    FrameTarget::Pending(id)
+                }
+                None if i + 1 == frames.len() => match self.statement_line(frame.line as usize) {
+                    Some((range, text)) => FrameTarget::Statement { range, text },
+                    None => continue,
+                },
+                None => continue,
+            };
+            stack.push(Frame {
+                text_line: frame.text_line,
+                target,
+            });
+        }
+        if !units.is_empty() {
+            self.state.stack_lookups.push((id, units));
+        }
+        stack
+    }
+
+    /// Line `line` of the running statement in the editor: the range of its
+    /// text and the text.
+    fn statement_line(&self, line: usize) -> Option<(Range<usize>, String)> {
+        let running = self
+            .state
+            .running
+            .as_ref()
+            .filter(|r| r.start != usize::MAX)?;
+        let text = self.editor.text();
+        let first = text.get(..running.start)?.matches('\n').count() + 1;
+        let mut start = crate::editor::line_start(text, first + line.max(1) - 1);
+        if line <= 1 {
+            start = start.max(running.start);
+        }
+        let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+        let code = text[start..end].trim_end();
+        let indent = code.len() - code.trim_start().len();
+        Some((start + indent..start + code.len(), code.trim().to_owned()))
+    }
+
     pub fn on_event(&mut self, event: DbEvent, cx: &DocContext) -> Effects {
+        let mut effects = self.handle_event(event, cx);
+        for (id, units) in std::mem::take(&mut self.state.stack_lookups) {
+            let task: pythia_db::TaskFn = Box::new(move |conn: &pythia_db::oracle::Connection| {
+                let found: Vec<_> = units
+                    .into_iter()
+                    .map(|(owner, name, line)| {
+                        let source = pythia_db::error_stack::locate(conn, &owner, &name, line)
+                            .unwrap_or_else(|e| {
+                                pythia_db::error_stack::FrameSource::Hidden(e.text())
+                            });
+                        (owner, name, source)
+                    })
+                    .collect();
+                Ok(Box::new(found) as Box<dyn std::any::Any + Send>)
+            });
+            effects.request(Target::Main, DbRequest::Task { id, task });
+        }
+        effects
+    }
+
+    /// The code of an error stack's stored units, found: the frames waiting
+    /// for task `id` lead there.
+    fn stack_found(&mut self, id: u64, result: pythia_db::TaskResult) {
+        use pythia_db::error_stack::FrameSource;
+        let mut found = match result.map(|any| any.downcast::<Vec<(String, String, FrameSource)>>())
+        {
+            Ok(Ok(found)) => Ok(found.into_iter()),
+            Ok(Err(_)) => Err("unexpected result".to_owned()),
+            Err(e) => Err(e.text()),
+        };
+        let frames = self
+            .state
+            .messages
+            .iter_mut()
+            .flat_map(|m| &mut m.stack)
+            .filter(|f| f.target == FrameTarget::Pending(id));
+        for frame in frames {
+            frame.target = match found.as_mut().map(Iterator::next) {
+                Ok(Some((
+                    owner,
+                    name,
+                    FrameSource::Source {
+                        object_type,
+                        line,
+                        text,
+                    },
+                ))) => FrameTarget::Program {
+                    object: ObjectRef {
+                        owner,
+                        name,
+                        object_type,
+                    },
+                    line: line as usize,
+                    text,
+                },
+                Ok(Some((_, _, FrameSource::Hidden(why)))) => FrameTarget::Hidden(why),
+                Ok(None) => FrameTarget::Hidden("unexpected result".into()),
+                Err(why) => FrameTarget::Hidden(why.clone()),
+            };
+        }
+    }
+
+    fn handle_event(&mut self, event: DbEvent, cx: &DocContext) -> Effects {
         let mut effects = Effects::default();
         match event {
             DbEvent::QueryStarted { id, columns } => {
@@ -1185,6 +1342,7 @@ impl SqlWindow {
                             level: Level::Error,
                             text: format!("Execute to file failed: {e}"),
                             jump: None,
+                            stack: Vec::new(),
                         });
                     }
                 }
@@ -1296,6 +1454,7 @@ impl SqlWindow {
                                  Nothing after it was applied ({skipped} statement(s) skipped); roll back or refresh and retry."
                             ),
                             jump: None,
+                            stack: Vec::new(),
                         });
                         self.state.bottom = BottomTab::Messages;
                         return effects;
@@ -1390,6 +1549,16 @@ impl SqlWindow {
                 self.state.queue.clear();
                 self.error(&error);
             }
+            DbEvent::TaskDone { id, result }
+                if self
+                    .state
+                    .messages
+                    .iter()
+                    .flat_map(|m| &m.stack)
+                    .any(|f| f.target == FrameTarget::Pending(id)) =>
+            {
+                self.stack_found(id, result);
+            }
             _ => {}
         }
         effects
@@ -1418,6 +1587,7 @@ impl SqlWindow {
                 level,
                 text: format!("  {}:{}  {}", e.line, e.position, e.text),
                 jump: Some(col..col + 1),
+                stack: Vec::new(),
             });
             markers.push(Marker {
                 line,
@@ -1573,16 +1743,19 @@ impl SqlWindow {
                     level: Level::Info,
                     text: format!("Exported to {}", path.display()),
                     jump: None,
+                    stack: Vec::new(),
                 },
                 Ok(None) => Message {
                     level: Level::Info,
                     text: "Export cancelled".into(),
                     jump: None,
+                    stack: Vec::new(),
                 },
                 Err(e) => Message {
                     level: Level::Error,
                     text: format!("Export failed: {e}"),
                     jump: None,
+                    stack: Vec::new(),
                 },
             };
             state.messages.push(message);
@@ -1894,16 +2067,39 @@ impl SqlWindow {
             },
             BottomTab::Result(_) | BottomTab::Messages => {
                 let mut jump = None;
-                if state.messages.iter().any(|m| m.level == Level::Error)
+                let mut open = None;
+                // The innermost frame of the last error whose code can be
+                // shown.
+                let raised = state
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.level == Level::Error)
+                    .and_then(|m| m.stack.iter().find(|f| f.target.opens()))
+                    .map(|f| f.target.clone());
+                let fix = state.messages.iter().any(|m| m.level == Level::Error)
                     && state.running.is_none()
-                    && crate::ai::button(
-                        ui,
-                        &cx.settings.ai,
-                        "Fix with AI",
-                        "Find the cause of the error and suggest a corrected statement",
-                    )
-                {
-                    effects.commands.push(crate::commands::Command::AiFix);
+                    && !cx.settings.ai.backends.is_empty();
+                if fix || raised.is_some() {
+                    ui.horizontal(|ui| {
+                        if fix
+                            && crate::ai::button(
+                                ui,
+                                &cx.settings.ai,
+                                "Fix with AI",
+                                "Find the cause of the error and suggest a corrected statement",
+                            )
+                        {
+                            effects.commands.push(crate::commands::Command::AiFix);
+                        }
+                        if let Some(target) = raised
+                            && icon_text_button(ui, Icon::Package, "Open where raised")
+                                .on_hover_ui(|ui| frame_hint(ui, &target))
+                                .clicked()
+                        {
+                            open = Some(target);
+                        }
+                    });
                 }
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
@@ -1915,6 +2111,12 @@ impl SqlWindow {
                                 Level::Warning => ui.visuals().warn_fg_color,
                                 Level::Info => ui.visuals().text_color(),
                             };
+                            if !m.stack.is_empty() {
+                                if let Some(target) = stack_message_ui(ui, m, color, &mut jump) {
+                                    open = Some(target);
+                                }
+                                continue;
+                            }
                             let text = RichText::new(&m.text).monospace().color(color);
                             match &m.jump {
                                 Some(range) => {
@@ -1928,6 +2130,19 @@ impl SqlWindow {
                             }
                         }
                     });
+                match open {
+                    Some(FrameTarget::Program { object, line, .. }) => {
+                        if let Some(connection) = cx.connection.clone() {
+                            effects.open.push(OpenRequest::ProgramAt {
+                                connection,
+                                object,
+                                line,
+                            });
+                        }
+                    }
+                    Some(FrameTarget::Statement { range, .. }) => jump = Some(range),
+                    _ => {}
+                }
                 if let Some(range) = jump {
                     self.editor.select(range);
                 }
@@ -2367,6 +2582,71 @@ pub fn fmt_duration(d: Duration) -> String {
     }
 }
 
+/// An error with a PL/SQL stack, line by line: its frames are links to their
+/// code. The frame clicked, if any; clicking the first line of an error with
+/// a position in the statement sets `jump`.
+fn stack_message_ui(
+    ui: &mut Ui,
+    m: &Message,
+    color: egui::Color32,
+    jump: &mut Option<Range<usize>>,
+) -> Option<FrameTarget> {
+    let mut open = None;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for (i, line) in m.text.lines().enumerate() {
+            let text = RichText::new(line).monospace().color(color);
+            match m.stack.iter().find(|f| f.text_line == i).map(|f| &f.target) {
+                Some(target) if target.opens() => {
+                    if ui
+                        .link(text)
+                        .on_hover_ui(|ui| frame_hint(ui, target))
+                        .clicked()
+                    {
+                        open = Some(target.clone());
+                    }
+                }
+                Some(FrameTarget::Hidden(why)) => {
+                    ui.label(text).on_hover_text(why);
+                }
+                _ => match &m.jump {
+                    Some(range) if i == 0 => {
+                        if ui.link(text).on_hover_text("Go to error").clicked() {
+                            *jump = Some(range.clone());
+                        }
+                    }
+                    _ => {
+                        ui.label(text);
+                    }
+                },
+            }
+        }
+    });
+    open
+}
+
+/// Where a frame's link leads, and the line of code there.
+fn frame_hint(ui: &mut Ui, target: &FrameTarget) {
+    let code = match target {
+        FrameTarget::Program { object, line, text } => {
+            ui.label(format!(
+                "Open {} ({}) at line {line}",
+                object.qualified(),
+                object.object_type.dictionary_name().to_lowercase()
+            ));
+            text
+        }
+        FrameTarget::Statement { text, .. } => {
+            ui.label("Go to this line of the statement");
+            text
+        }
+        FrameTarget::Pending(_) | FrameTarget::Hidden(_) => return,
+    };
+    if !code.trim().is_empty() {
+        ui.label(RichText::new(code.trim()).monospace());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2586,6 +2866,157 @@ mod tests {
         // A selection is debugged from its first statement.
         assert_eq!(at(pos("begin")..text.len()), (true, true));
         assert_eq!(at(0..text.len()), (false, true));
+    }
+
+    /// An error with a PL/SQL stack: its frames are looked up and lead to
+    /// the code, one click away (#112).
+    #[test]
+    fn error_stack_frames_open_their_code() {
+        use egui_kittest::kittest::Queryable;
+        use pythia_db::ObjectType;
+        use pythia_db::error_stack::FrameSource;
+        fn context(settings: &pythia_config::Settings) -> DocContext<'_> {
+            DocContext {
+                id: crate::documents::DocId(1),
+                settings,
+                connected: true,
+                fetch_size: 100,
+                connection: Some("db".into()),
+                catalog: None,
+                catalog_revision: 0,
+                connections: &[],
+                debug: None,
+                marks: None,
+                privilege: None,
+                dialect: pythia_db::Dialect::ORACLE,
+                read_only: false,
+            }
+        }
+        let settings = pythia_config::Settings::default();
+        let cx = context(&settings);
+        let text = "select 1 from dual;\nbegin\n  shop.orders.place(1);\nend;";
+        let start = text.find("begin").unwrap();
+        let mut w = SqlWindow::new("SQL 1".into(), text.into());
+        w.state.running = Some(Running {
+            start,
+            sql: text[start..].into(),
+            internal: None,
+        });
+        let error = DbError {
+            code: Some(1403),
+            oracle: true,
+            ..DbError::new(
+                "ORA-01403: no data found\n\
+                 ORA-06512: at \"SYS.DBMS_ASSERT\", line 192\n\
+                 ORA-06512: at \"SHOP.ORDERS\", line 40\n\
+                 ORA-06512: at line 1\n\
+                 ORA-06512: at line 2",
+            )
+        };
+        let effects = w.on_event(
+            DbEvent::Failed {
+                id: 1,
+                error,
+                elapsed: Duration::ZERO,
+            },
+            &cx,
+        );
+        let [(Target::Main, DbRequest::Task { id, .. })] = effects.requests.as_slice() else {
+            panic!("expected one lookup on the main session");
+        };
+        let id = *id;
+        let message = &w.state.messages[0];
+        let targets: Vec<_> = message
+            .stack
+            .iter()
+            .map(|f| (f.text_line, f.target.clone()))
+            .collect();
+        // The block run by dynamic SQL (line 4) leads nowhere; the last
+        // frame is the statement's second line.
+        let call = text.find("shop.").unwrap();
+        assert_eq!(
+            targets,
+            [
+                (1, FrameTarget::Pending(id)),
+                (2, FrameTarget::Pending(id)),
+                (
+                    4,
+                    FrameTarget::Statement {
+                        range: call..call + "shop.orders.place(1);".len(),
+                        text: "shop.orders.place(1);".into()
+                    }
+                ),
+            ]
+        );
+
+        let found: Vec<(String, String, FrameSource)> = vec![
+            (
+                "SYS".into(),
+                "DBMS_ASSERT".into(),
+                FrameSource::Hidden("The source of its package body isn't visible to you".into()),
+            ),
+            (
+                "SHOP".into(),
+                "ORDERS".into(),
+                FrameSource::Source {
+                    object_type: ObjectType::PackageBody,
+                    line: 40,
+                    text: "    select id into l_id from orders where id = p_id;".into(),
+                },
+            ),
+        ];
+        w.on_event(
+            DbEvent::TaskDone {
+                id,
+                result: Ok(Box::new(found)),
+            },
+            &cx,
+        );
+        let orders = FrameTarget::Program {
+            object: ObjectRef {
+                owner: "SHOP".into(),
+                name: "ORDERS".into(),
+                object_type: ObjectType::PackageBody,
+            },
+            line: 40,
+            text: "    select id into l_id from orders where id = p_id;".into(),
+        };
+        assert!(matches!(
+            &w.state.messages[0].stack[0].target,
+            FrameTarget::Hidden(_)
+        ));
+        assert_eq!(w.state.messages[0].stack[1].target, orders);
+
+        // "Open where raised" opens the innermost frame whose code can be
+        // shown, at its line.
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = opened.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .build_ui(move |ui| {
+                let settings = pythia_config::Settings::default();
+                let effects = w.ui(ui, &context(&settings));
+                sink.borrow_mut().extend(effects.open);
+            });
+        h.run_steps(2);
+        h.get_by_label("Open where raised").click();
+        h.run_steps(2);
+        let opened = opened.borrow();
+        let [
+            OpenRequest::ProgramAt {
+                connection,
+                object,
+                line,
+            },
+        ] = opened.as_slice()
+        else {
+            panic!("expected the package body to open: {opened:?}");
+        };
+        assert_eq!(
+            (connection.as_str(), object.name.as_str(), *line),
+            ("db", "ORDERS", 40)
+        );
+        assert_eq!(object.object_type, ObjectType::PackageBody);
     }
 
     /// The variable prompt's fields are wide enough to read what's typed,

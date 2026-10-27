@@ -12,6 +12,7 @@
 
 pub mod compat;
 mod dialect;
+pub mod error_stack;
 mod meta;
 mod mssql_meta;
 mod mssql_session;
