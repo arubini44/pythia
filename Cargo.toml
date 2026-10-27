@@ -28,8 +28,8 @@ egui_dock = { version = "0.21", features = ["serde"] }
 oracle = "0.6"
 # The pure-Rust driver: our fork of oracle/rust-oracledb (branch `pythia`),
 # upstream main plus fixes that aren't released yet and Connection::cancel()
-# (#13). Pinned to a commit.
-oracledb = { git = "https://github.com/ortic/rust-oracledb", rev = "68cd2c7cc7fbac52d3719766fe0b8f172502a206" }
+# (#13), with rustls on ring (#99). Pinned to a commit.
+oracledb = { git = "https://github.com/ortic/rust-oracledb", rev = "8dde2372336e1c4c9814a00d94f4eb6db7cff90c" }
 # Pure Rust, synchronous like the session workers; rustls on ring as ureq uses.
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "buffer-pool", "rustls-tls-ring"] }
 # SSH tunnels: pure Rust on ring too. Its tokio runtime only carries the
