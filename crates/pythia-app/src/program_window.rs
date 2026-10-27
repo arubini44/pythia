@@ -876,15 +876,11 @@ impl ProgramWindow {
         let other = self.companion_of(self.active)?;
         let from = self.position()?;
         let here = &self.parts[self.active];
-        let there = subprograms(self.parts[other].editor.text());
-        // Innermost first; a local subprogram of the body has none.
-        let target = enclosing_subprograms(here.editor.text(), here.editor.cursor())
-            .into_iter()
-            .rev()
-            .find_map(|(name, nth)| {
-                let same: Vec<_> = there.iter().filter(|(n, _)| *n == name).collect();
-                same.get(nth).or(same.first()).map(|(_, span)| span.clone())
-            });
+        let target = counterpart(
+            here.editor.text(),
+            here.editor.cursor(),
+            self.parts[other].editor.text(),
+        );
         self.active = other;
         if let Some(span) = target {
             self.parts[other].editor.select(span);
@@ -937,28 +933,27 @@ impl Part {
     }
 }
 
-/// Procedures and functions of a text with their name spans, in order
-/// (nested ones too), names upper-cased.
-fn subprograms(text: &str) -> Vec<(String, std::ops::Range<usize>)> {
-    subprogram_items(text)
-        .into_iter()
-        .map(|(name, _, name_span)| (name, name_span))
-        .collect()
+/// A procedure or function of a text (nested ones too).
+struct SubprogramItem {
+    /// Upper-cased.
+    name: String,
+    params: String,
+    span: std::ops::Range<usize>,
+    name_span: std::ops::Range<usize>,
 }
 
-fn subprogram_items(text: &str) -> Vec<(String, std::ops::Range<usize>, std::ops::Range<usize>)> {
+/// The procedures and functions of a text, in order.
+fn subprogram_items(text: &str) -> Vec<SubprogramItem> {
     use pythia_lsp_core::{OutlineItem, OutlineKind};
-    fn walk(
-        items: &[OutlineItem],
-        out: &mut Vec<(String, std::ops::Range<usize>, std::ops::Range<usize>)>,
-    ) {
+    fn walk(items: &[OutlineItem], out: &mut Vec<SubprogramItem>) {
         for item in items {
             if matches!(item.kind, OutlineKind::Procedure | OutlineKind::Function) {
-                out.push((
-                    item.name.to_uppercase(),
-                    item.span.clone(),
-                    item.name_span.clone(),
-                ));
+                out.push(SubprogramItem {
+                    name: item.name.to_uppercase(),
+                    params: params(item),
+                    span: item.span.clone(),
+                    name_span: item.name_span.clone(),
+                });
             }
             walk(&item.children, out);
         }
@@ -968,19 +963,49 @@ fn subprogram_items(text: &str) -> Vec<(String, std::ops::Range<usize>, std::ops
     out
 }
 
-/// The subprograms around `offset`, outermost first: (name, which overload
-/// of that name it is).
-fn enclosing_subprograms(text: &str, offset: usize) -> Vec<(String, usize)> {
-    let items = subprogram_items(text);
-    items
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, span, _))| span.start <= offset && offset <= span.end)
-        .map(|(i, (name, _, _))| {
-            let nth = items[..i].iter().filter(|(n, _, _)| n == name).count();
-            (name.clone(), nth)
+/// A subprogram's parameters and result as the outline shows them, for
+/// comparing a declaration with its implementation (case and spacing
+/// ignored).
+fn params(item: &pythia_lsp_core::OutlineItem) -> String {
+    item.detail
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// The subprograms around `offset`, outermost first, with which one of
+/// that name each is.
+fn enclosing_subprograms(text: &str, offset: usize) -> Vec<(SubprogramItem, usize)> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    subprogram_items(text)
+        .into_iter()
+        .filter_map(|item| {
+            let count = seen.entry(item.name.clone()).or_default();
+            *count += 1;
+            let nth = *count - 1;
+            (item.span.start <= offset && offset <= item.span.end).then_some((item, nth))
         })
         .collect()
+}
+
+/// The name in `there` of the counterpart of the innermost subprogram
+/// around `offset` in `here` that has one (a local subprogram of a body
+/// has none): the one of that name with the same parameters, else the one
+/// at the same place among those of that name.
+fn counterpart(here: &str, offset: usize, there: &str) -> Option<std::ops::Range<usize>> {
+    let there = subprogram_items(there);
+    enclosing_subprograms(here, offset)
+        .into_iter()
+        .rev()
+        .find_map(|(item, nth)| {
+            let same: Vec<_> = there.iter().filter(|t| t.name == item.name).collect();
+            same.iter()
+                .find(|t| t.params == item.params)
+                .or(same.get(nth))
+                .or(same.first())
+                .map(|t| t.name_span.clone())
+        })
 }
 
 /// The name of the declaration `member` (a subprogram, variable, type, …)
@@ -1066,13 +1091,6 @@ fn subprogram_at(
                 declared.iter().position(|d| std::ptr::eq(*d, item))
             } else {
                 // The same parameters, else the same position.
-                let params = |i: &OutlineItem| {
-                    i.detail
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .to_lowercase()
-                };
                 declared
                     .iter()
                     .position(|d| params(d) == params(item))
@@ -1189,7 +1207,7 @@ fn markers(errors: &[CompileError]) -> Vec<Marker> {
 
 #[cfg(test)]
 mod tests {
-    use super::{enclosing_subprograms, member_span, subprogram_at, subprograms};
+    use super::{enclosing_subprograms, member_span, subprogram_at, subprogram_items};
     use crate::browser::Subprogram;
     use crate::documents::ObjectRef;
     use pythia_db::ObjectType;
@@ -1344,17 +1362,52 @@ mod tests {
         let body = "create or replace package body p as\n  \
                     procedure a(x number) is\n    procedure inner is begin null; end;\n  \
                     begin inner; end;\n  procedure a is begin null; end;\nend;";
+        let around = |at| -> Vec<(String, usize)> {
+            enclosing_subprograms(body, at)
+                .into_iter()
+                .map(|(item, nth)| (item.name, nth))
+                .collect()
+        };
         let at = body.find("begin inner").unwrap();
-        assert_eq!(enclosing_subprograms(body, at), [("A".to_owned(), 0)]);
+        assert_eq!(around(at), [("A".to_owned(), 0)]);
         let at = body.find("begin null; end;\nend").unwrap();
-        assert_eq!(enclosing_subprograms(body, at), [("A".to_owned(), 1)]);
+        assert_eq!(around(at), [("A".to_owned(), 1)]);
         let at = body.find("null; end;\n  begin").unwrap();
-        assert_eq!(
-            enclosing_subprograms(body, at),
-            [("A".to_owned(), 0), ("INNER".to_owned(), 0)]
-        );
-        let names: Vec<String> = subprograms(body).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(around(at), [("A".to_owned(), 0), ("INNER".to_owned(), 0)]);
+        let names: Vec<String> = subprogram_items(body).into_iter().map(|i| i.name).collect();
         assert_eq!(names, ["A", "INNER", "A"]);
+    }
+
+    /// Switch Spec/Body lands on the overload with the same parameters,
+    /// whatever order the body implements them in.
+    #[test]
+    fn switch_to_the_same_overload() {
+        let spec = "create or replace package p as\n  procedure a(p_x number);\n  \
+                    procedure a(p_y date);\nend;";
+        let body = "create or replace package body p as\n  \
+                    procedure a(p_y date) is begin null; end;\n  \
+                    procedure a(p_x number) is begin null; end;\nend;";
+        let mut w = ProgramWindow::new(ObjectRef {
+            owner: "HR".into(),
+            name: "P".into(),
+            object_type: ObjectType::PackageBody,
+        });
+        for (part, text) in w.parts.iter_mut().zip([spec, body]) {
+            part.editor.set_text(text);
+        }
+        let selected = |w: &mut ProgramWindow| (w.active, w.active_editor().unwrap().selection());
+        let x = body.find("a(p_x").unwrap();
+        w.goto_position(1, x..x);
+        w.switch_part();
+        let in_spec = spec.find("a(p_x").unwrap();
+        assert_eq!(selected(&mut w), (0, Some(in_spec..in_spec + 1)));
+        w.switch_part();
+        assert_eq!(selected(&mut w), (1, Some(x..x + 1)));
+        let y = spec.find("a(p_y").unwrap();
+        w.goto_position(0, y..y);
+        w.switch_part();
+        let in_body = body.find("a(p_y").unwrap();
+        assert_eq!(selected(&mut w), (1, Some(in_body..in_body + 1)));
     }
 
     #[test]

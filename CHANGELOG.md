@@ -46,6 +46,9 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- *Switch Spec/Body* jumped to the wrong overload when the body implements
+  a package's overloads in another order than the spec declares them
+  (#125). It now goes to the one with the same parameters.
 - *Test…* and *Debug…* generated a block that didn't compile when the
   function returned, or an OUT parameter was, a collection, record,
   `%ROWTYPE`, object, BLOB, XMLTYPE or ref cursor (#120). The block now
