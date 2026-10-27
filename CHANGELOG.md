@@ -76,6 +76,9 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- Explain plan failed on MariaDB with *Unknown EXPLAIN format name:
+  'tree'* (#128). MariaDB has no tree format; it gets the classic plan
+  table, as MySQL before 8.0.16 does.
 - The status bar's invalid objects count didn't follow compiles in a
   program window, changes made with an object or table editor, or PL/SQL
   blocks run in a SQL window (`exec dbms_utility.compile_schema(user)` and

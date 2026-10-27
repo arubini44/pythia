@@ -37,6 +37,25 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+  # MariaDB, for the MySQL backend's MariaDB differences (port 3307):
+  #   podman compose up -d mariadb
+  #   PYTHIA_TEST_MYSQL=pythia/pythia@localhost:3307/pythia cargo test -p pythia-db --test mysql
+  mariadb:
+    image: docker.io/library/mariadb:10.6
+    ports:
+      - "3307:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: mariadb
+      MARIADB_DATABASE: pythia
+      MARIADB_USER: pythia
+      MARIADB_PASSWORD: pythia
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
   # An SSH server for tunnels (user pythia / pythia). From there, MySQL is
   # mysql:3306:
   #   podman compose up -d mysql ssh
@@ -109,5 +128,6 @@ services:
 volumes:
   oracle-data:
   mysql-data:
+  mariadb-data:
   postgres-data:
   mssql-data:

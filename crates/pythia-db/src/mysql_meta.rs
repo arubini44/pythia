@@ -349,13 +349,14 @@ fn show_create(
 /// The plan of `sql` as `PLAN_TABLE`-like rows (ID, PARENT_ID, DEPTH,
 /// OPERATION, OBJECT, COST, ROWS) for the plan view, from MySQL's tree
 /// format. Servers without it (MariaDB, MySQL before 8.0.16) give the
-/// classic table, one row per table.
+/// classic table, one row per table: MariaDB, which knows `FORMAT=`, says
+/// 1791 (unknown format), servers that don't, 1064.
 fn explain_plan(conn: &mut Conn, sql: &str) -> Result<MetaResult, DbError> {
     let tree: Result<Option<String>, _> = conn.query_first(format!("explain format=tree {sql}"));
     let rows = match tree {
         Ok(Some(tree)) => tree_rows(&tree),
         Ok(None) => Vec::new(),
-        Err(mysql::Error::MySqlError(e)) if e.code == 1064 => classic_rows(conn, sql)?,
+        Err(mysql::Error::MySqlError(e)) if matches!(e.code, 1064 | 1791) => classic_rows(conn, sql)?,
         Err(e) => return Err(e.into()),
     };
     let column = |name: &str, numeric: bool| Column {
