@@ -105,6 +105,22 @@ impl Harness {
         self.settle("rollback");
     }
 
+    /// Runs a task on the session's client and waits for its result.
+    fn run<T: Send + 'static>(
+        &mut self,
+        task: impl FnOnce(&mut dyn pythia_db::Client) -> Result<T, pythia_db::DbError> + Send + 'static,
+    ) -> Result<T, pythia_db::DbError> {
+        self.session.send(DbRequest::Run {
+            id: 4,
+            task: Box::new(move |c| task(c).map(|v| Box::new(v) as Box<dyn std::any::Any + Send>)),
+        });
+        loop {
+            if let DbEvent::TaskDone { result, .. } = self.next() {
+                return result.map(|any| *any.downcast::<T>().expect("the task's result"));
+            }
+        }
+    }
+
     /// The dashboard's snapshot, read on this session's client.
     fn snapshot(&mut self, storage: bool) -> MsSnapshot {
         self.session.send(DbRequest::Run {
@@ -276,4 +292,99 @@ fn snapshot_without_server_state() {
     assert!(storage.current_database_only);
     assert_eq!(storage.databases.len(), 1);
     assert_eq!(storage.databases[0].name, "pythia");
+}
+
+/// A blocking pair in its details: the waiter's request with its plan and
+/// the lock it waits for, the holder's transaction and locks. Killing the
+/// holder lets the waiter go on (#96).
+#[test]
+fn session_details_and_kill() {
+    let (Some(mut dba), Some(mut a), Some(mut b)) = (
+        Harness::connect("PYTHIA_TEST_MSSQL_DBA"),
+        Harness::connect("PYTHIA_TEST_MSSQL"),
+        Harness::connect("PYTHIA_TEST_MSSQL"),
+    ) else {
+        eprintln!("PYTHIA_TEST_MSSQL(_DBA) not set, skipping");
+        return;
+    };
+    a.ok("drop table if exists det_block_t");
+    a.ok("create table det_block_t (id int primary key, v int)");
+    a.ok("insert into det_block_t values (1, 0)");
+    a.session.send(DbRequest::Commit);
+    a.settle("commit");
+    let holder: i64 = a.scalar("select @@spid").parse().unwrap();
+    let waiter: i64 = b.scalar("select @@spid").parse().unwrap();
+    a.ok("update det_block_t set v = 1 where id = 1");
+    b.send("update det_block_t set v = 2 where id = 1");
+
+    let detail = |h: &mut Harness, id: i64| {
+        h.run(move |c| Ok(sqlserver::session_detail(c, id)))
+            .unwrap()
+    };
+    let start = Instant::now();
+    let waiting = loop {
+        let d = detail(&mut dba, waiter);
+        if d.request
+            .as_ref()
+            .is_some_and(|r| r.blocked_by == Some(holder))
+        {
+            break d;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "no blocking");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(waiting.errors.is_empty(), "{:?}", waiting.errors);
+    let session = waiting.session.as_ref().expect("the waiter");
+    assert_eq!(session.login, "pythia");
+    assert!(
+        session
+            .connection
+            .iter()
+            .any(|(name, _)| name == "Client address")
+    );
+    assert!(
+        waiting.plan.iter().any(|l| l.contains("det_block_t")),
+        "{:?}",
+        waiting.plan
+    );
+    assert!(
+        waiting
+            .plan_xml
+            .as_deref()
+            .is_some_and(|x| x.contains("<ShowPlanXML"))
+    );
+    assert!(
+        waiting.locks.iter().any(|l| l.status == "WAIT"),
+        "{:?}",
+        waiting.locks
+    );
+
+    let holding = detail(&mut dba, holder);
+    assert_eq!(holding.blocks, [waiter]);
+    assert!(holding.request.is_none() && holding.last_batch.is_some());
+    assert!(
+        holding.transactions.iter().any(|t| t.log_bytes > 0.0),
+        "{:?}",
+        holding.transactions
+    );
+    assert!(
+        holding
+            .locks
+            .iter()
+            .any(|l| l.status == "GRANT" && l.object.as_deref() == Some("dbo.det_block_t")),
+        "{:?}",
+        holding.locks
+    );
+
+    // Killed, the holder's update is rolled back and the waiter's goes on.
+    dba.run(move |c| sqlserver::kill(c, holder)).unwrap();
+    b.settle("the blocked update");
+    b.rollback();
+    let start = Instant::now();
+    while detail(&mut dba, holder).session.is_some() {
+        assert!(start.elapsed() < Duration::from_secs(10), "still there");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(b.scalar("select v from det_block_t where id = 1"), "0");
+    b.ok("drop table det_block_t");
 }

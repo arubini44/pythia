@@ -487,7 +487,7 @@ fn lock_waits(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
             THREAD_LINK,
         );
         if let Some(id) = thread {
-            wants.push(Want::OpenThread { id });
+            wants.push(Want::OpenConnection { id });
         }
     });
 }
@@ -532,7 +532,7 @@ fn running(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
             THREAD_LINK,
         );
         if let Some(id) = thread {
-            wants.push(Want::OpenThread { id });
+            wants.push(Want::OpenConnection { id });
         }
     });
 }
@@ -581,7 +581,7 @@ fn transactions(ui: &mut Ui, snap: &MySqlSnapshot, wants: &mut Wants) {
             THREAD_LINK,
         );
         if let Some(id) = thread {
-            wants.push(Want::OpenThread { id });
+            wants.push(Want::OpenConnection { id });
         }
     });
 }
