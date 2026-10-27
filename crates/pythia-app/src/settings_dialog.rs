@@ -1072,8 +1072,10 @@ fn formatter(ui: &mut Ui, s: &mut Settings, st: &mut FormatState) -> Option<Lear
             }
         },
     );
+    let width = label_width(ui);
     ui.horizontal(|ui| {
-        let label = ui.add_sized([180.0, 20.0], egui::Label::new("New profile"));
+        let height = ui.spacing().interact_size.y;
+        let label = ui.add_sized([width, height], egui::Label::new("New profile"));
         ui.add(
             egui::TextEdit::singleline(&mut st.profile_name)
                 .hint_text("name")

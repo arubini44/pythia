@@ -4651,6 +4651,21 @@ fn settings_pages_fit_the_window() {
     }
 }
 
+/// The New profile field lines up with the other rows' controls when a
+/// bigger interface font widens the label column (#116).
+#[test]
+fn settings_formatter_rows_line_up() {
+    let mut h = sized_harness(egui::vec2(1280.0, 800.0));
+    h.state_mut().test_settings_mut().appearance.font_size = 18.0;
+    let ctx = h.ctx.clone();
+    h.state_mut().test_apply_settings(&ctx);
+    h.state_mut().test_settings(true);
+    h.run_steps(4);
+    let field = h.get_by_label("New profile").rect();
+    let learn = h.get_by_label("Focused editor").rect();
+    assert_eq!(field.min.x, learn.min.x, "{field:?} {learn:?}");
+}
+
 /// The MySQL dashboard (`PYTHIA_TEST_MYSQL`): server KPIs, trends and
 /// findings on the connection's own session, and what the user would need
 /// to see more.
