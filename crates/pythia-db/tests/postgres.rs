@@ -731,6 +731,46 @@ fn connect_error(params: ConnectParams) -> pythia_db::DbError {
     }
 }
 
+/// Roles that can log in are users, the others roles.
+#[test]
+fn accounts() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    h.session.send(DbRequest::SetAutocommit(true));
+    let accounts = |h: &mut Harness, object_type| {
+        let MetaResult::Accounts(accounts) = h.meta(MetaQuery::Accounts(object_type)) else {
+            panic!("expected accounts")
+        };
+        accounts
+    };
+    let names = |accounts: &[(String, String)]| -> Vec<String> {
+        accounts.iter().map(|(name, _)| name.clone()).collect()
+    };
+    h.ok("drop role if exists meta_role");
+    h.ok("drop role if exists \"Meta_User\"");
+    h.ok("create role meta_role");
+    h.ok("create role \"Meta_User\" login");
+
+    let users = accounts(&mut h, ObjectType::User);
+    assert!(names(&users).contains(&"Meta_User".to_owned()), "{users:?}");
+    assert!(
+        !names(&users).contains(&"meta_role".to_owned()),
+        "{users:?}"
+    );
+    let me = h.scalar("select current_user").expect("the current user");
+    let super_user = h.scalar("select rolsuper::text from pg_roles where rolname = current_user");
+    if super_user.as_deref() == Some("true") {
+        assert!(users.contains(&(me, "superuser".into())), "{users:?}");
+    }
+    let roles = names(&accounts(&mut h, ObjectType::Role));
+    assert!(roles.contains(&"meta_role".to_owned()), "{roles:?}");
+    assert!(!roles.contains(&"Meta_User".to_owned()), "{roles:?}");
+
+    h.ok("drop role meta_role");
+    h.ok("drop role \"Meta_User\"");
+}
+
 /// Through the SSH server (#97): trusting its key, sessions sharing the
 /// tunnel, Break (its cancel request goes through the tunnel too), and an
 /// address the SSH server can't reach.

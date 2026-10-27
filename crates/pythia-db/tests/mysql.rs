@@ -689,6 +689,41 @@ fn dictionary() {
     h.ok("drop table meta_dept");
 }
 
+#[test]
+fn accounts() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    let accounts = |h: &mut Harness, object_type| {
+        let MetaResult::Accounts(accounts) = h.meta(MetaQuery::Accounts(object_type)) else {
+            panic!("expected accounts")
+        };
+        accounts
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
+    };
+    let me = h.scalar("select current_user()").expect("the current user");
+    let users = accounts(&mut h, ObjectType::User);
+    assert!(users.contains(&me), "{users:?}");
+    if users.len() == 1 {
+        // No access to mysql.user: the session's own user, and its roles.
+        accounts(&mut h, ObjectType::Role);
+        return;
+    }
+    // A role is listed by its name, not as a user.
+    h.ok("drop role if exists meta_role");
+    h.ok("create role meta_role");
+    let roles = accounts(&mut h, ObjectType::Role);
+    assert!(roles.contains(&"meta_role".to_owned()), "{roles:?}");
+    let users = accounts(&mut h, ObjectType::User);
+    assert!(
+        !users.iter().any(|u| u.starts_with("meta_role")),
+        "{users:?}"
+    );
+    h.ok("drop role meta_role");
+}
+
 /// Waits for a session's connect to fail.
 fn connect_error(params: ConnectParams) -> pythia_db::DbError {
     let (tx, wake) = mpsc::channel();

@@ -81,7 +81,26 @@ pub(crate) fn run(ms: &mut Ms<'_>, query: &MetaQuery) -> Result<MetaResult, DbEr
         MetaQuery::TestLink { .. } => {
             return Err(DbError::unsupported("Linked servers", Dialect::SQLSERVER));
         }
+        MetaQuery::Accounts(object_type) => MetaResult::Accounts(accounts(ms, *object_type)?),
     })
+}
+
+/// The database's users (SQL, Windows and external ones, without the
+/// schemas `sys` and `INFORMATION_SCHEMA` posing as users) or its roles.
+/// Server logins are the server's, not the database's.
+fn accounts(ms: &mut Ms<'_>, object_type: ObjectType) -> Result<Vec<(String, String)>, DbError> {
+    let which = if object_type == ObjectType::User {
+        "type in ('S', 'U', 'G', 'E', 'X') and name not in ('sys', 'INFORMATION_SCHEMA')"
+    } else {
+        "type = 'R'"
+    };
+    let sql = format!("select name from sys.database_principals where {which} order by name");
+    Ok(ms
+        .rows(&sql, &[])?
+        .into_iter()
+        .filter_map(first)
+        .map(|name| (name, String::new()))
+        .collect())
 }
 
 fn first(row: Vec<Cell>) -> Option<String> {

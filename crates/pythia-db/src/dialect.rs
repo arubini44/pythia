@@ -54,8 +54,6 @@ pub enum Feature {
     Completion,
     /// Indexes, constraints and triggers below a table in the object browser.
     TableParts,
-    /// Users, roles, profiles and directories in the object browser.
-    Accounts,
     /// Dictionary lookups for the AI assistant.
     AiLookups,
     /// Comparing project files with the stored objects, and exporting a
@@ -124,6 +122,22 @@ impl Dialect {
             DbKind::Oracle | DbKind::MySql => Syntax::Oracle,
             DbKind::Postgres => Syntax::Postgres,
             DbKind::SqlServer => Syntax::TSql,
+        }
+    }
+
+    /// What the object browser lists of the database itself, in display
+    /// order: users and roles everywhere, Oracle's profiles and directories.
+    pub fn account_types(self) -> &'static [ObjectType] {
+        match self.0 {
+            DbKind::Oracle => &[
+                ObjectType::User,
+                ObjectType::Role,
+                ObjectType::Profile,
+                ObjectType::Directory,
+            ],
+            DbKind::MySql | DbKind::Postgres | DbKind::SqlServer => {
+                &[ObjectType::User, ObjectType::Role]
+            }
         }
     }
 

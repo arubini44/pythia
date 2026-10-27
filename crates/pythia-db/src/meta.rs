@@ -301,6 +301,9 @@ pub enum MetaQuery {
         owner: String,
         name: String,
     },
+    /// The database's users, roles, profiles or directories (those of
+    /// [`crate::Dialect::account_types`]).
+    Accounts(ObjectType),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -351,6 +354,9 @@ pub enum MetaResult {
     },
     Text(String),
     Errors(Vec<CompileError>),
+    /// Names of users, roles, profiles or directories, each with what else
+    /// to show (a directory's path).
+    Accounts(Vec<(String, String)>),
 }
 
 pub(crate) fn run(conn: &Connection, query: &MetaQuery) -> Result<MetaResult, DbError> {
@@ -394,7 +400,37 @@ pub(crate) fn run(conn: &Connection, query: &MetaQuery) -> Result<MetaResult, Db
         MetaQuery::Find { pattern, limit } => MetaResult::Objects(find(conn, pattern, *limit)?),
         MetaQuery::ExplainPlan { sql } => explain_plan(conn, sql)?,
         MetaQuery::TestLink { owner, name } => MetaResult::Text(test_link(conn, owner, name)?),
+        MetaQuery::Accounts(object_type) => MetaResult::Accounts(accounts(conn, *object_type)?),
     })
+}
+
+/// Names of the database's users, of its roles (all of them with catalog
+/// access, else those granted to the session's user), of its profiles
+/// (with catalog access), or of the directories the session can use (with
+/// their paths); each with what else to show.
+fn accounts(conn: &Connection, object_type: ObjectType) -> Result<Vec<(String, String)>, DbError> {
+    let read = |sql: &str| -> Result<Vec<(String, String)>, DbError> {
+        let mut out = Vec::new();
+        for row in conn.query_as::<(String, Option<String>)>(sql, &[])? {
+            let (name, detail) = row?;
+            out.push((name, detail.unwrap_or_default()));
+        }
+        Ok(out)
+    };
+    match object_type {
+        ObjectType::User => read("select username, null from all_users order by username"),
+        ObjectType::Directory => read(
+            "select directory_name, directory_path from all_directories order by directory_name",
+        ),
+        ObjectType::Profile => {
+            read("select distinct profile, null from dba_profiles order by profile")
+                .map_err(|_| DbError::new("Listing profiles needs access to DBA_PROFILES"))
+        }
+        ObjectType::Role => read("select role, null from dba_roles order by role").or_else(|_| {
+            read("select granted_role, null from user_role_privs order by granted_role")
+        }),
+        other => Err(DbError::new(format!("{} aren't accounts", other.plural()))),
+    }
 }
 
 const OBJECT_COLUMNS: &str =

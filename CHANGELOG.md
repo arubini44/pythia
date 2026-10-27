@@ -18,6 +18,14 @@ All notable changes to Pythia are documented here. The format follows
   window. The dashboard's "connections by …" bars open the sessions they
   count. Without `PROCESS`, `pg_read_all_stats` or `VIEW SERVER STATE`,
   the list says what is missing.
+- The object browser lists users and roles on MySQL/MariaDB, PostgreSQL
+  and SQL Server too (#130), not only on Oracle. MySQL's users show as
+  `user@host`; without `SELECT` on `mysql.user` the browser shows your own
+  user and the roles you may use. PostgreSQL's roles that can log in are
+  its users, superusers say so; SQL Server's are the database's users and
+  roles. Their menu has *Copy name* and *Drop…* (and *Show schema* for a
+  PostgreSQL user with a schema of the same name); editing and creating
+  them stays on Oracle.
 - The outline of a program window has a context menu (#124). Right-click
   a procedure or function to **Test…** or **Debug…** it: the standalone
   unit, or a subprogram the package specification declares, from the
