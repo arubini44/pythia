@@ -64,7 +64,7 @@ const LIGHT: Palette = Palette {
     text_weak: Color32::from_rgb(0x6a, 0x71, 0x7c),
     hover: Color32::from_rgb(0xe6, 0xe8, 0xec),
     active: Color32::from_rgb(0xd8, 0xdc, 0xe3),
-    selection: Color32::from_rgba_premultiplied(0xa6, 0xc8, 0xff, 0xc0),
+    selection: Color32::from_rgba_unmultiplied_const(0xa6, 0xc8, 0xff, 0xc0),
     stripe: Color32::from_rgb(0xf7, 0xf8, 0xfa),
     error: Color32::from_rgb(0xc8, 0x2b, 0x2b),
     warn: Color32::from_rgb(0xa8, 0x62, 0x00),
@@ -551,5 +551,22 @@ mod tests {
         h.get_by_label("Run").hover();
         h.run();
         assert_eq!(h.get_by_label("Run").rect(), idle);
+    }
+
+    /// Selected text stands out from the editor and from text fields in
+    /// both themes; the light one used to add to white and stay white (#111).
+    #[test]
+    fn selection_is_visible() {
+        let ctx = egui::Context::default();
+        super::install(&ctx);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let v = ctx.style_of(theme).visuals.clone();
+            let fields = [v.extreme_bg_color, v.text_edit_bg_color()];
+            for bg in fields {
+                let selected = bg.blend(v.selection.bg_fill);
+                let difference = (bg.intensity() - selected.intensity()).abs();
+                assert!(difference > 0.1, "{theme:?}: {selected:?} on {bg:?}");
+            }
+        }
     }
 }

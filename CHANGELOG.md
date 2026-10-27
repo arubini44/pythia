@@ -10,6 +10,9 @@ All notable changes to Pythia are documented here. The format follows
 - The fields of the Variables prompt (binds and `&substitutions`, before
   running or debugging) were only a few characters wide, so what you
   typed couldn't be read (#109).
+- Light theme: selected text was almost invisible, in the editor and in
+  every text field (#111). The selection color added to the white
+  background instead of tinting it.
 
 ## [0.6.0] - 2026-10-27
 
