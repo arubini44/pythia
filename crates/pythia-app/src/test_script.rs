@@ -6,6 +6,24 @@
 
 use pythia_lsp_core::{CatalogMember, MemberKind, ParamMode};
 
+/// A qualified name in lowercase for the block, except what is quoted
+/// (`HR."MyPkg".LOAD` → `hr."MyPkg".load`): quoted names are case-sensitive.
+pub fn lowercase_unquoted(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut quoted = false;
+    for c in name.chars() {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        if quoted {
+            out.push(c);
+        } else {
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
 /// Builds the test block for `member` called as `qualified` (e.g.
 /// `hr.emp_pkg.raise_salary` or `hr.my_proc`).
 pub fn test_block(qualified: &str, member: &CatalogMember) -> String {
@@ -136,6 +154,15 @@ mod tests {
              \x20 dbms_output.put_line('result = ' || to_char(l_result, 'YYYY-MM-DD HH24:MI:SS'));\n\
              \x20 dbms_output.put_line('p_name = ' || l_name);\n\
              end;\n"
+        );
+    }
+
+    #[test]
+    fn quoted_names_keep_their_case() {
+        assert_eq!(lowercase_unquoted("HR.EMP_PKG.RAISE"), "hr.emp_pkg.raise");
+        assert_eq!(
+            lowercase_unquoted("HR.\"MyPkg\".\"Load\""),
+            "hr.\"MyPkg\".\"Load\""
         );
     }
 

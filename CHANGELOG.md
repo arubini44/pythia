@@ -46,6 +46,9 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- *Test…* and *Debug…* on a package, procedure or function with a quoted
+  mixed-case name (`"MyPkg"`) called the name lowercased, which doesn't
+  exist (#121).
 - The object browser's favorites and recently opened objects, and the open
   project, were lost when Pythia was closed with no document open (#118).
 - Debugger: *Watch* on an element of a collection with text keys

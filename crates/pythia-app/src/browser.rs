@@ -570,7 +570,10 @@ impl Browser {
             ),
             None => object.qualified(),
         };
-        let text = crate::test_script::test_block(&qualified.to_lowercase(), found);
+        let text = crate::test_script::test_block(
+            &crate::test_script::lowercase_unquoted(&qualified),
+            found,
+        );
         let Some(connection) = self.connection.clone() else {
             return;
         };
