@@ -2,6 +2,7 @@
 
 use egui::style::{Selection, WidgetVisuals};
 use egui::{Color32, CornerRadius, Frame, Margin, Shadow, Stroke, Style, Theme, Vec2};
+use pythia_config::{AppearanceSettings, GridSettings, ScrollBars};
 
 /// Pending transaction, warnings.
 pub const WARN: Color32 = Color32::from_rgb(0xe0, 0x9b, 0x2d);
@@ -72,43 +73,130 @@ const LIGHT: Palette = Palette {
 
 pub fn install(ctx: &egui::Context) {
     pythia_ui::icons::install(ctx);
-    set_fonts(ctx, None);
-    ctx.style_mut_of(Theme::Dark, |s| apply(s, &DARK));
-    ctx.style_mut_of(Theme::Light, |s| apply(s, &LIGHT));
+    set_fonts(ctx, None, None);
+    apply(
+        ctx,
+        &AppearanceSettings::default(),
+        &GridSettings::default(),
+    );
 }
 
-/// Installs the fonts, with `code_font` (font file bytes) first for code.
-pub fn set_fonts(ctx: &egui::Context, code_font: Option<Vec<u8>>) {
+/// Styles both themes, and the result grids, after the settings.
+pub fn apply(ctx: &egui::Context, appearance: &AppearanceSettings, grid: &GridSettings) {
+    ctx.style_mut_of(Theme::Dark, |s| style(s, &DARK, appearance));
+    ctx.style_mut_of(Theme::Light, |s| style(s, &LIGHT, appearance));
+    let rgb = |[r, g, b]: [u8; 3]| Color32::from_rgb(r, g, b);
+    let family = if grid.interface_font {
+        egui::FontFamily::Proportional
+    } else {
+        egui::FontFamily::Monospace
+    };
+    pythia_ui::set_grid_style(
+        ctx,
+        pythia_ui::GridStyle {
+            font: Some(egui::FontId::new(grid.font_size.clamp(6.0, 40.0), family)),
+            striped: grid.striped,
+            row_lines: grid.row_lines,
+            null_text: grid.null_text.clone(),
+            null_color: grid.null_color.map(rgb),
+        },
+    );
+}
+
+/// Installs the fonts, with `code_font` (font file bytes) first for code
+/// and `ui_font` first for everything else.
+pub fn set_fonts(ctx: &egui::Context, code_font: Option<Vec<u8>>, ui_font: Option<Vec<u8>>) {
     // The UI font lacks arrows and some symbols; fall back to the
-    // monospace font (Hack) before the emoji fonts.
+    // monospace font (Hack) before the emoji fonts. A font of the user's
+    // goes before both, so they remain its fallbacks.
     let mut fonts = egui::FontDefinitions::default();
     if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
         family.insert(1.min(family.len()), "Hack".to_owned());
     }
-    if let Some(bytes) = code_font {
+    for (name, bytes, family) in [
+        ("code", code_font, egui::FontFamily::Monospace),
+        ("ui", ui_font, egui::FontFamily::Proportional),
+    ] {
+        let Some(bytes) = bytes else { continue };
         fonts.font_data.insert(
-            "code".to_owned(),
+            name.to_owned(),
             std::sync::Arc::new(egui::FontData::from_owned(bytes)),
         );
-        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-            family.insert(0, "code".to_owned());
+        if let Some(family) = fonts.families.get_mut(&family) {
+            family.insert(0, name.to_owned());
         }
     }
     ctx.set_fonts(fonts);
 }
 
-fn apply(style: &mut Style, p: &Palette) {
-    let radius = CornerRadius::same(5);
-    let spacing = &mut style.spacing;
-    spacing.item_spacing = Vec2::new(8.0, 5.0);
-    spacing.button_padding = Vec2::new(8.0, 3.0);
-    spacing.interact_size = Vec2::new(36.0, 22.0);
-    spacing.menu_margin = Margin::same(6);
-    spacing.window_margin = Margin::same(14);
-    spacing.indent = 16.0;
-    spacing.scroll.bar_width = 8.0;
-    spacing.scroll.floating = true;
+const OBJECT_NAMES: &str = "object-names";
 
+/// Font of object names in the object browser: the code font or the
+/// interface font, as set.
+pub fn object_names(style: &Style) -> egui::FontId {
+    style
+        .text_styles
+        .get(&egui::TextStyle::Name(OBJECT_NAMES.into()))
+        .cloned()
+        .unwrap_or_else(|| egui::TextStyle::Monospace.resolve(style))
+}
+
+/// The built-in look's body text size, which the other sizes relate to.
+const BASE_FONT_SIZE: f32 = 13.0;
+
+fn style(style: &mut Style, p: &Palette, a: &AppearanceSettings) {
+    use egui::{FontId, TextStyle};
+    let size = a.font_size.clamp(6.0, 40.0);
+    let scale = size / BASE_FONT_SIZE;
+    for (text_style, font) in [
+        (TextStyle::Small, FontId::proportional(9.0 * scale)),
+        (TextStyle::Body, FontId::proportional(size)),
+        (TextStyle::Button, FontId::proportional(size)),
+        (TextStyle::Heading, FontId::proportional(18.0 * scale)),
+        (TextStyle::Monospace, FontId::monospace(size)),
+        (
+            TextStyle::Name(OBJECT_NAMES.into()),
+            if a.names_in_code_font {
+                FontId::monospace(size)
+            } else {
+                FontId::proportional(size)
+            },
+        ),
+    ] {
+        style.text_styles.insert(text_style, font);
+    }
+
+    let d = &a.density;
+    let (padding, gap) = (d.padding.clamp(0.0, 20.0), d.spacing.clamp(0.0, 20.0));
+    let margin = d.margin.clamp(0.0, 40.0);
+    let radius = |r: u8| CornerRadius::same(if a.rounded { r } else { 0 });
+    let spacing = &mut style.spacing;
+    spacing.item_spacing = Vec2::new(gap + 3.0, gap);
+    spacing.button_padding = Vec2::new((padding * 2.0 + 2.0).max(4.0), padding);
+    // A line of body text plus the padding: the rows of lists and tables
+    // (see `pythia_ui::row_height`) and widgets line up.
+    spacing.interact_size = Vec2::new(36.0, 16.0 * scale + 2.0 * padding);
+    spacing.menu_margin = Margin::same((margin / 2.0).clamp(2.0, 6.0) as i8);
+    spacing.window_margin = Margin::same(margin as i8);
+    spacing.indent = d.indent.clamp(0.0, 64.0);
+    spacing.scroll = match a.scroll_bars {
+        ScrollBars::Floating => egui::style::ScrollStyle::floating(),
+        ScrollBars::Visible => egui::style::ScrollStyle {
+            dormant_handle_opacity: 0.6,
+            active_handle_opacity: 0.8,
+            ..egui::style::ScrollStyle::solid()
+        },
+    };
+    spacing.scroll.bar_width = a.scroll_bar_width.clamp(2.0, 24.0);
+    style.animation_time = if a.animations {
+        Style::default().animation_time
+    } else {
+        0.0
+    };
+
+    let accent = a
+        .accent
+        .map_or(ACCENT, |[r, g, b]| Color32::from_rgb(r, g, b));
     let v = &mut style.visuals;
     v.panel_fill = p.panel;
     v.window_fill = p.raised;
@@ -117,8 +205,8 @@ fn apply(style: &mut Style, p: &Palette) {
     v.code_bg_color = p.surface;
     v.faint_bg_color = p.stripe;
     v.window_stroke = Stroke::new(1.0, p.border);
-    v.window_corner_radius = CornerRadius::same(10);
-    v.menu_corner_radius = CornerRadius::same(8);
+    v.window_corner_radius = radius(10);
+    v.menu_corner_radius = radius(8);
     let shadow_alpha = if v.dark_mode { 110 } else { 40 };
     v.window_shadow = Shadow {
         offset: [0, 8],
@@ -132,21 +220,32 @@ fn apply(style: &mut Style, p: &Palette) {
         spread: 0,
         color: Color32::from_black_alpha(shadow_alpha),
     };
+    if !a.shadows {
+        v.window_shadow = Shadow::NONE;
+        v.popup_shadow = Shadow::NONE;
+    }
+    // A chosen accent tints selections too.
+    let selection = if a.accent.is_some() {
+        let alpha = if v.dark_mode { 0x90 } else { 0x60 };
+        Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), alpha)
+    } else {
+        p.selection
+    };
     v.selection = Selection {
-        bg_fill: p.selection,
+        bg_fill: selection,
         stroke: Stroke::new(1.0, p.text),
     };
     v.hyperlink_color = p.link;
     v.error_fg_color = p.error;
     v.warn_fg_color = p.warn;
     v.striped = true;
-    v.text_cursor.stroke = Stroke::new(2.0, ACCENT);
+    v.text_cursor.stroke = Stroke::new(2.0, accent);
 
     let widget = |bg: Color32, stroke: Color32, fg: Color32| WidgetVisuals {
         bg_fill: bg,
         weak_bg_fill: bg,
         bg_stroke: Stroke::new(1.0, stroke),
-        corner_radius: radius,
+        corner_radius: radius(5),
         fg_stroke: Stroke::new(1.0, fg),
         expansion: 0.0,
     };
@@ -159,7 +258,7 @@ fn apply(style: &mut Style, p: &Palette) {
     // buttons) only draw the stroke on hover, so they would grow by it.
     w.inactive.bg_stroke = Stroke::NONE;
     w.hovered = widget(p.active, p.border, p.text);
-    w.active = widget(p.active, ACCENT, p.text);
+    w.active = widget(p.active, accent, p.text);
     w.open = widget(p.active, p.border, p.text);
     // Weak text (labels marked .weak()) uses this.
     v.weak_text_color = Some(p.text_weak);
@@ -177,20 +276,38 @@ pub fn base(visuals: &egui::Visuals) -> Color32 {
 
 /// Frame of the toolbar strip below the menu.
 pub fn toolbar_frame(style: &Style) -> Frame {
+    let (x, y) = bar_margin(style);
     Frame::new()
         .fill(style.visuals.panel_fill)
-        .inner_margin(Margin::symmetric(8, 4))
+        .inner_margin(Margin::symmetric(x + 2, y + 1))
 }
 
 /// Frame of the status bar.
 pub fn status_frame(style: &Style) -> Frame {
+    let (x, y) = bar_margin(style);
     Frame::new()
         .fill(style.visuals.window_fill)
-        .inner_margin(Margin::symmetric(10, 3))
+        .inner_margin(Margin::symmetric(x + 4, y))
         .stroke(Stroke::new(
             1.0,
             style.visuals.widgets.noninteractive.bg_stroke.color,
         ))
+}
+
+/// Margins of the toolbar and the status bar, which follow the density:
+/// (menu margin, vertical padding).
+fn bar_margin(style: &Style) -> (i8, i8) {
+    (
+        style.spacing.menu_margin.left,
+        style.spacing.button_padding.y.round() as i8,
+    )
+}
+
+/// The dock's style: tabs as high as other widgets.
+pub fn dock_style(style: &Style) -> egui_dock::Style {
+    let mut dock = egui_dock::Style::from_egui(style);
+    dock.tab_bar.height = style.spacing.interact_size.y + 2.0;
+    dock
 }
 
 #[cfg(test)]
@@ -274,6 +391,152 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "no glyph for:\n{}", missing.join("\n"));
+    }
+
+    /// The default settings give the look Pythia had before they existed.
+    #[test]
+    fn default_appearance_is_the_built_in_look() {
+        use egui::{CornerRadius, Margin, Vec2};
+        let ctx = egui::Context::default();
+        super::install(&ctx);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let style = ctx.style_of(theme);
+            let s = &style.spacing;
+            assert_eq!(s.item_spacing, Vec2::new(8.0, 5.0));
+            assert_eq!(s.button_padding, Vec2::new(8.0, 3.0));
+            assert_eq!(s.interact_size, Vec2::new(36.0, 22.0));
+            assert_eq!(s.menu_margin, Margin::same(6));
+            assert_eq!(s.window_margin, Margin::same(14));
+            assert_eq!(s.indent, 16.0);
+            assert_eq!(
+                (s.scroll.floating, s.scroll.bar_width),
+                (true, 8.0),
+                "scroll bars"
+            );
+            let mut text_styles = style.text_styles.clone();
+            text_styles.retain(|t, _| !matches!(t, egui::TextStyle::Name(_)));
+            assert_eq!(text_styles, egui::style::default_text_styles());
+            assert_eq!(super::object_names(&style), egui::FontId::monospace(13.0));
+            assert_eq!(
+                super::toolbar_frame(&style).inner_margin,
+                Margin::symmetric(8, 4)
+            );
+            assert_eq!(
+                super::status_frame(&style).inner_margin,
+                Margin::symmetric(10, 3)
+            );
+            assert_eq!(super::dock_style(&style).tab_bar.height, 24.0);
+            let v = &style.visuals;
+            assert_eq!(v.widgets.inactive.corner_radius, CornerRadius::same(5));
+            assert_eq!(v.window_corner_radius, CornerRadius::same(10));
+            assert_ne!(v.window_shadow, egui::Shadow::NONE);
+            assert_eq!(v.text_cursor.stroke.color, super::ACCENT);
+            assert_eq!(style.animation_time, egui::Style::default().animation_time);
+        }
+    }
+
+    /// Font size, density and look settings style both themes.
+    #[test]
+    fn appearance_settings_style_both_themes() {
+        use egui::{Color32, CornerRadius, Margin, TextStyle, Vec2};
+        use pythia_config::{AppearanceSettings, Density, GridSettings, ScrollBars};
+        let ctx = egui::Context::default();
+        super::install(&ctx);
+        let accent = Color32::from_rgb(0x10, 0x80, 0x40);
+        let appearance = AppearanceSettings {
+            font_size: 15.6,
+            density: Density::COMPACT,
+            names_in_code_font: false,
+            accent: Some([0x10, 0x80, 0x40]),
+            rounded: false,
+            shadows: false,
+            scroll_bars: ScrollBars::Visible,
+            scroll_bar_width: 12.0,
+            animations: false,
+            ..Default::default()
+        };
+        super::apply(&ctx, &appearance, &GridSettings::default());
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let style = ctx.style_of(theme);
+            let size = |t: TextStyle| style.text_styles[&t].size;
+            assert_eq!(size(TextStyle::Body), 15.6);
+            assert_eq!(size(TextStyle::Button), 15.6);
+            assert!((size(TextStyle::Small) - 10.8).abs() < 0.01);
+            assert!((size(TextStyle::Heading) - 21.6).abs() < 0.01);
+            assert_eq!(
+                super::object_names(&style),
+                egui::FontId::proportional(15.6)
+            );
+            let s = &style.spacing;
+            assert_eq!(s.item_spacing, Vec2::new(6.0, 3.0));
+            assert_eq!(s.button_padding, Vec2::new(6.0, 2.0));
+            assert!((s.interact_size.y - (16.0 * 1.2 + 4.0)).abs() < 0.01);
+            assert_eq!(s.window_margin, Margin::same(6));
+            assert_eq!(s.menu_margin, Margin::same(3));
+            assert_eq!(s.indent, 12.0);
+            assert_eq!((s.scroll.floating, s.scroll.bar_width), (false, 12.0));
+            assert_eq!(
+                super::toolbar_frame(&style).inner_margin,
+                Margin::symmetric(5, 3)
+            );
+            assert_eq!(
+                super::status_frame(&style).inner_margin,
+                Margin::symmetric(7, 2)
+            );
+            let v = &style.visuals;
+            assert_eq!(v.widgets.inactive.corner_radius, CornerRadius::ZERO);
+            assert_eq!(v.menu_corner_radius, CornerRadius::ZERO);
+            assert_eq!(
+                (v.window_shadow, v.popup_shadow),
+                (egui::Shadow::NONE, egui::Shadow::NONE)
+            );
+            assert_eq!(v.text_cursor.stroke.color, accent);
+            assert_eq!(v.widgets.active.bg_stroke.color, accent);
+            let selection = v.selection.bg_fill.to_srgba_unmultiplied();
+            assert_eq!(selection[..3], [0x10, 0x80, 0x40]);
+            assert_eq!(style.animation_time, 0.0);
+        }
+        // Back to the defaults: nothing of the above stays.
+        super::apply(
+            &ctx,
+            &AppearanceSettings::default(),
+            &GridSettings::default(),
+        );
+        let style = ctx.style_of(egui::Theme::Dark);
+        assert_eq!(style.text_styles[&TextStyle::Body].size, 13.0);
+        assert_eq!(super::object_names(&style), egui::FontId::monospace(13.0));
+        assert_eq!(style.spacing.window_margin, Margin::same(14));
+    }
+
+    /// An interface font goes first; the built-in fonts stay its fallbacks,
+    /// so symbols it lacks still have glyphs (#91).
+    #[test]
+    fn interface_font_keeps_the_fallbacks() {
+        let font = "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf";
+        let Ok(bytes) = std::fs::read(font) else {
+            return;
+        };
+        let ctx = egui::Context::default();
+        super::install(&ctx);
+        super::set_fonts(&ctx, None, Some(bytes));
+        // Nothing is rendered.
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        let (proportional, monospace) = ctx.fonts(|f| {
+            let defs = f.definitions();
+            (
+                defs.families[&egui::FontFamily::Proportional].clone(),
+                defs.families[&egui::FontFamily::Monospace].clone(),
+            )
+        });
+        assert_eq!(proportional[0], "ui");
+        assert!(
+            proportional.contains(&"Hack".to_owned()),
+            "{proportional:?}"
+        );
+        assert!(proportional.len() > 2, "{proportional:?}");
+        assert!(!monospace.contains(&"ui".to_owned()), "{monospace:?}");
     }
 
     /// Buttons without an idle frame (icon buttons) keep their size on hover.

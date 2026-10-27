@@ -24,6 +24,10 @@ pub struct Settings {
     pub keymap: KeymapPreset,
     /// UI zoom factor on top of the OS scale factor.
     pub ui_scale: f32,
+    /// The interface's font, spacing and look.
+    pub appearance: AppearanceSettings,
+    /// How query results are shown.
+    pub grid: GridSettings,
     /// Rows fetched per round trip and shown before "fetch more".
     pub fetch_size: usize,
     /// SQL windows commit after each statement. Never on production
@@ -110,6 +114,8 @@ impl Default for Settings {
             theme: ThemeChoice::default(),
             keymap: KeymapPreset::default(),
             ui_scale: 1.0,
+            appearance: AppearanceSettings::default(),
+            grid: GridSettings::default(),
             fetch_size: 500,
             autocommit: false,
             switch_window_connection: false,
@@ -127,6 +133,137 @@ impl Default for Settings {
     }
 }
 
+/// The interface's font, spacing and look. Interface zoom scales all of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// A TTF/OTF file for the interface (empty: the built-in font).
+    pub font_file: String,
+    /// Size of the interface's text in points; small print and headings
+    /// scale with it.
+    pub font_size: f32,
+    pub density: Density,
+    /// The object browser shows names in the code font (off: the
+    /// interface font).
+    pub names_in_code_font: bool,
+    /// Focus, the text cursor and selections (none: the built-in blue).
+    pub accent: Option<[u8; 3]>,
+    /// Rounded corners on widgets, menus and windows (off: square).
+    pub rounded: bool,
+    /// Shadows under windows, menus and popups.
+    pub shadows: bool,
+    pub scroll_bars: ScrollBars,
+    /// Width of the scroll bars in points.
+    pub scroll_bar_width: f32,
+    /// Collapsing sections and scrolling to a target are animated.
+    pub animations: bool,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            font_file: String::new(),
+            font_size: 13.0,
+            density: Density::default(),
+            names_in_code_font: true,
+            accent: None,
+            rounded: true,
+            shadows: true,
+            scroll_bars: ScrollBars::default(),
+            scroll_bar_width: 8.0,
+            animations: true,
+        }
+    }
+}
+
+/// Spacing of the interface, in points.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Density {
+    /// Vertical padding of buttons and of list, tree and table rows.
+    pub padding: f32,
+    /// Vertical gap between widgets.
+    pub spacing: f32,
+    /// Inner margin of tabs, dialogs and panels.
+    pub margin: f32,
+    /// Indentation of tree levels.
+    pub indent: f32,
+}
+
+impl Density {
+    pub const COMFORTABLE: Density = Density {
+        padding: 3.0,
+        spacing: 5.0,
+        margin: 14.0,
+        indent: 16.0,
+    };
+    pub const COMPACT: Density = Density {
+        padding: 2.0,
+        spacing: 3.0,
+        margin: 6.0,
+        indent: 12.0,
+    };
+}
+
+impl Default for Density {
+    fn default() -> Self {
+        Self::COMFORTABLE
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScrollBars {
+    /// Over the content, shown while the mouse is over a scrolling area.
+    #[default]
+    Floating,
+    /// Beside the content, always shown.
+    Visible,
+}
+
+/// How query results are shown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GridSettings {
+    /// Cells in the interface font instead of the code font.
+    pub interface_font: bool,
+    /// Size of the cells' text in points.
+    pub font_size: f32,
+    /// Every other row shaded.
+    pub striped: bool,
+    /// Lines between rows.
+    pub row_lines: bool,
+    /// What a NULL shows.
+    pub null_text: String,
+    /// Color of NULL (none: weak text).
+    pub null_color: Option<[u8; 3]>,
+}
+
+impl Default for GridSettings {
+    fn default() -> Self {
+        Self {
+            interface_font: false,
+            font_size: 13.0,
+            striped: true,
+            row_lines: false,
+            null_text: "NULL".to_owned(),
+            null_color: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CursorShape {
+    /// A thin bar between characters.
+    #[default]
+    Line,
+    /// A box over the character.
+    Block,
+    /// A line under the character.
+    Underline,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorSettings {
@@ -137,6 +274,10 @@ pub struct EditorSettings {
     pub show_line_numbers: bool,
     pub show_whitespace: bool,
     pub highlight_current_line: bool,
+    /// Extra space between lines in points.
+    pub line_spacing: f32,
+    pub cursor_shape: CursorShape,
+    pub cursor_blink: bool,
     /// Offer completions while typing (Ctrl+Space always works).
     pub auto_complete: bool,
     /// Identifier characters typed before completions appear.
@@ -155,6 +296,9 @@ impl Default for EditorSettings {
             show_line_numbers: true,
             show_whitespace: false,
             highlight_current_line: true,
+            line_spacing: 0.0,
+            cursor_shape: CursorShape::default(),
+            cursor_blink: true,
             auto_complete: true,
             auto_complete_min_chars: 2,
             auto_complete_delay_ms: 150,

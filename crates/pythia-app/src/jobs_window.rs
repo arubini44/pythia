@@ -416,7 +416,7 @@ impl JobsWindow {
     }
 
     fn jobs_table(&self, ui: &mut Ui, jobs: &[usize], clicked: &mut Option<usize>) {
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let row_height = pythia_ui::row_height(ui);
         TableBuilder::new(ui)
             .id_salt("jobs")
             .striped(true)
@@ -622,7 +622,7 @@ impl JobsWindow {
             ui.weak("No runs logged");
             return action;
         }
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let row_height = pythia_ui::row_height(ui);
         TableBuilder::new(ui)
             .id_salt("job_runs")
             .striped(true)

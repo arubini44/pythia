@@ -179,6 +179,19 @@ for Linux, Windows and macOS.
   in their tab. *Settings → Query → Switch connection per window* gives
   each SQL window a connection of its own instead.
 
+**Appearance**
+- Light and dark themes, and an interface zoom that scales everything.
+- *Settings → Appearance*: a font file and size for the interface (menus,
+  tabs, dialogs, the object browser), a Compact density next to the default
+  Comfortable one, or padding, gaps, margins and tree indent set one by
+  one; an accent color, square corners, no shadows, scroll bars that are
+  always visible, no animations. Object names in the browser can use the
+  interface font instead of the code font.
+- The result grid's font (code or interface font) and size, striped rows,
+  lines between rows and what NULL looks like.
+- The editor's font and size, line spacing, and a line, block or underline
+  cursor that blinks or not.
+
 **MySQL (experimental)**
 - Connect to MySQL (tested with 9.4; MariaDB not yet) with *Type: MySQL* and `host:3306/database`
   (`?tls` for TLS, `?tls=skip-verify` for self-signed certificates); no

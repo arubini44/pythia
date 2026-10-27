@@ -96,7 +96,7 @@ impl PlanView {
             .collect();
         let has_children = |id: u32| plan.iter().any(|r| r.parent == Some(id));
         let accent = ui.visuals().hyperlink_color;
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
+        let row_height = pythia_ui::row_height(ui) + 2.0;
         let selected_bg = ui.visuals().selection.bg_fill;
         let mut toggle = None;
         let mut select = None;

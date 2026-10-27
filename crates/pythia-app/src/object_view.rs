@@ -369,7 +369,7 @@ fn loading_ui<T>(ui: &mut Ui, state: Option<&Loaded<T>>) {
 }
 
 fn columns_table(ui: &mut Ui, cols: &[Col]) {
-    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+    let row_height = pythia_ui::row_height(ui);
     TableBuilder::new(ui)
         .striped(true)
         .resizable(true)

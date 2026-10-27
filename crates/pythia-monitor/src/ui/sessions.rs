@@ -333,7 +333,7 @@ impl SessionsView {
 
     fn table(&mut self, ui: &mut Ui, caps: Option<&Capabilities>, actions: &mut Vec<RowAction>) {
         let rows = self.sorted();
-        let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let h = super::style::row_height(ui);
         let blocked_bg = Palette::RED.gamma_multiply(0.14);
         let blocker_bg = Palette::ORANGE.gamma_multiply(0.14);
         let blockers: HashSet<i64> = self

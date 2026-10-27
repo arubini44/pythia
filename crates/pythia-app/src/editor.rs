@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use egui::Ui;
-use pythia_ui::code_editor::{CodeEditor, EditorConfig, EditorOutput};
+use pythia_ui::code_editor::{CaretShape, CodeEditor, EditorConfig, EditorOutput};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use pythia_ui::code_editor::{Marker, MarkerKind};
@@ -354,6 +354,13 @@ impl Editor {
             show_line_numbers: settings.show_line_numbers,
             show_whitespace: settings.show_whitespace,
             highlight_current_line: settings.highlight_current_line,
+            line_spacing: settings.line_spacing,
+            caret: match settings.cursor_shape {
+                pythia_config::CursorShape::Line => CaretShape::Line,
+                pythia_config::CursorShape::Block => CaretShape::Block,
+                pythia_config::CursorShape::Underline => CaretShape::Underline,
+            },
+            caret_blink: settings.cursor_blink,
             // Automatic completion off = only Ctrl+Space.
             auto_complete_min_chars: if settings.auto_complete {
                 settings.auto_complete_min_chars.max(1)

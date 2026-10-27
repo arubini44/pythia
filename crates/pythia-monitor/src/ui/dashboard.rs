@@ -854,7 +854,7 @@ fn top_sql(ui: &mut Ui, snap: &DashboardSnapshot, wants: &mut Wants) {
             return;
         }
         let analyze = wants.analyze;
-        let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let h = super::style::row_height(ui);
         let mut table = TableBuilder::new(ui)
             .id_salt("top-sql")
             .striped(true)

@@ -344,7 +344,7 @@ impl SessionDetailView {
             return;
         };
         style::section_errors(ui, &d.errors);
-        let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let h = super::style::row_height(ui);
         match self.tab {
             DetailTab::Overview => {
                 egui::ScrollArea::vertical()

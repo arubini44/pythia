@@ -305,20 +305,77 @@ impl SettingsDialog {
 }
 
 fn row(ui: &mut Ui, label: &str, hint: &str, add: impl FnOnce(&mut Ui)) {
+    let width = label_width(ui);
     ui.horizontal(|ui| {
-        ui.add_sized([180.0, 20.0], egui::Label::new(label));
+        let height = ui.spacing().interact_size.y;
+        ui.add_sized([width, height], egui::Label::new(label));
         add(ui);
     });
     if !hint.is_empty() {
         ui.horizontal(|ui| {
-            ui.add_space(186.0);
+            ui.add_space(width + ui.spacing().item_spacing.x - 2.0);
             ui.label(RichText::new(hint).small().weak());
         });
     }
     ui.add_space(4.0);
 }
 
+/// The labels' column: wider with a bigger interface font.
+fn label_width(ui: &Ui) -> f32 {
+    let size = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Body)
+        .map_or(13.0, |f| f.size);
+    180.0 * size / 13.0
+}
+
+/// A group of rows under a title.
+fn group(ui: &mut Ui, title: &str) {
+    ui.add_space(8.0);
+    ui.label(RichText::new(title).strong());
+    ui.add_space(4.0);
+}
+
+/// A font file's path with Browse… and a button to clear it.
+fn font_file(ui: &mut Ui, path: &mut String, built_in: &str) {
+    ui.add(
+        egui::TextEdit::singleline(path)
+            .hint_text(format!("{built_in} (built in)"))
+            .desired_width(260.0),
+    );
+    if ui.button("Browse…").clicked()
+        && let Some(file) = rfd::FileDialog::new()
+            .add_filter("Fonts", &["ttf", "otf", "ttc"])
+            .pick_file()
+    {
+        *path = file.display().to_string();
+    }
+    if !path.is_empty() && ui.small_button("×").clicked() {
+        path.clear();
+    }
+}
+
+/// A color picker; "Default" goes back to `default` (shown while unset).
+fn color(ui: &mut Ui, color: &mut Option<[u8; 3]>, default: egui::Color32) {
+    let mut rgb = color.unwrap_or([default.r(), default.g(), default.b()]);
+    if egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+        *color = Some(rgb);
+    }
+    if color.is_some() && ui.small_button("Default").clicked() {
+        *color = None;
+    }
+}
+
+/// Whole points from 0 to `max`.
+fn slider(value: &mut f32, max: f32) -> egui::Slider<'_> {
+    egui::Slider::new(value, 0.0..=max)
+        .step_by(1.0)
+        .fixed_decimals(0)
+}
+
 fn appearance(ui: &mut Ui, s: &mut Settings) {
+    use pythia_config::{Density, ScrollBars};
     row(ui, "Theme", "", |ui| {
         ui.selectable_value(&mut s.theme, ThemeChoice::System, "System");
         ui.selectable_value(&mut s.theme, ThemeChoice::Light, "Light");
@@ -327,7 +384,7 @@ fn appearance(ui: &mut Ui, s: &mut Settings) {
     row(
         ui,
         "Interface zoom",
-        "Ctrl+Plus / Ctrl+Minus / Ctrl+0",
+        "Scales everything, text and spacing. Ctrl+Plus / Ctrl+Minus / Ctrl+0",
         |ui| {
             ui.add(
                 egui::Slider::new(&mut s.ui_scale, 0.5..=3.0)
@@ -336,9 +393,124 @@ fn appearance(ui: &mut Ui, s: &mut Settings) {
             );
         },
     );
+
+    let a = &mut s.appearance;
+    group(ui, "Interface font");
+    row(
+        ui,
+        "Font",
+        "A TrueType/OpenType file for menus, tabs, the object browser and dialogs; empty uses \
+         the built-in font",
+        |ui| font_file(ui, &mut a.font_file, "Ubuntu Light"),
+    );
+    row(ui, "Size", "Small print and headings scale with it", |ui| {
+        ui.add(egui::Slider::new(&mut a.font_size, 8.0..=24.0).step_by(0.5));
+    });
+
+    group(ui, "Spacing");
+    let d = &mut a.density;
+    row(ui, "Density", "", |ui| {
+        for (label, preset) in [
+            ("Comfortable", Density::COMFORTABLE),
+            ("Compact", Density::COMPACT),
+        ] {
+            if ui.selectable_label(*d == preset, label).clicked() {
+                *d = preset;
+            }
+        }
+        if *d != Density::COMFORTABLE && *d != Density::COMPACT {
+            ui.weak("Custom");
+        }
+    });
+    row(
+        ui,
+        "Padding",
+        "Above and below the text of buttons and of list, tree and table rows",
+        |ui| {
+            ui.add(slider(&mut d.padding, 8.0));
+        },
+    );
+    row(ui, "Gaps", "Between widgets and between table rows", |ui| {
+        ui.add(slider(&mut d.spacing, 12.0));
+    });
+    row(ui, "Margins", "Inside tabs, dialogs and panels", |ui| {
+        ui.add(slider(&mut d.margin, 24.0));
+    });
+    row(ui, "Indent", "Per level of a tree", |ui| {
+        ui.add(slider(&mut d.indent, 32.0));
+    });
+
+    group(ui, "Look");
+    row(
+        ui,
+        "Accent color",
+        "Focus, the text cursor and selections",
+        |ui| color(ui, &mut a.accent, crate::theme::ACCENT),
+    );
+    row(ui, "Rounded corners", "Off: square", |ui| {
+        ui.checkbox(&mut a.rounded, "");
+    });
+    row(ui, "Shadows", "Under dialogs, menus and popups", |ui| {
+        ui.checkbox(&mut a.shadows, "");
+    });
+    row(
+        ui,
+        "Scroll bars",
+        "Floating ones show while the mouse is over a scrolling area",
+        |ui| {
+            ui.selectable_value(&mut a.scroll_bars, ScrollBars::Floating, "Floating");
+            ui.selectable_value(&mut a.scroll_bars, ScrollBars::Visible, "Always visible");
+            ui.add(
+                egui::Slider::new(&mut a.scroll_bar_width, 2.0..=16.0)
+                    .step_by(1.0)
+                    .fixed_decimals(0)
+                    .text("wide"),
+            );
+        },
+    );
+    row(
+        ui,
+        "Animations",
+        "Collapsing sections and scrolling to a target",
+        |ui| {
+            ui.checkbox(&mut a.animations, "");
+        },
+    );
+
+    group(ui, "Object browser");
+    row(ui, "Names", "", |ui| {
+        ui.selectable_value(&mut a.names_in_code_font, true, "Code font");
+        ui.selectable_value(&mut a.names_in_code_font, false, "Interface font");
+    });
+
+    let g = &mut s.grid;
+    group(ui, "Result grid");
+    row(ui, "Font", "", |ui| {
+        ui.selectable_value(&mut g.interface_font, false, "Code font");
+        ui.selectable_value(&mut g.interface_font, true, "Interface font");
+    });
+    row(ui, "Size", "", |ui| {
+        ui.add(egui::Slider::new(&mut g.font_size, 8.0..=24.0).step_by(0.5));
+    });
+    row(ui, "Striped rows", "", |ui| {
+        ui.checkbox(&mut g.striped, "");
+    });
+    row(ui, "Row lines", "", |ui| {
+        ui.checkbox(&mut g.row_lines, "");
+    });
+    row(ui, "NULL shows as", "", |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut g.null_text)
+                .hint_text("(nothing)")
+                .desired_width(100.0),
+        );
+        let weak = ui.visuals().weak_text_color();
+        color(ui, &mut g.null_color, weak);
+    });
 }
 
 fn editor(ui: &mut Ui, s: &mut Settings) {
+    use pythia_config::CursorShape;
     let e = &mut s.editor;
     row(ui, "Font size", "", |ui| {
         ui.add(egui::Slider::new(&mut e.font_size, 8.0..=32.0).step_by(0.5));
@@ -347,24 +519,17 @@ fn editor(ui: &mut Ui, s: &mut Settings) {
         ui,
         "Font",
         "A TrueType/OpenType file; empty uses the built-in Hack",
-        |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut e.font_file)
-                    .hint_text("Hack (built in)")
-                    .desired_width(260.0),
-            );
-            if ui.button("Browse…").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Fonts", &["ttf", "otf", "ttc"])
-                    .pick_file()
-            {
-                e.font_file = path.display().to_string();
-            }
-            if !e.font_file.is_empty() && ui.small_button("×").clicked() {
-                e.font_file.clear();
-            }
-        },
+        |ui| font_file(ui, &mut e.font_file, "Hack"),
     );
+    row(ui, "Line spacing", "Extra space between lines", |ui| {
+        ui.add(slider(&mut e.line_spacing, 12.0));
+    });
+    row(ui, "Cursor", "", |ui| {
+        ui.selectable_value(&mut e.cursor_shape, CursorShape::Line, "Line");
+        ui.selectable_value(&mut e.cursor_shape, CursorShape::Block, "Block");
+        ui.selectable_value(&mut e.cursor_shape, CursorShape::Underline, "Underline");
+        ui.checkbox(&mut e.cursor_blink, "Blinking");
+    });
     row(ui, "Tab width", "Tab inserts spaces", |ui| {
         ui.add(egui::Slider::new(&mut e.tab_width, 1..=8));
     });

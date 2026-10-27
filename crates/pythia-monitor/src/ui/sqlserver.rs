@@ -714,7 +714,7 @@ fn tables(ui: &mut Ui, storage: &Storage) {
 fn top_statements(ui: &mut Ui, snap: &MsSnapshot, wants: &mut Wants) {
     section(ui, "Top statements by total time (plans in cache)", |ui| {
         let analyze = wants.analyze;
-        let h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+        let h = super::style::row_height(ui);
         let mut table = TableBuilder::new(ui)
             .id_salt("sqlserver-top-statements")
             .striped(true)
