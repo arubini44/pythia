@@ -76,6 +76,13 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- The status bar's invalid objects count didn't follow compiles in a
+  program window, changes made with an object or table editor, or PL/SQL
+  blocks run in a SQL window (`exec dbms_utility.compile_schema(user)` and
+  the like): it showed the old number until the next periodic refresh
+  (#127). It is counted again after each of them, and once more when
+  objects changed while a count was running. A count lost with a closed or
+  reconnected session no longer keeps the status bar from updating.
 - *Switch Spec/Body* jumped to the wrong overload when the body implements
   a package's overloads in another order than the spec declares them
   (#125). It now goes to the one with the same parameters.

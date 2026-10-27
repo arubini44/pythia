@@ -123,6 +123,9 @@ pub struct PythiaApp {
     invalid: HashMap<String, InvalidCount>,
     /// Count requests in flight: request id → connection.
     invalid_inflight: HashMap<u64, String>,
+    /// Connections whose objects changed while a count was in flight, to
+    /// count again once it is in.
+    invalid_again: std::collections::HashSet<String>,
     /// Lookups of why debugger variables are opaque: request id → unit.
     opaque_inflight: HashMap<u64, pythia_debugger::Unit>,
     /// Requests already sent (or answered) per connection, to avoid repeats.
@@ -213,6 +216,7 @@ impl PythiaApp {
             ai_format: None,
             invalid: HashMap::new(),
             invalid_inflight: HashMap::new(),
+            invalid_again: std::collections::HashSet::new(),
             opaque_inflight: HashMap::new(),
             catalog_requested: std::collections::HashSet::new(),
             log: Vec::new(),
@@ -1081,7 +1085,7 @@ impl PythiaApp {
             s.session.cancel();
         }
         if let Some(name) = &connection {
-            let mut ddl = false;
+            let (mut ddl, mut plsql) = (false, false);
             for sql in effects.executed {
                 let first = sql
                     .split_whitespace()
@@ -1092,10 +1096,18 @@ impl PythiaApp {
                     first.as_str(),
                     "CREATE" | "ALTER" | "DROP" | "RENAME" | "COMMENT" | "TRUNCATE"
                 );
+                // Blocks and calls compile and drop objects too
+                // (DBMS_UTILITY.COMPILE_SCHEMA, EXECUTE IMMEDIATE, …).
+                plsql |= matches!(
+                    first.as_str(),
+                    "BEGIN" | "DECLARE" | "CALL" | "EXEC" | "EXECUTE"
+                );
                 self.history.add(name, &sql);
             }
             if ddl {
                 self.invalidate_catalog(name);
+            }
+            if ddl || plsql {
                 self.refresh_invalid(name);
             }
         }
@@ -1121,7 +1133,8 @@ impl PythiaApp {
                 .session
                 .send(DbRequest::Task { id: task_id, task });
         }
-        if effects.invalid_changed
+        // An editor's DDL makes dependents invalid or valid too.
+        if (effects.invalid_changed || effects.changed.is_some())
             && let Some(name) = &connection
         {
             self.refresh_invalid(name);
@@ -1271,6 +1284,8 @@ impl PythiaApp {
             return;
         };
         if self.invalid_inflight.values().any(|c| c == connection) {
+            // It may have counted before the change.
+            self.invalid_again.insert(connection.to_owned());
             return;
         }
         let scope = match self.settings.invalid.scope {
@@ -3005,6 +3020,8 @@ impl PythiaApp {
                     conn.status = crate::connections::Status::Connected(server);
                 }
                 self.log(line);
+                // Counts sent to an earlier session won't come back.
+                self.invalid_inflight.retain(|_, c| c != name);
                 self.refresh_invalid(name);
                 if self.connecting.as_deref() == Some(name) {
                     self.connecting = None;
@@ -3083,7 +3100,7 @@ impl PythiaApp {
                 match result.map(|any| any.downcast::<Vec<(String, u32)>>()) {
                     Ok(Ok(per_schema)) => {
                         self.invalid.insert(
-                            connection,
+                            connection.clone(),
                             InvalidCount {
                                 per_schema: *per_schema,
                                 at: std::time::Instant::now(),
@@ -3092,6 +3109,9 @@ impl PythiaApp {
                     }
                     Ok(Err(_)) => {}
                     Err(e) => warn!("counting invalid objects on {connection}: {e}"),
+                }
+                if self.invalid_again.remove(&connection) {
+                    self.refresh_invalid(&connection);
                 }
             }
             DbEvent::TaskDone { id, result } if self.catalog_inflight.contains_key(&id) => {
@@ -4711,6 +4731,11 @@ impl PythiaApp {
     /// Invalid objects counted for the status bar, if counted.
     pub fn test_invalid_total(&self, connection: &str) -> Option<u32> {
         self.invalid.get(connection).map(InvalidCount::total)
+    }
+
+    /// Counts the connection's invalid objects again, as after a change.
+    pub fn test_refresh_invalid(&mut self, connection: &str) {
+        self.refresh_invalid(connection);
     }
 
     pub fn test_settings_mut(&mut self) -> &mut Settings {
