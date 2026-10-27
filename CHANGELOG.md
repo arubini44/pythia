@@ -7,6 +7,16 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The outline of a program window has a context menu (#124). Right-click
+  a procedure or function to **Test…** or **Debug…** it: the standalone
+  unit, or a subprogram the package specification declares, from the
+  spec's or the body's outline (overloads included). Private, local and
+  object type subprograms show the entries disabled and say why, as does a
+  unit not compiled yet. **Go to body** / **Go to specification** shows a
+  package subprogram in the other part (Back returns), **Find references**
+  works on every declaration, and **Copy name** copies it. With unsaved
+  changes, Test… and Debug… (here and in the editor's menu) say on hover
+  that they run the version compiled in the database.
 - Debugger: change values while stopped (#117). Double-click a value in
   Variables or Watches, or right-click it → *Set value…* or *Set to
   NULL*, to change a local variable, an IN OUT or OUT parameter, a record
@@ -46,6 +56,9 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- *Switch Spec/Body* jumped to the wrong overload when the body implements
+  a package's overloads in another order than the spec declares them
+  (#125). It now goes to the one with the same parameters.
 - *Test…* and *Debug…* generated a block that didn't compile when the
   function returned, or an OUT parameter was, a collection, record,
   `%ROWTYPE`, object, BLOB, XMLTYPE or ref cursor (#120). The block now

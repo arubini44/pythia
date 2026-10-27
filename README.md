@@ -72,6 +72,9 @@ for Linux, Windows and macOS.
   directories and grants.
 - Program windows with spec and body, compile with clickable errors
   (gutter markers and squiggles), unsaved-change tracking, save to file.
+  The outline beside the code jumps to a declaration; right-click one to
+  test or debug it, go to its body or specification, find its references
+  or copy its name.
 - **Test…** generates a ready-to-run block for any procedure or function:
   IN parameters as binds, OUT parameters and the result printed, also
   collections (element by element), records, `%ROWTYPE` and objects (field
@@ -80,7 +83,8 @@ for Linux, Windows and macOS.
   block under the debugger right away and stops on entry to the
   subprogram. Both are on the right-click menu of procedures, functions and
   package members, in the object browser and in the editors, also on a
-  subprogram's name in its own package spec or body.
+  subprogram's name in its own package spec or body and in the program
+  window's outline.
 - **Debugger** (DBMS_DEBUG_JDWP): breakpoints with conditions and hit
   counts, kept across restarts; break on exception, step over/into/out
   (also through the debugged block itself), run to cursor (Ctrl+F7), call
