@@ -59,7 +59,56 @@ pub(crate) fn run(conn: &mut Conn, query: &MetaQuery) -> Result<MetaResult, DbEr
         MetaQuery::TestLink { .. } => {
             return Err(DbError::unsupported("Database links", Dialect::MYSQL));
         }
+        MetaQuery::Accounts(object_type) => MetaResult::Accounts(accounts(conn, *object_type)?),
     })
+}
+
+/// Users as `user@host`, roles by name (`name@host` for a host of their
+/// own), from `mysql.user`: MariaDB marks its roles, MySQL's are the locked
+/// accounts without a password. Without access to it, the session's own
+/// user and the roles it may use.
+fn accounts(conn: &mut Conn, object_type: ObjectType) -> Result<Vec<(String, String)>, DbError> {
+    let role = object_type == ObjectType::Role;
+    let (mariadb, mysql) = if role {
+        (
+            "is_role = 'Y'",
+            "account_locked = 'Y' and authentication_string = ''",
+        )
+    } else {
+        (
+            "is_role = 'N'",
+            "not (account_locked = 'Y' and authentication_string = '')",
+        )
+    };
+    let sql = |accounts: &str| format!("select user, host from mysql.user where {accounts}");
+    let rows: Result<Vec<(String, String)>, _> = match conn.query(sql(mariadb)) {
+        // No is_role: MySQL.
+        Err(mysql::Error::MySqlError(e)) if e.code == 1054 => conn.query(sql(mysql)),
+        rows => rows,
+    };
+    let mut names: Vec<String> = match rows {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(user, host)| match host.as_str() {
+                "%" | "" if role => user,
+                _ => format!("{user}@{host}"),
+            })
+            .collect(),
+        // No access to mysql.user.
+        Err(mysql::Error::MySqlError(e)) if e.code == 1142 => {
+            if role {
+                conn.query("select distinct role_name from information_schema.applicable_roles")?
+            } else {
+                conn.query("select current_user()")?
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
+    names.sort();
+    Ok(names
+        .into_iter()
+        .map(|name| (name, String::new()))
+        .collect())
 }
 
 /// One object per row of `(owner, name, type, last change)`.

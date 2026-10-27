@@ -780,6 +780,42 @@ fn connect_error(params: ConnectParams) -> pythia_db::DbError {
     }
 }
 
+/// The database's users and roles; `sys` and `INFORMATION_SCHEMA` aren't
+/// users.
+#[test]
+fn accounts() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    h.session.send(DbRequest::SetAutocommit(true));
+    let accounts = |h: &mut Harness, object_type| {
+        let MetaResult::Accounts(accounts) = h.meta(MetaQuery::Accounts(object_type)) else {
+            panic!("expected accounts")
+        };
+        accounts
+    };
+    let names = |accounts: &[(String, String)]| -> Vec<String> {
+        accounts.iter().map(|(name, _)| name.clone()).collect()
+    };
+    h.ok("drop user if exists meta_user");
+    h.ok("drop role if exists meta_role");
+    h.ok("create user meta_user without login");
+    h.ok("create role meta_role");
+
+    let users = names(&accounts(&mut h, ObjectType::User));
+    assert!(users.contains(&"meta_user".to_owned()), "{users:?}");
+    assert!(users.contains(&"dbo".to_owned()), "{users:?}");
+    assert!(!users.contains(&"sys".to_owned()), "{users:?}");
+    assert!(!users.contains(&"meta_role".to_owned()), "{users:?}");
+    let roles = names(&accounts(&mut h, ObjectType::Role));
+    assert!(roles.contains(&"meta_role".to_owned()), "{roles:?}");
+    assert!(roles.contains(&"db_owner".to_owned()), "{roles:?}");
+    assert!(!roles.contains(&"meta_user".to_owned()), "{roles:?}");
+
+    h.ok("drop user meta_user");
+    h.ok("drop role meta_role");
+}
+
 /// Through the SSH server (#97): trusting its key, the login over the
 /// tunnel (encrypted, as SQL Server's is by default), sessions sharing it,
 /// Break (the driver connects again, through the tunnel), a named instance,

@@ -243,9 +243,11 @@ for Linux, Windows and macOS.
   NOT NULL columns), which Pythia adds to the result if the query doesn't
   select it; tables without one stay read-only.
 - The object browser lists tables, views, procedures, functions and
-  triggers; object views show columns, indexes, constraints, triggers,
-  grants, dependencies and the DDL. *Edit* opens a routine as a script that
-  drops and creates it again.
+  triggers, and the server's users (as `user@host`) and roles; object
+  views show columns, indexes, constraints, triggers, grants, dependencies
+  and the DDL. *Edit* opens a routine as a script that drops and creates it
+  again. Listing every user and role takes `SELECT` on `mysql.user`;
+  without it the browser shows your own user and the roles you may use.
 - A monitoring dashboard of its own (Monitor → Dashboard): findings first
   (lock waits and who blocks, metadata locks, connections near the limit,
   buffer pool hit ratio, long transactions, replication), then KPIs and
@@ -268,7 +270,9 @@ for Linux, Windows and macOS.
 - The same tools as on MySQL: SQL windows with results, fetching on demand,
   Break, explain plan (`EXPLAIN (FORMAT JSON)`, `SHOWPLAN_ALL`), completion,
   the object browser (also materialized views and sequences, synonyms on
-  SQL Server) and object views with the DDL. Transactions work as with
+  SQL Server, and users and roles: PostgreSQL's roles that can log in are
+  its users; SQL Server's are the database's) and object views with the
+  DDL. Transactions work as with
   Oracle; on PostgreSQL a failing statement doesn't abort the transaction,
   and notices (`RAISE NOTICE`) show as messages. Results can't be edited
   in place yet.

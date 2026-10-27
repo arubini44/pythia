@@ -78,7 +78,29 @@ pub(crate) fn run(pg: &Pg<'_>, query: &MetaQuery) -> Result<MetaResult, DbError>
         MetaQuery::TestLink { .. } => {
             return Err(DbError::unsupported("Database links", Dialect::POSTGRES));
         }
+        MetaQuery::Accounts(object_type) => MetaResult::Accounts(accounts(pg, *object_type)?),
     })
+}
+
+/// Roles that can log in as users, the others as roles; superusers say so.
+fn accounts(pg: &Pg<'_>, object_type: ObjectType) -> Result<Vec<(String, String)>, DbError> {
+    let login = if object_type == ObjectType::User {
+        ""
+    } else {
+        "not "
+    };
+    let sql = format!(
+        "select rolname, case when rolsuper then 'superuser' end from pg_roles \
+          where {login}rolcanlogin order by rolname"
+    );
+    Ok(pg
+        .rows(&sql, &[])?
+        .into_iter()
+        .filter_map(|row| {
+            let mut values = row.into_iter();
+            Some((values.next()??, values.next().flatten().unwrap_or_default()))
+        })
+        .collect())
 }
 
 fn first(row: Vec<Cell>) -> Option<String> {

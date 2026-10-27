@@ -377,6 +377,33 @@ fn compile_errors_and_metadata() {
     exec(&mut h, 20, "drop table pythia_meta_t purge");
 }
 
+/// Users, roles and directories; roles fall back to the user's own without
+/// access to DBA_ROLES.
+#[test]
+fn accounts() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    let mut accounts = |object_type| {
+        h.session.send(DbRequest::Meta {
+            id: 1,
+            query: MetaQuery::Accounts(object_type),
+        });
+        match h.next_result() {
+            DbEvent::Meta {
+                result: Ok(MetaResult::Accounts(accounts)),
+                ..
+            } => accounts,
+            other => panic!("expected accounts, got {other:?}"),
+        }
+    };
+    let users = accounts(ObjectType::User);
+    assert!(users.iter().any(|(name, _)| name == "PYTHIA"), "{users:?}");
+    let roles = accounts(ObjectType::Role);
+    assert!(roles.iter().all(|(name, _)| name != "PYTHIA"), "{roles:?}");
+    accounts(ObjectType::Directory);
+}
+
 #[test]
 fn rowid_of_wrapped_query() {
     let Some(mut h) = Harness::connect() else {

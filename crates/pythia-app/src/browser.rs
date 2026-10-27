@@ -292,6 +292,23 @@ impl Browser {
         !self.pending.is_empty()
     }
 
+    /// Whether a user has a schema to show: on Oracle each user is one, on
+    /// PostgreSQL one may have the user's name. MySQL's databases and SQL
+    /// Server's schemas aren't users'.
+    fn has_schema_of(&self, account: &ObjectRef) -> bool {
+        if account.object_type != ObjectType::User {
+            return false;
+        }
+        match self.dialect.kind() {
+            pythia_db::DbKind::Oracle => true,
+            pythia_db::DbKind::Postgres => matches!(
+                &self.schemas,
+                Some(Loaded::Ready(schemas)) if schemas.contains(&account.name)
+            ),
+            pythia_db::DbKind::MySql | pythia_db::DbKind::SqlServer => false,
+        }
+    }
+
     /// Shows another schema, keeping the same folders open.
     fn set_schema(&mut self, schema: String, effects: &mut Effects) {
         if self.schema.as_ref() == Some(&schema) {
@@ -450,13 +467,11 @@ impl Browser {
     /// Loads the users, roles, profiles or directories of the database.
     fn load_accounts(&mut self, effects: &mut Effects, object_type: ObjectType) {
         self.accounts.insert(object_type, Loaded::Loading);
-        let id = request_id();
-        self.pending.insert(id, Pending::Accounts(object_type));
-        let task: pythia_db::TaskFn = Box::new(move |conn: &pythia_db::oracle::Connection| {
-            let names = account_names(conn, object_type)?;
-            Ok(Box::new(names) as Box<dyn std::any::Any + Send>)
-        });
-        effects.request(Target::Main, DbRequest::Task { id, task });
+        self.meta(
+            effects,
+            Pending::Accounts(object_type),
+            MetaQuery::Accounts(object_type),
+        );
     }
 
     fn load_children(&mut self, effects: &mut Effects, object: &ObjectRef) {
@@ -582,17 +597,6 @@ impl Browser {
                 }
                 return effects;
             }
-            if let Some(Pending::Accounts(t)) = self.pending.get(&id) {
-                let t = *t;
-                self.pending.remove(&id);
-                let loaded = match result.map(|any| any.downcast::<Vec<(String, String)>>()) {
-                    Ok(Ok(names)) => Loaded::Ready(*names),
-                    Ok(Err(_)) => Loaded::Failed("unexpected result".into()),
-                    Err(e) => Loaded::Failed(e.to_string()),
-                };
-                self.accounts.insert(t, loaded);
-                return effects;
-            }
             if let Some(Pending::Test { object, debug }) = self.pending.remove(&id) {
                 match result.map(|any| any.downcast::<crate::test_script::Script>()) {
                     Ok(Ok(script)) => self.open_test(*script, &object, debug, &mut effects),
@@ -672,6 +676,12 @@ impl Browser {
             }
             (Pending::Children(o), Err(e)) => {
                 self.children.insert(o, Loaded::Failed(e.to_string()));
+            }
+            (Pending::Accounts(t), Ok(Some(MetaResult::Accounts(names)))) => {
+                self.accounts.insert(t, Loaded::Ready(names));
+            }
+            (Pending::Accounts(t), Err(e)) => {
+                self.accounts.insert(t, Loaded::Failed(e.to_string()));
             }
             (Pending::Action { object, verb }, Ok(_)) => {
                 let ty = object.object_type.dictionary_name().to_lowercase();
@@ -1057,13 +1067,11 @@ impl Browser {
                 }
             }
         }
-        let accounts = if self.dialect.supports(Feature::Accounts) {
-            &Section::DATABASE[..]
-        } else {
-            &[]
-        };
-        for &section in accounts {
-            let Some(object_type) = section.accounts() else {
+        for section in Section::DATABASE {
+            let Some(object_type) = section
+                .accounts()
+                .filter(|t| self.dialect.account_types().contains(t))
+            else {
                 continue;
             };
             let open = self.expanded.contains(&Node::Section(section));
@@ -1071,7 +1079,7 @@ impl Browser {
             let matching: Vec<&(String, String)> = match list {
                 Some(Loaded::Ready(names)) => names
                     .iter()
-                    .filter(|(n, _)| filter.is_empty() || n.contains(&filter))
+                    .filter(|(n, _)| name_matches(self.dialect, n, &filter))
                     .collect(),
                 _ => Vec::new(),
             };
@@ -1398,17 +1406,28 @@ impl Browser {
                         object_type: *object_type,
                     };
                     let selected = self.selected.as_ref() == Some(&account);
+                    // Oracle's names are uppercase; the others' as created.
+                    let shown = if self.dialect == Dialect::ORACLE {
+                        name.to_lowercase()
+                    } else {
+                        (*name).to_owned()
+                    };
                     let response = ui.add(egui::Button::selectable(
                         selected,
-                        RichText::new(name.to_lowercase()).font(names.clone()),
+                        RichText::new(shown).font(names.clone()),
                     ));
+                    let editors = self.dialect.supports(Feature::ObjectEditors);
                     if response.clicked() {
                         actions.push(ObjectAction::Select(account.clone()));
                     }
-                    if response.double_clicked() {
+                    if response.double_clicked() && editors {
                         actions.push(ObjectAction::EditObject(account.clone()));
                     }
-                    response.context_menu(|ui| account_menu(ui, &account, actions));
+                    let menu = AccountMenu {
+                        editors,
+                        show_schema: self.has_schema_of(&account),
+                    };
+                    response.context_menu(|ui| account_menu(ui, &account, menu, actions));
                     if !detail.is_empty() {
                         ui.add(
                             egui::Label::new(RichText::new(*detail).weak().font(names.clone()))
@@ -1716,14 +1735,26 @@ impl Browser {
                 object.object_type.dictionary_name().to_lowercase(),
                 object.qualified()
             ));
-            match object.object_type {
-                ObjectType::User => {
+            match (self.dialect.kind(), object.object_type) {
+                (pythia_db::DbKind::Oracle, ObjectType::User) => {
                     ui.weak("A user who owns objects isn't dropped (that needs CASCADE).");
                 }
-                ObjectType::Profile => {
+                (pythia_db::DbKind::Postgres, ObjectType::User | ObjectType::Role) => {
+                    ui.weak(
+                        "A role that owns objects or holds privileges isn't dropped (that \
+                         needs REASSIGN OWNED and DROP OWNED in each database).",
+                    );
+                }
+                (pythia_db::DbKind::SqlServer, ObjectType::User | ObjectType::Role) => {
+                    ui.weak(format!(
+                        "A {} that owns a schema isn't dropped.",
+                        object.object_type.dictionary_name().to_lowercase()
+                    ));
+                }
+                (_, ObjectType::Profile) => {
                     ui.weak("Users with this profile get the DEFAULT profile.");
                 }
-                ObjectType::Directory => {
+                (_, ObjectType::Directory) => {
                     ui.weak("The folder on the server stays; the grants on the directory go.");
                 }
                 _ => {}
@@ -1816,8 +1847,23 @@ fn group_menu(ui: &mut Ui, table: &ObjectRef, group: Group, actions: &mut Vec<Ob
     }
 }
 
+/// What the context menu of a user, role, profile or directory offers
+/// besides copying and dropping it.
+#[derive(Clone, Copy)]
+struct AccountMenu {
+    /// Editing and creating them, and their grants (Oracle's editors).
+    editors: bool,
+    /// Showing the schema of the same name a user owns.
+    show_schema: bool,
+}
+
 /// The context menu of a user, role, profile or directory.
-fn account_menu(ui: &mut Ui, account: &ObjectRef, actions: &mut Vec<ObjectAction>) {
+fn account_menu(
+    ui: &mut Ui,
+    account: &ObjectRef,
+    menu: AccountMenu,
+    actions: &mut Vec<ObjectAction>,
+) {
     let kind = account.object_type.dictionary_name().to_lowercase();
     let mut item = |ui: &mut Ui, label: &str, action: ObjectAction| {
         if ui.button(label).clicked() {
@@ -1825,64 +1871,38 @@ fn account_menu(ui: &mut Ui, account: &ObjectRef, actions: &mut Vec<ObjectAction
             ui.close();
         }
     };
-    item(
-        ui,
-        &format!("Edit {kind}…"),
-        ObjectAction::EditObject(account.clone()),
-    );
-    if account.object_type == ObjectType::User {
+    if menu.editors {
+        item(
+            ui,
+            &format!("Edit {kind}…"),
+            ObjectAction::EditObject(account.clone()),
+        );
+    }
+    if menu.show_schema {
         item(
             ui,
             "Show schema",
             ObjectAction::ShowSchema(account.name.clone()),
         );
     }
-    if has_grants(account.object_type) {
-        item(ui, "Grants…", ObjectAction::Grants(account.clone()));
+    if menu.editors {
+        if has_grants(account.object_type) {
+            item(ui, "Grants…", ObjectAction::Grants(account.clone()));
+        }
+        item(
+            ui,
+            &format!("New {kind}…"),
+            ObjectAction::New(String::new(), account.object_type),
+        );
+        ui.separator();
+    } else if menu.show_schema {
+        ui.separator();
     }
-    item(
-        ui,
-        &format!("New {kind}…"),
-        ObjectAction::New(String::new(), account.object_type),
-    );
-    ui.separator();
     item(ui, "Copy name", ObjectAction::CopyName(account.clone()));
     // The DEFAULT profile can't be dropped.
     if !(account.object_type == ObjectType::Profile && account.name == "DEFAULT") {
         ui.separator();
         item(ui, "Drop…", ObjectAction::Drop(account.clone()));
-    }
-}
-
-/// Names of the database's users, of its roles (all of them with catalog
-/// access, else those granted to the session's user), of its profiles
-/// (with catalog access), or of the directories the session can use (with
-/// their paths); each with what else to show.
-fn account_names(
-    conn: &pythia_db::oracle::Connection,
-    object_type: ObjectType,
-) -> Result<Vec<(String, String)>, pythia_db::DbError> {
-    let read = |sql: &str| -> Result<Vec<(String, String)>, pythia_db::DbError> {
-        let mut out = Vec::new();
-        for row in conn.query_as::<(String, Option<String>)>(sql, &[])? {
-            let (name, detail) = row?;
-            out.push((name, detail.unwrap_or_default()));
-        }
-        Ok(out)
-    };
-    match object_type {
-        ObjectType::User => read("select username, null from all_users order by username"),
-        ObjectType::Directory => read(
-            "select directory_name, directory_path from all_directories order by directory_name",
-        ),
-        ObjectType::Profile => {
-            read("select distinct profile, null from dba_profiles order by profile").map_err(|_| {
-                pythia_db::DbError::new("Listing profiles needs access to DBA_PROFILES")
-            })
-        }
-        _ => read("select role, null from dba_roles order by role").or_else(|_| {
-            read("select granted_role, null from user_role_privs order by granted_role")
-        }),
     }
 }
 
@@ -1903,6 +1923,12 @@ fn drop_sql(dialect: Dialect, o: &ObjectRef) -> String {
             pg_literal(&o.name),
             pg_literal(&o.name)
         );
+    }
+    if dialect == Dialect::MYSQL && o.object_type.is_database_object() {
+        return format!("drop {kind} {}", mysql_account(&o.name));
+    }
+    if dialect != Dialect::ORACLE && o.object_type.is_database_object() {
+        return format!("drop {kind} {}", dialect.quote_ident(&o.name));
     }
     if dialect != Dialect::ORACLE {
         return format!("drop {kind} {}", dialect.qualified(&o.owner, &o.name));
@@ -1965,6 +1991,16 @@ fn create_or(ddl: &str, words: &str, next: &str) -> String {
 /// A PostgreSQL string literal.
 fn pg_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+/// A MySQL account as listed (`user@host`, a role without its host) as
+/// `'user'@'host'`; the host is the last `@`'s, user names may have one.
+fn mysql_account(name: &str) -> String {
+    let literal = |s: &str| format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"));
+    match name.rsplit_once('@') {
+        Some((user, host)) => format!("{}@{}", literal(user), literal(host)),
+        None => literal(name),
+    }
 }
 
 /// Entries of an object's context menu besides those for its type.
@@ -2332,6 +2368,40 @@ mod tests {
             "begin dbms_scheduler.drop_job('HR.NIGHTLY', force => true); end;"
         );
         assert_eq!(folders(Dialect::ORACLE, "PUBLIC"), ObjectType::PUBLIC);
+    }
+
+    #[test]
+    fn drops_users_and_roles() {
+        let account = |name: &str, object_type| ObjectRef {
+            owner: String::new(),
+            name: name.into(),
+            object_type,
+        };
+        assert_eq!(
+            drop_sql(Dialect::ORACLE, &account("SCOTT", ObjectType::User)),
+            "drop user SCOTT"
+        );
+        assert_eq!(
+            drop_sql(Dialect::MYSQL, &account("app@localhost", ObjectType::User)),
+            "drop user 'app'@'localhost'"
+        );
+        // The host is the last @'s.
+        assert_eq!(
+            drop_sql(Dialect::MYSQL, &account("o'neil@x@%", ObjectType::User)),
+            "drop user 'o''neil@x'@'%'"
+        );
+        assert_eq!(
+            drop_sql(Dialect::MYSQL, &account("reader", ObjectType::Role)),
+            "drop role 'reader'"
+        );
+        assert_eq!(
+            drop_sql(Dialect::POSTGRES, &account("App", ObjectType::User)),
+            "drop user \"App\""
+        );
+        assert_eq!(
+            drop_sql(Dialect::SQLSERVER, &account("reader", ObjectType::Role)),
+            "drop role reader"
+        );
     }
 
     fn col(name: &str, pk: Option<u32>) -> TableColumn {
