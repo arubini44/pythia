@@ -598,10 +598,21 @@ impl SqlWindow {
         effects
     }
 
+    /// Stops the run: a read-only connection only runs queries.
+    pub fn refuse_read_only(&mut self) {
+        self.state.queue.clear();
+        self.info("Connection is read-only: only queries are allowed");
+        self.state.bottom = BottomTab::Messages;
+    }
+
     /// Runs the PL/SQL block at the cursor under the hierarchical profiler.
-    pub fn profile(&mut self) -> Effects {
+    pub fn profile(&mut self, read_only: bool) -> Effects {
         let mut effects = Effects::default();
         if self.is_running() {
+            return effects;
+        }
+        if read_only {
+            self.refuse_read_only();
             return effects;
         }
         let Some(stmt) = self.statements(true).into_iter().next() else {
@@ -761,6 +772,11 @@ impl SqlWindow {
         cx: &DocContext,
         effects: &mut Effects,
     ) {
+        // Every statement of a run comes here, not only the first (#115).
+        if cx.read_only && !is_query(&sql) {
+            self.refuse_read_only();
+            return;
+        }
         let id = request_id();
         self.state.running = Some(Running {
             internal: None,
@@ -2223,42 +2239,7 @@ impl SqlWindow {
         }
         let mut effects = Effects::default();
         match decision {
-            Some(true) => {
-                let prompt = self.state.prompt.take().expect("prompt");
-                let doubles: Vec<String> = find_substitutions(&prompt.statement.sql)
-                    .into_iter()
-                    .filter(|s| s.double)
-                    .map(|s| s.name)
-                    .collect();
-                let mut values = self.defines.clone();
-                for (name, value) in &prompt.substitutions {
-                    values.insert(name.clone(), value.clone());
-                    // `&&var` keeps its value for the window, `&var` only for this run.
-                    if doubles.contains(name) {
-                        self.defines.insert(name.clone(), value.clone());
-                    }
-                }
-                let sql = if self.substitution {
-                    substitute(&prompt.statement.sql, &values)
-                } else {
-                    prompt.statement.sql.clone()
-                };
-                let binds: Vec<(String, Option<String>)> = prompt
-                    .binds
-                    .into_iter()
-                    .map(|(name, value, is_null)| {
-                        let value = (!is_null).then_some(value);
-                        self.bind_values.insert(name.to_lowercase(), value.clone());
-                        (name, value)
-                    })
-                    .collect();
-                if std::mem::take(&mut self.state.prompt_for_debug) {
-                    self.state.debug_start = Some(self.line_of(prompt.statement.start));
-                    effects.debug = Some(inline_binds(&sql, &binds));
-                } else {
-                    self.send(prompt.statement.start, sql, binds, cx, &mut effects);
-                }
-            }
+            Some(true) => effects = self.run_prompted(cx),
             Some(false) => {
                 self.state.prompt_for_debug = false;
                 self.state.prompt = None;
@@ -2266,6 +2247,48 @@ impl SqlWindow {
                 self.info("Execution cancelled");
             }
             None => {}
+        }
+        effects
+    }
+
+    /// Runs (or debugs) the statement the prompt is for with its values.
+    fn run_prompted(&mut self, cx: &DocContext) -> Effects {
+        let mut effects = Effects::default();
+        let Some(prompt) = self.state.prompt.take() else {
+            return effects;
+        };
+        let doubles: Vec<String> = find_substitutions(&prompt.statement.sql)
+            .into_iter()
+            .filter(|s| s.double)
+            .map(|s| s.name)
+            .collect();
+        let mut values = self.defines.clone();
+        for (name, value) in &prompt.substitutions {
+            values.insert(name.clone(), value.clone());
+            // `&&var` keeps its value for the window, `&var` only for this run.
+            if doubles.contains(name) {
+                self.defines.insert(name.clone(), value.clone());
+            }
+        }
+        let sql = if self.substitution {
+            substitute(&prompt.statement.sql, &values)
+        } else {
+            prompt.statement.sql.clone()
+        };
+        let binds: Vec<(String, Option<String>)> = prompt
+            .binds
+            .into_iter()
+            .map(|(name, value, is_null)| {
+                let value = (!is_null).then_some(value);
+                self.bind_values.insert(name.to_lowercase(), value.clone());
+                (name, value)
+            })
+            .collect();
+        if std::mem::take(&mut self.state.prompt_for_debug) {
+            self.state.debug_start = Some(self.line_of(prompt.statement.start));
+            effects.debug = Some(inline_binds(&sql, &binds));
+        } else {
+            self.send(prompt.statement.start, sql, binds, cx, &mut effects);
         }
         effects
     }
@@ -2339,6 +2362,20 @@ fn statistics_ui(ui: &mut Ui, report: &crate::statistics::Report) {
 
 /// Why *Edit* and *Apply* do nothing on a read-only connection.
 const READ_ONLY_EDIT: &str = "Connection is read-only: results can't be edited";
+
+/// Read-only connections only accept queries.
+pub(crate) fn is_query(sql: &str) -> bool {
+    let first = pythia_plsql::tokenize(sql)
+        .into_iter()
+        .find(|t| !t.kind.is_trivia());
+    first.is_some_and(|t| {
+        let word = &sql[t.span];
+        ["SELECT", "WITH"]
+            .iter()
+            .any(|k| word.eq_ignore_ascii_case(k))
+            || word == "("
+    })
+}
 
 const DESCRIBE_SQL: &str = "select column_name as \"Name\", \
         decode(nullable, 'N', 'NOT NULL') as \"Null?\", \
@@ -3059,5 +3096,96 @@ mod tests {
         for field in fields {
             assert!(field.rect().width() >= 250.0, "{:?}", field.rect());
         }
+    }
+
+    /// A document context on an Oracle connection for tests.
+    fn test_cx(settings: &pythia_config::Settings, read_only: bool) -> DocContext<'_> {
+        DocContext {
+            id: crate::documents::DocId(1),
+            settings,
+            connected: true,
+            fetch_size: 100,
+            connection: Some("db".into()),
+            catalog: None,
+            catalog_revision: 0,
+            connections: &[],
+            debug: None,
+            marks: None,
+            privilege: None,
+            dialect: pythia_db::Dialect::ORACLE,
+            read_only,
+        }
+    }
+
+    /// Statements the effects send to the database.
+    fn sent(effects: &Effects) -> Vec<(u64, String)> {
+        effects
+            .requests
+            .iter()
+            .filter_map(|(_, r)| match r {
+                DbRequest::Execute { id, sql, .. } => Some((*id, sql.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// On a read-only connection only queries reach the server: also the
+    /// statements after the first of a script, and ones that asked for
+    /// variables (#115).
+    #[test]
+    fn read_only_connections_run_only_queries() {
+        let settings = pythia_config::Settings::default();
+        let cx = test_cx(&settings, true);
+        let mut w = SqlWindow::new("t".into(), "select 1 from dual;\ndelete from t;\n".into());
+        let first = sent(&w.execute(false, &cx));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].1, "select 1 from dual");
+        let id = first[0].0;
+        w.on_event(
+            DbEvent::QueryStarted {
+                id,
+                columns: Vec::new(),
+            },
+            &cx,
+        );
+        let next = w.on_event(
+            DbEvent::Rows {
+                id,
+                rows: Vec::new(),
+                more: false,
+                elapsed: Duration::ZERO,
+            },
+            &cx,
+        );
+        assert_eq!(sent(&next), []);
+        assert!(!w.is_running());
+
+        // With a variable, the statement waits for its value first.
+        let mut w = SqlWindow::new("t".into(), "delete from t where id = :id".into());
+        w.bind_values.insert("id".into(), Some("1".into()));
+        let mut effects = w.execute(false, &cx);
+        assert!(w.state.prompt.is_some());
+        effects.extend(w.run_prompted(&cx));
+        assert_eq!(sent(&effects), []);
+        assert!(!w.is_running());
+        assert!(
+            w.state
+                .messages
+                .iter()
+                .any(|m| m.text.contains("read-only")),
+            "{:?}",
+            w.state.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+
+        // Profile runs a block, which could change anything.
+        let mut w = SqlWindow::new("t".into(), "begin\n  p;\nend;".into());
+        assert!(w.profile(true).requests.is_empty());
+        assert!(
+            w.state
+                .messages
+                .iter()
+                .any(|m| m.text.contains("read-only"))
+        );
+        assert_eq!(w.profile(false).requests.len(), 1);
     }
 }

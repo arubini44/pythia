@@ -1713,6 +1713,14 @@ impl PythiaApp {
             self.log("A debug session is already running");
             return;
         }
+        // The block could change anything (#115).
+        if self.read_only_of(self.docs.get(&doc).and_then(|d| d.connection.as_deref())) {
+            if let Some(DocKind::Sql(w)) = self.docs.get_mut(&doc).map(|d| &mut d.kind) {
+                w.state.debug_start = None;
+                w.refuse_read_only();
+            }
+            return;
+        }
         let host = Some(self.settings.debug_host.trim().to_owned())
             .filter(|h| !h.is_empty())
             .unwrap_or_else(pythia_debugger::target::default_host);
@@ -2210,10 +2218,13 @@ impl PythiaApp {
                 }
             }
             Command::Profile => {
-                if let Some(id) = self.focused
-                    && let Some(w) = self.docs.get_mut(&id).and_then(Document::sql_window)
-                {
-                    let effects = w.profile();
+                if let Some(id) = self.focused {
+                    let read_only =
+                        self.read_only_of(self.docs.get(&id).and_then(|d| d.connection.as_deref()));
+                    let Some(w) = self.docs.get_mut(&id).and_then(Document::sql_window) else {
+                        return;
+                    };
+                    let effects = w.profile(read_only);
                     self.apply(Some(id), effects);
                 }
             }
@@ -2553,7 +2564,10 @@ impl PythiaApp {
             let changing = w
                 .statements(current_only)
                 .iter()
-                .filter(|s| s.kind != pythia_plsql::StatementKind::SqlPlus && !is_query(&s.sql))
+                .filter(|s| {
+                    s.kind != pythia_plsql::StatementKind::SqlPlus
+                        && !crate::sql_window::is_query(&s.sql)
+                })
                 .count();
             if changing > 0 {
                 let name = profile.map(|p| p.display_name()).unwrap_or_default();
@@ -2593,19 +2607,8 @@ impl PythiaApp {
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
-                let mut effects = w.execute(current_only, &cx);
-                if read_only {
-                    effects.requests.retain(|(_, r)| match r {
-                        DbRequest::Execute { sql, .. } => is_query(sql),
-                        _ => true,
-                    });
-                    if w.state.running.as_ref().is_some_and(|r| !is_query(&r.sql)) {
-                        w.state.running = None;
-                        w.state.queue.clear();
-                        w.info("Connection is read-only: only queries are allowed");
-                    }
-                }
-                effects
+                // The window holds back what a read-only connection can't run.
+                w.execute(current_only, &cx)
             }
             DocKind::Program(w) if !read_only => {
                 if settings.format_auto.on_save {
@@ -2693,8 +2696,11 @@ impl PythiaApp {
             .and_then(|d| d.connection.as_deref())
             .and_then(|c| self.conns.get(c))
             .is_some_and(|c| c.is_connected());
+        let read_only = self.read_only_of(doc.and_then(|d| d.connection.as_deref()));
         if self.debug.is_active() {
             Err("Already debugging: continue or stop in the debugger panel")
+        } else if read_only {
+            Err("The connection is read-only")
         } else if doc.is_some_and(Document::is_busy) {
             Err("Running")
         } else if !connected {
@@ -5281,20 +5287,6 @@ fn event_id(event: &DbEvent) -> Option<u64> {
         | DbEvent::TaskDone { id, .. } => Some(*id),
         _ => None,
     }
-}
-
-/// Read-only connections only accept queries.
-fn is_query(sql: &str) -> bool {
-    let first = pythia_plsql::tokenize(sql)
-        .into_iter()
-        .find(|t| !t.kind.is_trivia());
-    first.is_some_and(|t| {
-        let word = &sql[t.span];
-        ["SELECT", "WITH"]
-            .iter()
-            .any(|k| word.eq_ignore_ascii_case(k))
-            || word == "("
-    })
 }
 
 #[cfg(test)]

@@ -28,6 +28,11 @@ All notable changes to Pythia are documented here. The format follows
 - Light theme: selected text was almost invisible, in the editor and in
   every text field (#111). The selection color added to the white
   background instead of tinting it.
+- Read-only connections ran statements that aren't queries in some cases
+  (#115). A script went on after its first statement (`select …; delete
+  …;` ran the delete), as did a statement after its variables were
+  entered, and Profile and Debug ran the block at the cursor. Every
+  statement is checked now, and Profile and Debug are refused.
 
 ## [0.6.0] - 2026-10-27
 
