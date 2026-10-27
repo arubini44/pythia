@@ -32,6 +32,7 @@ impl Session {
     /// Starts connecting in the background. `notify` is called whenever a new
     /// event is available (typically `egui::Context::request_repaint`).
     pub fn connect(params: ConnectParams, notify: impl Fn() + Send + 'static) -> Self {
+        crate::install_crypto_provider();
         let (req_tx, req_rx) = mpsc::channel();
         let (ev_tx, ev_rx) = mpsc::channel();
         let cancel = Arc::new(Mutex::new(None));

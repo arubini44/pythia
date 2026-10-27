@@ -36,6 +36,17 @@ pub use types::{
     ServerInfo, TaskFn, TaskResult,
 };
 
+/// Installs ring as rustls' process-wide crypto provider, once. A driver
+/// that takes the default (oracledb's `ClientConfig::builder()`) panics
+/// when more than one provider is compiled in and none is installed (#104).
+pub(crate) fn install_crypto_provider() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        // One installed before (by a program embedding this crate) stays.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// The database driver, for tools running [`DbRequest::Task`]: the `oracle`
 /// API on the pure-Rust `oracledb` driver (no client libraries needed), or
 /// with the `thick` feature the `oracle` crate itself (ODPI-C, needs the
@@ -60,4 +71,15 @@ pub fn oracle_driver() -> &'static str {
         let driver = "Pure-Rust driver (no Oracle client)".to_owned();
         driver
     })
+}
+
+#[cfg(test)]
+mod tests {
+    /// Without a default provider, `builder()` panics when both ring and
+    /// aws-lc-rs are compiled in (#104).
+    #[test]
+    fn rustls_has_a_default_provider() {
+        super::install_crypto_provider();
+        let _ = rustls::ClientConfig::builder();
+    }
 }
