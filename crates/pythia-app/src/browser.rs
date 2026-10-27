@@ -288,14 +288,6 @@ impl Browser {
         }
     }
 
-    /// Picks a schema (a database on MySQL) as the picker does.
-    #[cfg(test)]
-    pub fn pick_schema(&mut self, schema: &str) -> Effects {
-        let mut effects = Effects::default();
-        self.set_schema(schema.to_owned(), &mut effects);
-        effects
-    }
-
     #[cfg_attr(not(test), expect(dead_code, reason = "used by screenshot tests"))]
     pub fn is_loading(&self) -> bool {
         !self.pending.is_empty()

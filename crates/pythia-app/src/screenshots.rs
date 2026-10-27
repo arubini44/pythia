@@ -4485,7 +4485,16 @@ fn mysql_database_from_the_browser() {
     h.run_steps(2);
     assert_eq!(current(&mut h), None);
 
-    h.state_mut().test_pick_schema(database);
+    // Picked in the browser's picker, as a user does (#102): the panel's
+    // effects reach the app together with the frame's others.
+    h.get_by_value("No database").click();
+    let start = Instant::now();
+    while h.query_by_label(database).is_none() {
+        assert!(start.elapsed() < Duration::from_secs(60), "the databases");
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    h.get_by_label(database).click();
     h.run_steps(2);
     assert_eq!(
         current(&mut h).as_deref(),

@@ -53,6 +53,10 @@ All notable changes to Pythia are documented here. The format follows
 - Monitor: the session list's filter chip ends in an × rather than a box;
   its `✕` has no glyph in Pythia's fonts. A test now checks every character
   the UI writes against the fonts (#91).
+- MySQL: the database picked in the object browser becomes the
+  connection's database, as 0.5.0 meant (#81). The browser listed its
+  objects, but SQL windows still failed with *No database selected*, and
+  the toolbar and status bar kept saying "No database" (#102).
 
 ## [0.5.0] - 2026-10-26
 
