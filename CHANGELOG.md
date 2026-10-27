@@ -26,13 +26,36 @@ All notable changes to Pythia are documented here. The format follows
   life expectancy. Without `pg_read_all_stats` or `VIEW SERVER STATE` the
   dashboard shows what it can and says what's missing (#92).
 
+- PostgreSQL and SQL Server: session details from the dashboard. A
+  backend's or session's id (running statements, open transactions, lock
+  waits and blocking) opens how it connected, the statement it runs (on
+  SQL Server with its cached plan as an outline, and the showplan XML to
+  copy) or ran last, its transaction, its locks with the tables named,
+  and the sessions it waits for and blocks. *Cancel query* and
+  *Terminate* (PostgreSQL) and *Kill* (SQL Server) ask first and say what
+  is rolled back (#96).
+- PostgreSQL and SQL Server: *Connect through SSH*, as on MySQL. The
+  address is the database as the SSH server sees it
+  (`localhost:5432/database`); on PostgreSQL TLS still checks the
+  database's own host name, on SQL Server the login stays encrypted. A
+  named SQL Server instance (`host\instance`) can't be found through a
+  tunnel: give its port instead (#97).
+- SQL Server: `PRINT` output and informational messages (`RAISERROR` up to
+  severity 10, "Changed database context to …") show as messages, in
+  order with the batch's result. Pythia uses our fork of tiberius for it
+  (#98).
+
 ### Changed
 - Building: a `fast` profile (`cargo run --profile fast -p pythia-app`)
   for running an optimized build locally; a change rebuilds in 5–15 s,
   where the release profile takes about two minutes for its link-time
-  optimization (#99).
+  optimization. Clean builds no longer compile aws-lc (about 90 s): TLS
+  runs on ring in all drivers (#99).
 
 ### Fixed
+- Oracle over TLS (TCPS) no longer panics on connecting: with two crypto
+  providers compiled in (ring and aws-lc), rustls couldn't pick the one
+  the driver asks for. Pythia installs ring as the default first (#104).
 - Connect dialog: *Connect* no longer stays disabled after *Connect through
   SSH* was ticked for MySQL and the type changed to one without tunnels;
   the hidden SSH settings neither hold it up nor go along (#95).
