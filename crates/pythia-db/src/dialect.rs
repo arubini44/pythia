@@ -101,6 +101,7 @@ impl Dialect {
                     | Feature::Completion
                     | Feature::SshTunnel
                     | Feature::Dashboard
+                    | Feature::EditResults
             ),
             DbKind::Postgres | DbKind::SqlServer => matches!(
                 feature,
@@ -267,8 +268,17 @@ mod tests {
             assert!(Dialect::ORACLE.supports(feature));
         }
         assert!(!Dialect::ORACLE.supports(Feature::SshTunnel));
-        for feature in [Feature::ExplainPlan, Feature::Dashboard, Feature::SshTunnel] {
+        for feature in [
+            Feature::ExplainPlan,
+            Feature::Dashboard,
+            Feature::SshTunnel,
+            Feature::EditResults,
+        ] {
             assert!(Dialect::MYSQL.supports(feature));
+        }
+        // Rows found by key: MySQL's way, not yet theirs (#101).
+        for dialect in [Dialect::POSTGRES, Dialect::SQLSERVER] {
+            assert!(!dialect.supports(Feature::EditResults));
         }
         for dialect in [Dialect::MYSQL, Dialect::POSTGRES, Dialect::SQLSERVER] {
             assert!(dialect.supports(Feature::ExplainPlan));

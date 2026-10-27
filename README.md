@@ -194,6 +194,10 @@ for Linux, Windows and macOS.
   completion with columns and comments, and transactions that work as with
   Oracle: queries see what others committed, changes wait for Commit.
   Warnings show as messages.
+- *Edit* on a result of one table changes its rows in place, as on
+  Oracle. Rows are found by the table's primary key (or a unique key on
+  NOT NULL columns), which Pythia adds to the result if the query doesn't
+  select it; tables without one stay read-only.
 - The object browser lists tables, views, procedures, functions and
   triggers; object views show columns, indexes, constraints, triggers,
   grants, dependencies and the DDL. *Edit* opens a routine as a script that
@@ -207,7 +211,7 @@ for Linux, Windows and macOS.
   statements and lock waits `SELECT` on `performance_schema`.
 - Everything built on Oracle's dictionary or PL/SQL — debugger, profiler,
   the rest of the monitor, reports, scheduler jobs, compare, import/export,
-  editing results, the form editors — isn't offered on MySQL connections. As in SQL\*Plus,
+  the form editors — isn't offered on MySQL connections. As in SQL\*Plus,
   end a routine with `/` on a line of its own (there is no `DELIMITER`).
 
 **PostgreSQL and SQL Server (experimental)**
@@ -222,7 +226,8 @@ for Linux, Windows and macOS.
   the object browser (also materialized views and sequences, synonyms on
   SQL Server) and object views with the DDL. Transactions work as with
   Oracle; on PostgreSQL a failing statement doesn't abort the transaction,
-  and notices (`RAISE NOTICE`) show as messages.
+  and notices (`RAISE NOTICE`) show as messages. Results can't be edited
+  in place yet.
 - PostgreSQL's monitoring dashboard (Monitor → Dashboard): findings first
   (who blocks whom, sessions idle in transaction, connections near the
   limit, cache hit ratio, deadlocks, replication lag and inactive slots,

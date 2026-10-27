@@ -62,6 +62,8 @@ pub struct GridState {
     frozen_width: Option<f32>,
     /// Cell edited in the dialog (long text, dates).
     value_editor: Option<ValueEditor>,
+    /// The database the rows come from: *Copy as* INSERT writes its SQL.
+    pub dialect: pythia_db::Dialect,
 }
 
 /// A header being dragged to another place.
@@ -128,12 +130,19 @@ impl Changes {
 
 #[derive(Default)]
 struct Editing {
-    /// Column that can't be edited (the ROWID).
+    /// First of the trailing columns that can't be edited (the ROWID, the
+    /// key columns of a MySQL table).
     locked: Option<usize>,
     changes: Changes,
     /// Cell being edited: (view row, column, text).
     active: Option<(usize, usize, String)>,
     focus_editor: bool,
+}
+
+impl Editing {
+    fn is_locked(&self, col: usize) -> bool {
+        self.locked.is_some_and(|l| col >= l)
+    }
 }
 
 /// A view row resolved to either a fetched row or a new one.
@@ -329,7 +338,8 @@ impl GridState {
         }
     }
 
-    /// Makes the grid editable; `locked` is a column that stays read-only.
+    /// Makes the grid editable; `locked` and the columns after it stay
+    /// read-only.
     pub fn set_editable(&mut self, locked: Option<usize>) {
         self.edit = Some(Editing {
             locked,
@@ -341,6 +351,22 @@ impl GridState {
     pub fn edit_cell(&mut self, rows: &[Vec<Cell>], view_row: usize, col: usize, value: Cell) {
         self.sync(rows, &[]);
         self.set_value(rows, view_row, col, value);
+    }
+
+    /// Adds a new row programmatically (as if by the user).
+    pub fn add_row(&mut self, rows: &[Vec<Cell>], columns: usize) {
+        self.sync(rows, &[]);
+        self.insert_row(columns);
+    }
+
+    /// Marks a fetched row for deletion programmatically (as if by the user).
+    pub fn delete_row(&mut self, rows: &[Vec<Cell>], view_row: usize) {
+        self.sync(rows, &[]);
+        if let RowRef::Existing(r) = self.row_ref(view_row)
+            && let Some(edit) = &mut self.edit
+        {
+            edit.changes.deletes.insert(r);
+        }
     }
 
     pub fn set_read_only(&mut self) {
@@ -396,7 +422,7 @@ impl GridState {
         let Some(edit) = self.edit.as_mut() else {
             return;
         };
-        if edit.locked == Some(col) {
+        if edit.is_locked(col) {
             return;
         }
         match row_ref {
@@ -454,7 +480,7 @@ impl GridState {
             let col = visible
                 .iter()
                 .copied()
-                .find(|&c| Some(c) != edit.locked)
+                .find(|&c| !edit.is_locked(c))
                 .unwrap_or(0);
             self.anchor = Some((row, col));
             self.cursor = Some((row, col));
@@ -514,7 +540,7 @@ impl GridState {
         let targets: Vec<usize> = visible[from..]
             .iter()
             .copied()
-            .filter(|&c| Some(c) != locked)
+            .filter(|&c| locked.is_none_or(|l| c < l))
             .collect();
         let text = text.strip_suffix('\n').unwrap_or(text);
         let text = text.strip_suffix('\r').unwrap_or(text);
@@ -548,7 +574,7 @@ impl GridState {
             return;
         }
         if let Some(edit) = &mut self.edit
-            && edit.locked != Some(cell.1)
+            && !edit.is_locked(cell.1)
         {
             edit.active = Some((cell.0, cell.1, initial.or(value).unwrap_or_default()));
             edit.focus_editor = true;
@@ -557,8 +583,7 @@ impl GridState {
 
     /// Edits a cell in the dialog (multi-line text, calendar for dates).
     pub fn open_value_editor(&mut self, rows: &[Vec<Cell>], cell: (usize, usize)) {
-        let locked = self.edit.as_ref().map(|e| e.locked);
-        if locked.is_none() || locked == Some(Some(cell.1)) {
+        if self.edit.as_ref().is_none_or(|e| e.is_locked(cell.1)) {
             return;
         }
         let text = self
@@ -1466,7 +1491,10 @@ fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut
                     *format,
                     &cols,
                     &data,
-                    &pythia_data::Options::default(),
+                    &pythia_data::Options {
+                        dialect: state.dialect,
+                        ..Default::default()
+                    },
                 ) {
                     ui.ctx()
                         .copy_text(String::from_utf8_lossy(&bytes).into_owned());
@@ -2074,6 +2102,29 @@ mod tests {
         assert_eq!(changes.updates[&0][&1], Some("y".into()));
         assert_eq!(changes.inserts, vec![vec![Some("6".into()), None]]);
         assert_eq!(state.cursor, Some((1, 1)));
+    }
+
+    #[test]
+    fn trailing_key_columns_stay_read_only() {
+        let rows = vec![vec![Some("a".into()), Some("1".into()), Some("2".into())]];
+        let mut state = GridState::default();
+        // Columns 1 and 2 hold the key.
+        state.set_editable(Some(1));
+        state.edit_cell(&rows, 0, 0, Some("b".into()));
+        state.edit_cell(&rows, 0, 1, Some("9".into()));
+        state.edit_cell(&rows, 0, 2, Some("9".into()));
+        state.paste(&rows, 3, "c\td\te");
+        assert_eq!(
+            state.changes().unwrap().updates[&0],
+            BTreeMap::from([(0, Some("c".into()))])
+        );
+        state.add_row(&rows, 3);
+        assert_eq!(state.cursor, Some((1, 0)));
+        state.edit_cell(&rows, 1, 0, Some("new".into()));
+        state.delete_row(&rows, 0);
+        let changes = state.changes().unwrap();
+        assert_eq!(changes.inserts, vec![vec![Some("new".into()), None, None]]);
+        assert_eq!(changes.deletes, BTreeSet::from([0]));
     }
 
     #[test]

@@ -69,6 +69,8 @@ pub struct RunState {
     pub results: Vec<QueryResult>,
     /// Foreign key lookups in flight: task id → result id.
     pub relation_requests: BTreeMap<u64, u64>,
+    /// Task id of the key lookup an edit waits for.
+    pub key_lookup: Option<u64>,
     /// "Execute to file": the file dialog (with the query), then the run.
     pub to_file_pick: Option<(
         std::sync::mpsc::Receiver<Option<std::path::PathBuf>>,
@@ -119,10 +121,17 @@ pub struct PendingStatement {
 /// Statements Pythia generates for data editing.
 #[derive(Debug, Clone)]
 pub enum Internal {
-    /// Query wrapped to fetch ROWIDs; its result becomes editable.
-    EditQuery {
+    /// Looking up the key of `table` (MySQL) before the query that makes
+    /// result `replaces` editable.
+    EditKey {
         table: String,
         source: String,
+        replaces: u64,
+    },
+    /// Query fetching what identifies the rows (ROWIDs, key columns); its
+    /// result becomes editable.
+    EditQuery {
+        edit: crate::data_edit::Editable,
         /// Result (by request id) this query refreshes in place.
         replaces: Option<u64>,
     },
@@ -146,8 +155,8 @@ pub struct QueryResult {
     pub more: bool,
     pub elapsed: Duration,
     pub grid: GridState,
-    /// Base table and original query, once the result was made editable.
-    pub edit: Option<(String, String)>,
+    /// Set once the result was made editable.
+    pub edit: Option<crate::data_edit::Editable>,
     /// Quick filter text.
     pub filter: String,
     /// Shown as a chart instead of the grid.
@@ -739,24 +748,40 @@ impl SqlWindow {
         effects: &mut Effects,
     ) {
         let id = request_id();
-        self.state.running = Some(Running {
-            start,
-            sql: sql.clone(),
-            internal: Some(internal),
-        });
-        effects.request(
-            Target::Own,
-            DbRequest::Execute {
+        let request = match &internal {
+            Internal::EditKey { table, .. } => {
+                let table = table.clone();
+                self.state.key_lookup = Some(id);
+                DbRequest::Run {
+                    id,
+                    task: Box::new(move |client| {
+                        let key = crate::data_edit::row_key(client, &table)?;
+                        Ok(Box::new(key) as Box<dyn std::any::Any + Send>)
+                    }),
+                }
+            }
+            _ => DbRequest::Execute {
                 id,
-                sql,
+                sql: sql.clone(),
                 max_rows: cx.fetch_size,
                 binds: Vec::new(),
             },
-        );
+        };
+        self.state.running = Some(Running {
+            start,
+            sql,
+            internal: Some(internal),
+        });
+        effects.request(Target::Own, request);
     }
 
-    /// Re-runs result `index` with ROWIDs so it can be edited in place.
+    /// Re-runs result `index` with what identifies its rows (ROWIDs on
+    /// Oracle, the table's key on MySQL) so it can be edited in place.
     pub fn start_editing(&mut self, index: usize, cx: &DocContext) -> Effects {
+        if cx.read_only {
+            self.info(READ_ONLY_EDIT);
+            return Effects::default();
+        }
         let Some(result) = self.state.results.get(index) else {
             return Effects::default();
         };
@@ -764,45 +789,71 @@ impl SqlWindow {
             self.warn("Only results of a single-table query can be edited");
             return Effects::default();
         };
-        let source = result.sql.clone();
-        self.queue_edit_query(table, source, Some(result.id));
+        if !crate::data_edit::can_edit(&result.sql) {
+            self.warn("Results of DISTINCT, GROUP BY or aggregate queries can't be edited");
+            return Effects::default();
+        }
+        let (source, replaces) = (result.sql.clone(), result.id);
+        if cx.dialect.kind() == pythia_db::DbKind::Oracle {
+            let edit = crate::data_edit::Editable {
+                table,
+                source,
+                key: crate::data_edit::RowKey::Rowid,
+            };
+            self.queue_edit_query(edit, Some(replaces));
+        } else {
+            self.state.queue.push_back(PendingStatement {
+                origin: None,
+                kind: StatementKind::Sql,
+                sql: String::new(),
+                start: 0,
+                internal: Some(Internal::EditKey {
+                    table,
+                    source,
+                    replaces,
+                }),
+            });
+        }
         self.run_next(cx)
     }
 
-    fn queue_edit_query(&mut self, table: String, source: String, replaces: Option<u64>) {
+    fn queue_edit_query(&mut self, edit: crate::data_edit::Editable, replaces: Option<u64>) {
+        let Some(sql) = crate::data_edit::edit_query(&edit) else {
+            self.warn("Only results of a single-table query can be edited");
+            return;
+        };
         self.state.queue.push_back(PendingStatement {
             origin: None,
             kind: StatementKind::Sql,
-            sql: crate::data_edit::editable_query(&source),
+            sql,
             start: 0,
-            internal: Some(Internal::EditQuery {
-                table,
-                source,
-                replaces,
-            }),
+            internal: Some(Internal::EditQuery { edit, replaces }),
         });
     }
 
     /// Generated DML for the pending changes of result `index`.
-    fn pending_dml(&self, index: usize) -> Vec<crate::data_edit::Dml> {
+    fn pending_dml(&self, index: usize, cx: &DocContext) -> Vec<crate::data_edit::Dml> {
         let Some(result) = self.state.results.get(index) else {
             return Vec::new();
         };
-        let (Some((table, _)), Some(changes)) = (&result.edit, result.grid.changes()) else {
+        let (Some(edit), Some(changes)) = (&result.edit, result.grid.changes()) else {
             return Vec::new();
         };
-        let rowid_col = result.columns.len().saturating_sub(1);
-        crate::data_edit::dml(table, &result.columns, &result.rows, rowid_col, changes)
+        crate::data_edit::dml(cx.dialect, edit, &result.columns, &result.rows, changes)
     }
 
     /// Applies the pending changes of result `index` in this window's
     /// transaction, then refreshes the result.
     pub fn apply_changes(&mut self, index: usize, cx: &DocContext) -> Effects {
-        let statements = self.pending_dml(index);
+        if cx.read_only {
+            self.info(READ_ONLY_EDIT);
+            return Effects::default();
+        }
+        let statements = self.pending_dml(index, cx);
         let Some(result) = self.state.results.get(index) else {
             return Effects::default();
         };
-        let Some((table, source)) = result.edit.clone() else {
+        let Some(edit) = result.edit.clone() else {
             return Effects::default();
         };
         let replaces = Some(result.id);
@@ -819,7 +870,7 @@ impl SqlWindow {
                 }),
             });
         }
-        self.queue_edit_query(table, source, replaces);
+        self.queue_edit_query(edit, replaces);
         self.run_next(cx)
     }
 
@@ -843,7 +894,7 @@ impl SqlWindow {
             EditAction::ShowSql(i) => {
                 let mut effects = Effects::default();
                 let script: Vec<String> = self
-                    .pending_dml(i)
+                    .pending_dml(i, cx)
                     .into_iter()
                     .map(|d| format!("{};", d.sql))
                     .collect();
@@ -1060,18 +1111,15 @@ impl SqlWindow {
                     relations: Vec::new(),
                     link_relations: Vec::new(),
                 };
+                result.grid.dialect = cx.dialect;
                 let mut replace = None;
-                if let Some(Internal::EditQuery {
-                    table,
-                    source,
-                    replaces,
-                }) = running.and_then(|r| r.internal.as_ref())
+                if let Some(Internal::EditQuery { edit, replaces }) =
+                    running.and_then(|r| r.internal.as_ref())
                 {
-                    result
-                        .grid
-                        .set_editable(Some(result.columns.len().saturating_sub(1)));
-                    result.edit = Some((table.clone(), source.clone()));
-                    result.sql = source.clone();
+                    let key_start = result.columns.len().saturating_sub(edit.key.width());
+                    result.grid.set_editable(Some(key_start));
+                    result.edit = Some(edit.clone());
+                    result.sql = edit.source.clone();
                     replace = replaces
                         .and_then(|old| self.state.results.iter().position(|r| r.id == old));
                 }
@@ -1141,6 +1189,46 @@ impl SqlWindow {
                     }
                 }
                 self.state.bottom = BottomTab::Messages;
+            }
+            DbEvent::TaskDone { id, result } if self.state.key_lookup == Some(id) => {
+                self.state.key_lookup = None;
+                let running = self.state.running.take();
+                let Some(Internal::EditKey {
+                    table,
+                    source,
+                    replaces,
+                }) = running.and_then(|r| r.internal)
+                else {
+                    return effects;
+                };
+                let key = result.and_then(|any| {
+                    any.downcast::<Vec<String>>()
+                        .map(|key| *key)
+                        .map_err(|_| DbError::new("unexpected result"))
+                });
+                match key {
+                    Ok(key) if key.is_empty() => {
+                        self.state.queue.clear();
+                        self.warn(format!(
+                            "The rows of {table} can't be edited: it has no primary key (or \
+                             unique key on NOT NULL columns) to find them by"
+                        ));
+                        self.state.bottom = BottomTab::Messages;
+                    }
+                    Ok(key) => {
+                        let edit = crate::data_edit::Editable {
+                            table,
+                            source,
+                            key: crate::data_edit::RowKey::Columns(key),
+                        };
+                        self.queue_edit_query(edit, Some(replaces));
+                        effects.extend(self.run_next(cx));
+                    }
+                    Err(e) => {
+                        self.state.queue.clear();
+                        self.error(&e);
+                    }
+                }
             }
             DbEvent::TaskDone { id, result } if self.state.relation_requests.contains_key(&id) => {
                 let result_id = self.state.relation_requests.remove(&id).unwrap_or_default();
@@ -1559,8 +1647,9 @@ impl SqlWindow {
                         }
                         None => {
                             if idle
+                                && !cx.read_only
                                 && cx.dialect.supports(Feature::EditResults)
-                                && crate::data_edit::single_table(&result.sql).is_some()
+                                && crate::data_edit::can_edit(&result.sql)
                                 && labelled(ui, Icon::Edit, "Edit")
                                     .on_hover_text(
                                         "Edit the rows of this result. Rows are not locked; conflicting \
@@ -1598,7 +1687,7 @@ impl SqlWindow {
                                     let (columns, rows) =
                                         selection_data(&result.columns, &result.rows, &result.grid);
                                     state.export =
-                                        Some(export_in_background(*format, columns, rows));
+                                        Some(export_in_background(*format, columns, rows, cx.dialect));
                                     ui.close();
                                 }
                             }
@@ -2033,6 +2122,9 @@ fn statistics_ui(ui: &mut Ui, report: &crate::statistics::Report) {
     });
 }
 
+/// Why *Edit* and *Apply* do nothing on a read-only connection.
+const READ_ONLY_EDIT: &str = "Connection is read-only: results can't be edited";
+
 const DESCRIBE_SQL: &str = "select column_name as \"Name\", \
         decode(nullable, 'N', 'NOT NULL') as \"Null?\", \
         data_type || case \
@@ -2233,6 +2325,7 @@ fn export_in_background(
     format: pythia_data::Format,
     columns: Vec<Column>,
     rows: Vec<Vec<Cell>>,
+    dialect: pythia_db::Dialect,
 ) -> std::sync::mpsc::Receiver<Result<Option<std::path::PathBuf>, String>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -2250,7 +2343,10 @@ fn export_in_background(
                         format,
                         &columns,
                         &rows,
-                        &pythia_data::Options::default(),
+                        &pythia_data::Options {
+                            dialect,
+                            ..Default::default()
+                        },
                         &mut out,
                     )
                     .map_err(|e| e.to_string())?;
@@ -2274,6 +2370,86 @@ pub fn fmt_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On a read-only connection, nothing makes a result editable or
+    /// applies its changes (#107).
+    #[test]
+    fn read_only_connections_dont_edit_results() {
+        let settings = pythia_config::Settings::default();
+        let cx = |read_only| DocContext {
+            id: crate::documents::DocId(1),
+            settings: &settings,
+            connected: true,
+            fetch_size: 100,
+            connection: Some("shop".into()),
+            catalog: None,
+            catalog_revision: 0,
+            connections: &[],
+            debug: None,
+            marks: None,
+            privilege: None,
+            dialect: pythia_db::Dialect::MYSQL,
+            read_only,
+        };
+        let column = |name: &str| Column {
+            name: name.into(),
+            type_name: "INT".into(),
+            numeric: true,
+        };
+        let mut w = SqlWindow::new("t".into(), String::new());
+        w.state.running = Some(Running {
+            start: 0,
+            sql: "select x from t".into(),
+            internal: None,
+        });
+        w.on_event(
+            DbEvent::QueryStarted {
+                id: 7,
+                columns: vec![column("x"), column("pythia$id")],
+            },
+            &cx(false),
+        );
+        w.on_event(
+            DbEvent::Rows {
+                id: 7,
+                rows: vec![vec![Some("1".into()), Some("1".into())]],
+                more: false,
+                elapsed: Duration::ZERO,
+            },
+            &cx(false),
+        );
+        assert!(w.start_editing(0, &cx(true)).requests.is_empty());
+        assert!(w.state.queue.is_empty() && w.state.running.is_none());
+
+        // Made editable on a writable connection, with a change pending.
+        let r = &mut w.state.results[0];
+        r.edit = Some(crate::data_edit::Editable {
+            table: "t".into(),
+            source: "select x from t".into(),
+            key: crate::data_edit::RowKey::Columns(vec!["id".into()]),
+        });
+        r.grid.set_editable(Some(1));
+        let rows = r.rows.clone();
+        r.grid.edit_cell(&rows, 0, 0, Some("2".into()));
+        assert!(w.apply_changes(0, &cx(true)).requests.is_empty());
+        assert!(w.state.queue.is_empty() && w.state.running.is_none());
+        let texts: Vec<&str> = w.state.messages.iter().map(|m| m.text.as_str()).collect();
+        assert!(texts.contains(&READ_ONLY_EDIT), "{texts:?}");
+        assert!(
+            w.state.results[0]
+                .grid
+                .changes()
+                .is_some_and(|c| !c.is_empty()),
+            "the change stays to apply elsewhere"
+        );
+
+        let sent = w.apply_changes(0, &cx(false)).requests;
+        assert!(
+            matches!(&sent[..], [(_, DbRequest::Execute { sql, .. })]
+                if sql == "update t set x = 2 where id = 1 and x = 1"),
+            "{sent:?}"
+        );
+    }
 
     #[test]
     fn client_commands() {

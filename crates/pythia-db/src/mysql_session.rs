@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use mysql::consts::{ColumnFlags, ColumnType};
+use mysql::consts::{CapabilityFlags, ColumnFlags, ColumnType};
 use mysql::prelude::{Protocol, Queryable};
 use mysql::{Conn, Opts, OptsBuilder, Params, QueryResult, SslOpts, Value};
 use tracing::{debug, info, warn};
@@ -461,7 +461,11 @@ pub(crate) fn options(params: &ConnectParams) -> Result<Opts, DbError> {
         .pass(Some(&params.password))
         .db_name(target.database)
         .prefer_socket(false)
-        .tcp_connect_timeout(Some(Duration::from_secs(15)));
+        .tcp_connect_timeout(Some(Duration::from_secs(15)))
+        // Rows affected are the rows matched, as on Oracle, not only those
+        // whose values changed: editing a result checks that each UPDATE
+        // found its row, even when it sets a value the row already has.
+        .additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS);
     match target.tls {
         Tls::Off => {}
         // Through SSH the driver connects to 127.0.0.1: the certificate is

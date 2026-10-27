@@ -25,8 +25,34 @@ All notable changes to Pythia are documented here. The format follows
   counters, with top waits since the refresh before, log use and page
   life expectancy. Without `pg_read_all_stats` or `VIEW SERVER STATE` the
   dashboard shows what it can and says what's missing (#92).
+- MySQL: results can be edited in place, as on Oracle (#101). MySQL has
+  no ROWID, so the table's primary key (or a unique key on NOT NULL
+  columns) finds a row again: *Edit* adds its columns, read-only, to the
+  end of the result, also when the query doesn't select them. Applying
+  checks the values that were fetched, so a row another session changed
+  is a conflict; FLOAT values, which MySQL shows rounded, and JSON
+  compare as such. Text with a backslash is written as hex, the same with
+  or without `NO_BACKSLASH_ESCAPES`. Tables without such a key stay
+  read-only and say why. MySQL now counts the rows an UPDATE matched, as
+  Oracle does, not only those it changed.
+- SQL windows: *Edit* isn't offered for DISTINCT, GROUP BY or aggregate
+  queries, whose rows aren't the table's. Backtick-quoted names are
+  identifiers to the editor and the statement splitter (a `;` in one
+  doesn't end the statement).
 
 ### Fixed
+- Read-only connections no longer let results be edited (#107): *Edit*
+  isn't offered, and the changes of a result can't be applied. Before,
+  only statements run from the editor were held back.
+- *Export → SQL INSERT* and *Copy as → INSERT* wrote Oracle SQL on every
+  connection (#106). On MySQL, column names went into double quotes (a
+  syntax error), dates into `to_date(…)`, and `VARBINARY` values into
+  quoted hex text that was stored as characters. SQL Server's
+  `datetime` swapped month and day under `DATEFORMAT dmy`. The statements
+  now use the connection's quoting and literals: `X'…'` and backtick names
+  on MySQL, `E'…'` for backslashes on PostgreSQL, and `N'…'`, `0x…` and
+  ISO 8601 dates on SQL Server. A numeric cell like `NaN` or `Inf` is
+  quoted instead of written as a name.
 - Editing another user no longer needs SELECT_CATALOG_ROLE: `ALTER USER`
   and `GRANT` don't need the DBA views, and the form failed with
   *reading users and roles needs SELECT_CATALOG_ROLE* (also when only

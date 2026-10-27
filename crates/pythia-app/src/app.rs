@@ -555,6 +555,13 @@ impl PythiaApp {
             .unwrap_or_default()
     }
 
+    /// Whether a connection's profile is read-only.
+    fn read_only_of(&self, connection: Option<&str>) -> bool {
+        connection
+            .and_then(|c| self.conns.get(c))
+            .is_some_and(|c| c.profile.read_only)
+    }
+
     fn doc_context(&self, id: DocId) -> DocContext<'_> {
         let connected = self
             .docs
@@ -575,6 +582,7 @@ impl PythiaApp {
             marks: None,
             privilege: None,
             dialect: self.dialect_of(self.docs.get(&id).and_then(|d| d.connection.as_deref())),
+            read_only: self.read_only_of(self.docs.get(&id).and_then(|d| d.connection.as_deref())),
         }
     }
 
@@ -1959,12 +1967,13 @@ impl PythiaApp {
 
     fn deliver(&mut self, id: DocId, event: DbEvent) {
         let cx = self.doc_context(id);
-        let (settings, connected, fetch_size, connection, dialect) = (
+        let (settings, connected, fetch_size, connection, dialect, read_only) = (
             cx.settings.clone(),
             cx.connected,
             cx.fetch_size,
             cx.connection.clone(),
             cx.dialect,
+            cx.read_only,
         );
         let Some(doc) = self.docs.get_mut(&id) else {
             return;
@@ -1983,6 +1992,7 @@ impl PythiaApp {
             marks: None,
             privilege: None,
             dialect,
+            read_only,
         };
         let effects = doc.on_event(event, &cx);
         self.apply(Some(id), effects);
@@ -2569,6 +2579,7 @@ impl PythiaApp {
             marks: None,
             privilege: None,
             dialect,
+            read_only,
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
@@ -4126,6 +4137,13 @@ impl eframe::App for PythiaApp {
             .iter()
             .map(|(n, c)| (n.clone(), c.dialect()))
             .collect();
+        let read_only: HashSet<String> = self
+            .conns
+            .open
+            .iter()
+            .filter(|(_, c)| c.profile.read_only)
+            .map(|(n, _)| n.clone())
+            .collect();
         self.assistant.poll();
         self.poll_ai_format();
         let focused_title = self
@@ -4143,6 +4161,7 @@ impl eframe::App for PythiaApp {
             colors: &colors,
             privileges: &privileges,
             dialects: &dialects,
+            read_only: &read_only,
             connected: &connected,
             catalogs: &self.catalogs,
             catalog_revision: self.catalog_revision,
@@ -4391,6 +4410,33 @@ impl PythiaApp {
         }
     }
 
+    /// Runs `f` on the focused SQL window with a context as a frame gives
+    /// it (its connection's dialect), and applies what it asks for.
+    pub fn test_on_sql_window(&mut self, f: impl FnOnce(&mut SqlWindow, &DocContext) -> Effects) {
+        let id = self.focused.expect("focused document");
+        let connection = self.docs[&id].connection.clone();
+        let dialect = self.dialect_of(connection.as_deref());
+        let read_only = self.read_only_of(connection.as_deref());
+        let settings = self.settings.clone();
+        let cx = DocContext {
+            id,
+            settings: &settings,
+            connected: true,
+            fetch_size: 100,
+            connection,
+            catalog: None,
+            catalog_revision: 0,
+            connections: &[],
+            debug: None,
+            marks: None,
+            privilege: None,
+            dialect,
+            read_only,
+        };
+        let effects = f(self.test_sql_window(), &cx);
+        self.apply(Some(id), effects);
+    }
+
     pub fn test_cx(&self) -> (DocId, Settings, Option<String>) {
         let id = self.focused.expect("focused document");
         (id, self.settings.clone(), self.docs[&id].connection.clone())
@@ -4429,6 +4475,7 @@ impl PythiaApp {
             marks: None,
             privilege: None,
             dialect: Dialect::ORACLE,
+            read_only: false,
         };
         let Some(DocKind::DataSearch(s)) = self.docs.get_mut(&id).map(|d| &mut d.kind) else {
             panic!("not a data search");
@@ -4649,6 +4696,10 @@ impl PythiaApp {
         self.end_transaction(true);
     }
 
+    pub fn test_rollback(&mut self) {
+        self.end_transaction(false);
+    }
+
     pub fn test_pending_tx(&self) -> bool {
         self.conns.any_pending_tx()
     }
@@ -4764,6 +4815,8 @@ struct Viewer<'a> {
     colors: &'a HashMap<String, Color32>,
     privileges: &'a HashMap<String, pythia_config::Privilege>,
     dialects: &'a HashMap<String, Dialect>,
+    /// Connections whose profile is read-only.
+    read_only: &'a HashSet<String>,
     connected: &'a HashMap<String, bool>,
     catalogs: &'a HashMap<String, pythia_lsp_core::CatalogCache>,
     catalog_revision: u64,
@@ -4927,6 +4980,10 @@ impl TabViewer for Viewer<'_> {
                         .and_then(|c| self.dialects.get(c))
                         .copied()
                         .unwrap_or_default(),
+                    read_only: doc
+                        .connection
+                        .as_ref()
+                        .is_some_and(|c| self.read_only.contains(c)),
                 };
                 let effects = doc.ui(ui, &cx);
                 self.effects.push((*id, effects));

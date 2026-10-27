@@ -38,7 +38,9 @@ pub enum TokenKind {
     /// Unquoted identifier. Keywords are reclassified by [`tokenize`].
     #[regex(r"[\p{L}][\p{L}\p{N}_$#]*")]
     Ident,
+    /// `"Name"`, and MySQL's `` `name` `` (a doubled backtick stands for one).
     #[regex(r#""[^"\n]*"?"#)]
+    #[regex(r"`([^`\n]|``)*`?")]
     QuotedIdent,
     #[regex(r":[\p{L}][\p{L}\p{N}_$#]*")]
     #[regex(r":[0-9]+")]
@@ -239,6 +241,22 @@ mod tests {
         );
         assert_eq!(kinds("q'[abc"), vec![(TokenKind::QString, "q'[abc")]);
         assert_eq!(kinds("$$ ab;c"), vec![(TokenKind::String, "$$ ab;c")]);
+    }
+
+    #[test]
+    fn mysql_backticks() {
+        assert_eq!(
+            kinds("select `a b`.`x``y` from `t;1` `open"),
+            vec![
+                (TokenKind::Keyword, "select"),
+                (TokenKind::QuotedIdent, "`a b`"),
+                (TokenKind::Dot, "."),
+                (TokenKind::QuotedIdent, "`x``y`"),
+                (TokenKind::Keyword, "from"),
+                (TokenKind::QuotedIdent, "`t;1`"),
+                (TokenKind::QuotedIdent, "`open"),
+            ]
+        );
     }
 
     #[test]
