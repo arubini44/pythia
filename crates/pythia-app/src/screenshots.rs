@@ -3590,6 +3590,170 @@ fn navigation_across_spec_and_body() {
     assert_eq!(state(&mut h), (1, use_at..use_at), "back where it started");
 }
 
+/// The outline's context menu in a package's program window: Go to body
+/// and Go to specification land on the same overload, whatever order the
+/// body has (Back returns), Find references, Copy name. Without a
+/// connection there's nothing to test.
+#[test]
+fn outline_context_menu() {
+    use crate::commands::Command;
+    let spec = "create or replace package outline_pkg as\n  g_limit number := 10;\n  \
+                procedure raise(p_id number, p_pct number);\n  \
+                procedure raise(p_id number, p_amount number, p_reason varchar2);\nend outline_pkg;";
+    let body = "create or replace package body outline_pkg as\n  \
+                procedure raise(p_id number, p_amount number, p_reason varchar2) is\n  begin\n    \
+                null;\n  end;\n  \
+                procedure raise(p_id number, p_pct number) is\n  begin\n    \
+                if p_pct > g_limit then\n      raise(p_id, p_pct, 'too much');\n    end if;\n  end;\n\
+                end outline_pkg;";
+    let mut h = harness(true);
+    h.state_mut().test_program_with(
+        ObjectRef {
+            owner: "PYTHIA".into(),
+            name: "OUTLINE_PKG".into(),
+            object_type: pythia_db::ObjectType::Package,
+        },
+        spec,
+        body,
+    );
+    h.run_steps(3);
+    // (active part, selection or caret) of the program window.
+    let state = |h: &mut Ui| {
+        let w = h.state_mut().test_program();
+        let part = w.active;
+        let editor = w.active_editor().unwrap();
+        (
+            part,
+            editor
+                .selection()
+                .unwrap_or(editor.cursor()..editor.cursor()),
+        )
+    };
+    let menu = |h: &mut Ui, name: &str, nth: usize| {
+        h.get_all_by_label(name)
+            .nth(nth)
+            .expect(name)
+            .click_secondary();
+        h.run_steps(2);
+    };
+
+    // The spec's second overload is the body's first.
+    assert_eq!(state(&mut h).0, 0);
+    menu(&mut h, "raise", 1);
+    assert!(h.query_by_label("Find references").is_some());
+    assert!(h.query_by_label("Test…").is_none(), "not connected");
+    save(&mut h, "outline-context-menu");
+    h.get_by_label("Go to body").click();
+    h.run_steps(3);
+    let first = body.find("raise").unwrap();
+    assert_eq!(state(&mut h), (1, first..first + 5));
+    h.state_mut().test_command(Command::NavigateBack);
+    h.run_steps(3);
+    assert_eq!(state(&mut h).0, 0, "Back returns to the spec");
+
+    // And back from the body's second to the spec's first.
+    h.state_mut().test_program().active = 1;
+    h.run_steps(3);
+    menu(&mut h, "raise", 1);
+    h.get_by_label("Go to specification").click();
+    h.run_steps(3);
+    let first = spec.find("raise").unwrap();
+    assert_eq!(state(&mut h), (0, first..first + 5));
+
+    // References to a variable, in both parts.
+    menu(&mut h, "g_limit", 0);
+    assert!(
+        h.query_by_label("Go to body").is_none(),
+        "only for subprograms"
+    );
+    h.get_by_label("Find references").click();
+    h.run_steps(3);
+    assert!(h.state().test_reference_rows());
+    assert!(
+        h.query_by_label_contains("if p_pct > g_limit then")
+            .is_some()
+    );
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+
+    menu(&mut h, "g_limit", 0);
+    h.get_by_label("Copy name").click();
+    h.step();
+    let copied = h
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::OutputCommand::CopyText(text) if text == "g_limit"));
+    assert!(copied, "{:?}", h.output().platform_output.commands);
+}
+
+/// Test… and Debug… from the outline of a package body: for the
+/// subprograms its spec declares, disabled for a private one. Test… opens
+/// the block that calls it.
+#[test]
+fn test_from_outline() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let spec = std::env::var("PYTHIA_TEST_DB").unwrap();
+    let (cred, db) = spec.rsplit_once('@').unwrap();
+    let (user, pw) = cred.split_once('/').unwrap();
+    let conn = pythia_db::oracle::Connection::connect(user, pw, db).unwrap();
+    for ddl in [
+        "create or replace package pythia_outline_pkg as\n  procedure run(p_n number);\nend;",
+        "create or replace package body pythia_outline_pkg as\n  \
+         function helper(p_n number) return number is\n  begin\n    return p_n * 2;\n  end;\n\n  \
+         procedure run(p_n number) is\n    l_total number;\n  begin\n    \
+         l_total := helper(p_n);\n  end;\nend;",
+    ] {
+        conn.execute(ddl, &[]).unwrap();
+    }
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Program {
+        connection: "pythia@FREEPDB1".into(),
+        object: ObjectRef {
+            owner: "PYTHIA".into(),
+            name: "PYTHIA_OUTLINE_PKG".into(),
+            object_type: pythia_db::ObjectType::PackageBody,
+        },
+    });
+    wait_until(&mut h, "source", |app| !app.test_focused_busy());
+    // The outline is worked out shortly after the source loaded.
+    let start = Instant::now();
+    while h.query_by_label("helper").is_none() {
+        assert!(start.elapsed() < Duration::from_secs(30), "no outline");
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    let disabled = |h: &Ui, label: &str| {
+        use egui_kittest::kittest::NodeT;
+        h.get_by_label(label).accesskit_node().is_disabled()
+    };
+
+    h.get_by_label("helper").click_secondary();
+    h.run_steps(2);
+    assert!(disabled(&h, "Test…"), "private");
+    assert!(disabled(&h, "Debug…"), "private");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    h.get_by_label("run").click_secondary();
+    h.run_steps(2);
+    assert!(!disabled(&h, "Debug…"));
+    save(&mut h, "test-from-outline");
+    h.get_by_label("Test…").click();
+    wait_until(&mut h, "test block", |app| {
+        app.test_sql_window_ref()
+            .is_some_and(|w| w.editor.text().contains("pythia_outline_pkg.run("))
+    });
+
+    conn.execute("drop package pythia_outline_pkg", &[])
+        .unwrap();
+}
+
 /// The status bar counts invalid objects; its indicator opens the invalid
 /// objects window, which recompiles them over two sessions.
 #[test]

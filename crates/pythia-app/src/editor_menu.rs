@@ -12,15 +12,66 @@ use crate::commands::{Command, Keymap};
 use crate::documents::{DocContext, Effects, ObjectRef};
 use crate::editor::Editor;
 
+/// A subprogram of a program window to test or debug.
+pub struct Testable {
+    pub object: ObjectRef,
+    /// The member of a package.
+    pub member: Option<Subprogram>,
+    /// The window has unsaved changes: the run uses the database's version.
+    pub unsaved: bool,
+}
+
+/// Test… and Debug… on a subprogram, or disabled with the reason on hover.
+/// Shows nothing without a connection or PL/SQL; returns whether it showed
+/// them.
+pub fn test_items(
+    ui: &mut egui::Ui,
+    testable: Result<&Testable, &str>,
+    cx: &DocContext,
+    effects: &mut Effects,
+) -> bool {
+    let Some(connection) = cx
+        .connection
+        .as_ref()
+        .filter(|_| cx.dialect.supports(Feature::PlSql))
+    else {
+        return false;
+    };
+    let mut item = |ui: &mut egui::Ui,
+                    label: &str,
+                    action: fn(ObjectRef, Option<Subprogram>) -> ObjectAction| {
+        let response = ui.add_enabled(testable.is_ok(), egui::Button::new(label));
+        let response = match testable {
+            Ok(t) if t.unsaved => response.on_hover_text(
+                "Runs the version compiled in the database: this window has unsaved changes",
+            ),
+            Ok(_) => response,
+            Err(why) => response.on_disabled_hover_text(why),
+        };
+        if response.clicked()
+            && let Ok(t) = testable
+        {
+            let action = action(t.object.clone(), t.member.clone());
+            effects.object_actions.push((connection.clone(), action));
+            ui.close();
+        }
+    };
+    item(ui, "Test…", ObjectAction::Test);
+    if cx.dialect.supports(Feature::Debugger) {
+        item(ui, "Debug…", ObjectAction::Debug);
+    }
+    true
+}
+
 /// Shows the context menu of an editor on right-click; call every frame
 /// after `Editor::ui` and `Assist::handle` with the editor's response.
 /// `subprogram` is the one whose declaration was right-clicked in a program
-/// window (object, and the member of a package), to test or debug.
+/// window, to test or debug.
 pub fn show(
     response: &egui::Response,
     editor: &mut Editor,
     assist: &mut Assist,
-    subprogram: Option<(ObjectRef, Option<Subprogram>)>,
+    subprogram: Option<Testable>,
     cx: &DocContext,
 ) -> Effects {
     let mut effects = Effects::default();
@@ -80,27 +131,9 @@ pub fn show(
             }
             Some((_, ContextTarget::Nothing)) | None => {}
         }
-        if let (Some((object, member)), Some(connection)) = (&subprogram, &cx.connection)
-            && cx.dialect.supports(Feature::PlSql)
+        if let Some(testable) = &subprogram
+            && test_items(ui, Ok(testable), cx, &mut effects)
         {
-            let mut action = |ui: &mut egui::Ui, label: &str, action: ObjectAction| {
-                if ui.button(label).clicked() {
-                    effects.object_actions.push((connection.clone(), action));
-                    ui.close();
-                }
-            };
-            action(
-                ui,
-                "Test…",
-                ObjectAction::Test(object.clone(), member.clone()),
-            );
-            if cx.dialect.supports(Feature::Debugger) {
-                action(
-                    ui,
-                    "Debug…",
-                    ObjectAction::Debug(object.clone(), member.clone()),
-                );
-            }
             ui.separator();
         }
 

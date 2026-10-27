@@ -699,8 +699,9 @@ impl ProgramWindow {
                 }
             }
         }
+        let unsaved = self.is_dirty();
         // A package body's spec tells which of its subprograms are public
-        // (Test… and Debug… in the context menu); analyze it although it
+        // (Test… and Debug… in the context menus); analyze it although it
         // isn't shown.
         let (before, rest) = self.parts.split_at_mut(self.active);
         let Some(part) = rest.first_mut() else {
@@ -751,24 +752,45 @@ impl ProgramWindow {
                         });
                 });
         }
+        // From the outline's menu: references to find (at this offset), the
+        // other part to go to (offset, name).
+        let (mut find_references, mut go_to) = (None, None);
         if self.show_outline {
             egui::Panel::right(egui::Id::new(("program-outline", cx.id)))
                 .resizable(true)
                 .default_size(240.0)
                 .show(ui, |ui| {
-                    let mut jump = None;
+                    let mut outline = Outline {
+                        object: &self.object,
+                        part_type: part.object_type,
+                        outline: part.assist.outline(),
+                        spec: spec.map_or(part.assist.outline(), |s| s.outline()),
+                        new: self.new,
+                        unsaved,
+                        other: companion.map(|_| match part.object_type {
+                            ObjectType::Package | ObjectType::Type => "body",
+                            _ => "specification",
+                        }),
+                        cx,
+                        picked: None,
+                        effects: Effects::default(),
+                    };
                     egui::ScrollArea::vertical()
                         .auto_shrink(false)
                         .show(ui, |ui| {
-                            if part.assist.outline().is_empty() {
+                            if outline.outline.is_empty() {
                                 ui.weak("No declarations");
                             }
-                            for item in part.assist.outline() {
-                                outline_item(ui, item, 0, &mut jump);
+                            for item in outline.outline {
+                                outline.item(ui, item, None, 0);
                             }
                         });
-                    if let Some(range) = jump {
-                        part.editor.select(range);
+                    effects.extend(outline.effects);
+                    match outline.picked {
+                        Some(Picked::Jump(range)) => part.editor.select(range),
+                        Some(Picked::References(at)) => find_references = Some(at),
+                        Some(Picked::Counterpart(at, name)) => go_to = Some((at, name)),
+                        None => {}
                     }
                 });
         }
@@ -788,13 +810,18 @@ impl ProgramWindow {
             effects.extend(part.assist.handle(&mut part.editor, &out, cx));
             let subprogram = part.assist.context().filter(|_| !self.new).and_then(|c| {
                 let spec = spec.map_or(part.assist.outline(), |s| s.outline());
-                subprogram_at(
+                let (object, member) = subprogram_at(
                     &self.object,
                     part.object_type,
                     part.assist.outline(),
                     spec,
                     c.offset,
-                )
+                )?;
+                Some(crate::editor_menu::Testable {
+                    object,
+                    member,
+                    unsaved,
+                })
             });
             effects.extend(crate::editor_menu::show(
                 &out.response,
@@ -814,6 +841,13 @@ impl ProgramWindow {
                 part.editor.set_debug_lines(&lines, current);
             }
         });
+        // Looked up next frame, as from the editor's menu: the list of
+        // references would take the click that chose this for one outside
+        // it, and close.
+        if let Some(at) = find_references {
+            part.assist.request(crate::assist::Request::References, at);
+            ui.ctx().request_repaint();
+        }
         let (from, jump, references) = (
             part.assist.take_jumped_from(),
             part.assist.take_companion_jump(),
@@ -826,6 +860,30 @@ impl ProgramWindow {
         if let (Some(range), Some(other)) = (jump, companion) {
             self.active = other;
             self.parts[other].editor.select(range);
+        }
+        if let (Some((at, name)), Some(other)) = (go_to, companion) {
+            let target = counterpart(
+                self.parts[active].editor.text(),
+                at,
+                self.parts[other].editor.text(),
+            );
+            match target {
+                Some(range) => {
+                    effects.jumped_from = self.position();
+                    self.active = other;
+                    self.parts[other].editor.select(range);
+                }
+                None => {
+                    let what = match self.parts[other].object_type {
+                        ObjectType::PackageBody | ObjectType::TypeBody => "body",
+                        _ => "specification",
+                    };
+                    self.state.message = Some((
+                        false,
+                        format!("{} isn't in the {what}", name.to_lowercase()),
+                    ));
+                }
+            }
         }
         if let Some(places) = references {
             effects.references = Some(
@@ -1130,53 +1188,153 @@ pub fn debug_unit(object: &ObjectRef, object_type: ObjectType) -> pythia_debugge
     pythia_debugger::Unit::new(object.owner.clone(), object.name.clone(), unit_type)
 }
 
-/// One outline entry with its children, indented by depth.
-fn outline_item(
-    ui: &mut Ui,
-    item: &pythia_lsp_core::OutlineItem,
-    depth: usize,
-    jump: &mut Option<std::ops::Range<usize>>,
-) {
-    use pythia_lsp_core::OutlineKind as K;
-    use pythia_ui::icons::{Icon, IconSize};
-    let icon = match item.kind {
-        K::PackageSpec => Icon::Package,
-        K::PackageBody => Icon::PackageBody,
-        K::Procedure => Icon::Procedure,
-        K::Function => Icon::Function,
-        K::Trigger => Icon::Trigger,
-        K::Type | K::TypeDecl => Icon::Type,
-        K::TypeBody => Icon::TypeBody,
-        K::Cursor => Icon::Grid,
-        K::Exception => Icon::Warning,
-        K::Variable | K::Constant => Icon::Column,
-        K::Block | K::Statement => Icon::Text,
-    };
-    // Variables of nested scopes would only add noise.
-    if depth > 1
-        && matches!(
-            item.kind,
-            K::Variable | K::Constant | K::Statement | K::Block
-        )
-    {
-        return;
+/// The outline beside the editor: its entries jump to their declaration,
+/// and their context menu tests, debugs, finds and copies.
+struct Outline<'a> {
+    object: &'a ObjectRef,
+    part_type: ObjectType,
+    /// This part's declarations, and those of the package spec (the same
+    /// in the spec), for Test… and Debug….
+    outline: &'a [pythia_lsp_core::OutlineItem],
+    spec: &'a [pythia_lsp_core::OutlineItem],
+    new: bool,
+    unsaved: bool,
+    /// The other part, for Go to: "body" or "specification".
+    other: Option<&'static str>,
+    cx: &'a DocContext<'a>,
+    picked: Option<Picked>,
+    effects: Effects,
+}
+
+/// What was picked in the outline, for the window to carry out.
+enum Picked {
+    /// Select the name.
+    Jump(std::ops::Range<usize>),
+    /// Find references to the name at this offset.
+    References(usize),
+    /// Show the subprogram named at this offset in the other part.
+    Counterpart(usize, String),
+}
+
+impl Outline<'_> {
+    /// One entry with its children, indented by depth.
+    fn item(
+        &mut self,
+        ui: &mut Ui,
+        item: &pythia_lsp_core::OutlineItem,
+        parent: Option<pythia_lsp_core::OutlineKind>,
+        depth: usize,
+    ) {
+        use pythia_lsp_core::OutlineKind as K;
+        use pythia_ui::icons::{Icon, IconSize};
+        let icon = match item.kind {
+            K::PackageSpec => Icon::Package,
+            K::PackageBody => Icon::PackageBody,
+            K::Procedure => Icon::Procedure,
+            K::Function => Icon::Function,
+            K::Trigger => Icon::Trigger,
+            K::Type | K::TypeDecl => Icon::Type,
+            K::TypeBody => Icon::TypeBody,
+            K::Cursor => Icon::Grid,
+            K::Exception => Icon::Warning,
+            K::Variable | K::Constant => Icon::Column,
+            K::Block | K::Statement => Icon::Text,
+        };
+        // Variables of nested scopes would only add noise.
+        if depth > 1
+            && matches!(
+                item.kind,
+                K::Variable | K::Constant | K::Statement | K::Block
+            )
+        {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(depth as f32 * 14.0);
+            ui.spacing_mut().item_spacing.x = 5.0;
+            ui.add(icon.sized(ui, IconSize::Small));
+            let mut r = ui.add(
+                egui::Button::new(RichText::new(item.name.to_lowercase()).monospace()).frame(false),
+            );
+            if r.clicked() {
+                self.picked = Some(Picked::Jump(item.name_span.clone()));
+            }
+            if !item.detail.is_empty() {
+                r = r.on_hover_text(&item.detail);
+            }
+            // Blocks and statements have no name.
+            if !matches!(item.kind, K::Block | K::Statement) {
+                r.context_menu(|ui| self.menu(ui, item, parent));
+            }
+        });
+        for child in &item.children {
+            self.item(ui, child, Some(item.kind), depth + 1);
+        }
     }
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * 14.0);
-        ui.spacing_mut().item_spacing.x = 5.0;
-        ui.add(icon.sized(ui, IconSize::Small));
-        let r = ui.add(
-            egui::Button::new(RichText::new(item.name.to_lowercase()).monospace()).frame(false),
-        );
-        if r.clicked() {
-            *jump = Some(item.name_span.clone());
+
+    fn menu(
+        &mut self,
+        ui: &mut Ui,
+        item: &pythia_lsp_core::OutlineItem,
+        parent: Option<pythia_lsp_core::OutlineKind>,
+    ) {
+        use pythia_lsp_core::OutlineKind as K;
+        ui.set_min_width(180.0);
+        let subprogram = matches!(item.kind, K::Procedure | K::Function);
+        if subprogram {
+            let testable = self.testable(item, parent);
+            let testable = testable.as_ref().map_err(|why| *why);
+            if crate::editor_menu::test_items(ui, testable, self.cx, &mut self.effects) {
+                ui.separator();
+            }
         }
-        if !item.detail.is_empty() {
-            r.on_hover_text(&item.detail);
+        // A package's or type's own subprogram, not a local one.
+        let member = subprogram
+            && matches!(
+                parent,
+                Some(K::PackageSpec | K::PackageBody | K::Type | K::TypeBody)
+            );
+        if member
+            && let Some(other) = self.other
+            && ui.button(format!("Go to {other}")).clicked()
+        {
+            self.picked = Some(Picked::Counterpart(item.name_span.start, item.name.clone()));
+            ui.close();
         }
-    });
-    for child in &item.children {
-        outline_item(ui, child, depth + 1, jump);
+        if ui.button("Find references").clicked() {
+            self.picked = Some(Picked::References(item.name_span.start));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Copy name").clicked() {
+            ui.ctx().copy_text(item.name.clone());
+            ui.close();
+        }
+    }
+
+    /// The subprogram to test or debug, or why a block can't call it.
+    fn testable(
+        &self,
+        item: &pythia_lsp_core::OutlineItem,
+        parent: Option<pythia_lsp_core::OutlineKind>,
+    ) -> Result<crate::editor_menu::Testable, &'static str> {
+        use pythia_lsp_core::OutlineKind as K;
+        if self.new {
+            return Err("Not in the database yet: compile it first");
+        }
+        let offset = item.name_span.start;
+        match subprogram_at(self.object, self.part_type, self.outline, self.spec, offset) {
+            Some((object, member)) => Ok(crate::editor_menu::Testable {
+                object,
+                member,
+                unsaved: self.unsaved,
+            }),
+            None => Err(match parent {
+                Some(K::PackageBody) => "Private: the package specification doesn't declare it",
+                Some(K::Type | K::TypeBody) => "Methods of object types can't be tested",
+                _ => "A local subprogram: it can only be called where it's declared",
+            }),
+        }
     }
 }
 
