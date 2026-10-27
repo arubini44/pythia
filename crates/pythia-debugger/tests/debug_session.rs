@@ -11,10 +11,10 @@ mod common;
 use std::thread;
 
 use common::{Harness, connect, host, run_target, value, watch};
-use pythia_debugger::target::{self, MissingPrivilege};
 use pythia_debugger::{
     Breakpoint, BreakpointOptions, DebugCommand, DebugEvent, StopReason, Unit, UnitType,
 };
+use pythia_debugger::{setup, target};
 
 const DEMO: &str = "create or replace procedure dbg_demo(p_n in number) is
   type t_arr is table of number; type t_rec is record (a number := 7, b varchar2(10) := 'bee');
@@ -73,11 +73,9 @@ fn debug_procedures_and_packages() {
         dba.execute(&stmt, &[])
             .unwrap_or_else(|e| panic!("{stmt}: {e}"));
     }
-    let missing = target::check(&conn).unwrap();
-    assert!(
-        !missing.contains(&MissingPrivilege::DebugConnectSession),
-        "{missing:?}"
-    );
+    let facts = setup::facts(&conn).unwrap();
+    assert!(facts.debug_connect && facts.debug_any, "{facts:?}");
+    assert_eq!(facts.user, "PYTHIA");
 
     for ddl in [HELPER, DEMO, PKG, PKG_BODY, EXC] {
         conn.execute(ddl, &[]).unwrap();

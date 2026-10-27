@@ -1,5 +1,5 @@
-//! The target side and setup: running code under the debugger, compiling
-//! units with debug info, privilege checks and the admin setup script.
+//! The target side: running code under the debugger, compiling units with
+//! debug info, and the admin setup script.
 
 use pythia_db::oracle::Connection;
 use pythia_db::{DbError, TaskFn};
@@ -273,116 +273,41 @@ fn declared_types(source: &str, line: Option<u32>, names: &[String]) -> Vec<(Str
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MissingPrivilege {
-    /// `DEBUG CONNECT SESSION` (required).
-    DebugConnectSession,
-    /// `DEBUG ANY PROCEDURE` (needed to debug other schemas' code).
-    DebugAnyProcedure,
-    /// No `jdwp` host ACE for the user (connect would fail with ORA-24247).
-    JdwpAcl,
-}
-
-impl MissingPrivilege {
-    pub fn describe(&self) -> &'static str {
-        match self {
-            MissingPrivilege::DebugConnectSession => "DEBUG CONNECT SESSION is required to debug",
-            MissingPrivilege::DebugAnyProcedure => {
-                "DEBUG ANY PROCEDURE is needed to debug other schemas' code"
-            }
-            MissingPrivilege::JdwpAcl => {
-                "a network ACL with the JDWP privilege is needed for the database to connect to Pythia"
-            }
-        }
-    }
-}
-
-/// Checks what the current user lacks for debugging.
-pub fn check(conn: &Connection) -> Result<Vec<MissingPrivilege>, DbError> {
-    let privs = conn.query_as::<String>(
-        "select privilege from session_privs where privilege in ('DEBUG CONNECT SESSION', 'DEBUG ANY PROCEDURE')",
-        &[],
-    )?;
-    let privs: Vec<String> = privs.collect::<Result<_, _>>()?;
-    let mut missing = Vec::new();
-    if !privs.iter().any(|p| p == "DEBUG CONNECT SESSION") {
-        missing.push(MissingPrivilege::DebugConnectSession);
-    }
-    if !privs.iter().any(|p| p == "DEBUG ANY PROCEDURE") {
-        missing.push(MissingPrivilege::DebugAnyProcedure);
-    }
-    // JDWP connections need a host ACE from 12.1 on; 11g has no such check.
-    if pythia_db::compat::at_least(conn, 12, 1)? {
-        let aces: i64 = conn
-            .query_row_as(
-                "select count(*) from user_host_aces where privilege = 'JDWP' and grant_type = 'GRANT'",
-                &[],
-            )
-            .unwrap_or(0);
-        if aces == 0 {
-            missing.push(MissingPrivilege::JdwpAcl);
-        }
-    }
-    Ok(missing)
-}
-
 /// The SQL an administrator runs once so `user` can debug, with the
 /// database connecting back to `host` (the machine running Pythia, as seen
-/// from the database server). Each statement is executable as is. The host
-/// ACE needs 12.1+ (and isn't needed before).
+/// from the database server) on any port. Each statement is executable as
+/// is. The host ACE needs 12.1+ (and isn't needed before).
 pub fn setup_statements(user: &str, host: &str) -> Vec<String> {
-    let user = user.to_uppercase();
-    let host = host.replace('\'', "''");
-    vec![
-        format!("grant debug connect session to {user}"),
-        format!("grant debug any procedure to {user}"),
-        format!(
-            "begin\n  \
-               dbms_network_acl_admin.append_host_ace(\n    \
-                 host       => '{host}',\n    \
-                 lower_port => 1024,\n    \
-                 upper_port => 65535,\n    \
-                 ace        => xs$ace_type(privilege_list => xs$name_list('jdwp'),\n                               \
-                                           principal_name => '{user}',\n                               \
-                                           principal_type => xs_acl.ptype_db));\n\
-             end;"
-        ),
-    ]
+    crate::setup::Grant {
+        user: user.to_uppercase(),
+        debug_connect: true,
+        debug_any: true,
+        ace: Some((host.to_owned(), crate::setup::ANY_PORT)),
+    }
+    .statements()
 }
 
 /// [`setup_statements`] as a SQL*Plus script for a DBA to run.
 pub fn setup_script(user: &str, host: &str) -> String {
-    let mut out = format!(
-        "-- Allow {} to debug PL/SQL with Pythia (run as a DBA)\n",
-        user.to_uppercase()
-    );
-    for stmt in setup_statements(user, host) {
-        out.push_str(&stmt);
-        out.push_str(if stmt.starts_with("begin") {
-            "\n/\n"
-        } else {
-            ";\n"
-        });
-    }
-    out
+    format!(
+        "-- Allow {} to debug PL/SQL with Pythia (run as a DBA)\n{}",
+        user.to_uppercase(),
+        crate::setup::script(&setup_statements(user, host))
+    )
 }
 
 /// A host name the database can use to reach this machine, for
 /// `DBMS_DEBUG_JDWP.CONNECT_TCP`. Prefers `PYTHIA_DEBUG_HOST`, then the
 /// machine's host name. Databases in a local container usually need
-/// `host.containers.internal` / `host.docker.internal` instead.
+/// `host.containers.internal` / `host.docker.internal` instead (the setup
+/// wizard finds one that works, see [`crate::setup::candidates`]).
 pub fn default_host() -> String {
     if let Ok(host) = std::env::var("PYTHIA_DEBUG_HOST")
         && !host.is_empty()
     {
         return host;
     }
-    std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|h| h.trim().to_owned())
-        .filter(|h| !h.is_empty())
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
-        .unwrap_or_else(|| "localhost".into())
+    crate::setup::host_name().unwrap_or_else(|| "localhost".into())
 }
 
 #[cfg(test)]

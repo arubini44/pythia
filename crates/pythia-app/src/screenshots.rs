@@ -800,6 +800,146 @@ fn debug_run_that_cannot_connect() {
         "{:?}",
         debug.log
     );
+    // The panel says why, and the setup opens for it.
+    let problem = debug.problem.clone().expect("the problem");
+    assert!(
+        problem.starts_with("No network ACL entry lets the database connect to no-acl.invalid"),
+        "{problem}"
+    );
+    let setup = h.state_mut().test_setup_window();
+    assert!(setup.open);
+    assert_eq!(setup.test_reason(), Some(problem.as_str()));
+}
+
+/// The debugger setup, end to end: a user without a network ACL entry
+/// starts debugging; the setup opens by itself, finds that every host
+/// fails on the ACL, offers the entry, runs it as the DBA, and then
+/// debugging works.
+#[test]
+fn debugger_setup_fixes_the_acl() {
+    let (Some((profile, _)), Ok(dba)) = (profile(), std::env::var("PYTHIA_TEST_DB_DBA")) else {
+        eprintln!("PYTHIA_TEST_DB / PYTHIA_TEST_DB_DBA not set, skipping");
+        return;
+    };
+    let _accounts = crate::test_db::ACCOUNTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Entries outlive their user: drop those of an earlier run too.
+    let cleanup = [
+        "begin
+           for a in (select host, lower_port, upper_port from dba_host_aces
+                      where principal = 'PYTHIA_DBG_SETUP') loop
+             dbms_network_acl_admin.remove_host_ace(host => a.host,
+               lower_port => a.lower_port, upper_port => a.upper_port,
+               ace => xs$ace_type(privilege_list => xs$name_list('jdwp'),
+                                  principal_name => 'PYTHIA_DBG_SETUP',
+                                  principal_type => xs_acl.ptype_db),
+               remove_empty_acl => true);
+           end loop;
+         end;",
+        "begin
+           for s in (select sid, serial# from v$session
+                      where username = 'PYTHIA_DBG_SETUP') loop
+             execute immediate 'alter system kill session '''
+               || s.sid || ',' || s.serial# || ''' immediate';
+           end loop;
+           execute immediate 'drop user pythia_dbg_setup cascade';
+         exception when others then
+           if sqlcode != -1918 then raise; end if;
+         end;",
+    ];
+    crate::test_db::as_dba(&cleanup);
+    crate::test_db::as_dba(&[
+        "create user pythia_dbg_setup identified by pythia",
+        "grant create session, debug connect session to pythia_dbg_setup",
+    ]);
+    let user = ConnectionProfile {
+        name: "pythia_dbg_setup@FREEPDB1".into(),
+        username: "pythia_dbg_setup".into(),
+        ..profile
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(user, "pythia".into());
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia_dbg_setup@FREEPDB1".into(),
+        text: "begin\n  null;\nend;".into(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::DebugStart);
+    wait_until(&mut h, "the run to end", |app| !app.test_debug_running());
+    wait_until(&mut h, "the setup's checks", |app| {
+        let setup = app.test_setup_window_ref();
+        setup.open && setup.test_done()
+    });
+    let setup = h.state_mut().test_setup_window();
+    let hosts = setup.test_hosts();
+    assert!(
+        hosts.iter().all(|(_, probe)| matches!(
+            probe,
+            Some(pythia_debugger::setup::Probe::Failed {
+                problem: pythia_debugger::setup::Problem::Acl,
+                ..
+            })
+        )),
+        "{hosts:?}"
+    );
+    // Only the entry: the user has the privilege. It's for the address the
+    // database sees for this computer.
+    let fix = setup.test_fix().expect("a fix");
+    assert_eq!(fix.len(), 1, "{fix:?}");
+    assert!(fix[0].contains("append_host_ace("), "{fix:?}");
+    assert!(
+        fix[0].contains("principal_name => 'PYTHIA_DBG_SETUP'"),
+        "{fix:?}"
+    );
+    save(&mut h, "debug-setup-acl");
+
+    let (credentials, _) = dba.rsplit_once('@').unwrap();
+    let (dba_user, dba_password) = credentials.split_once('/').unwrap();
+    h.state_mut()
+        .test_setup_window()
+        .test_run_as(dba_user, dba_password);
+    h.run_steps(2);
+    h.get_by_label("Run statements").scroll_to_me();
+    // The scroll is animated: click where the button ends up.
+    h.run_steps(30);
+    h.get_by_label("Run statements").click();
+    h.run_steps(2);
+    let start = Instant::now();
+    loop {
+        let setup = h.state().test_setup_window_ref();
+        if setup.test_done() && setup.test_works() {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "after the fix: {:?} {:?}",
+            setup.test_notice(),
+            setup.test_hosts()
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    save(&mut h, "debug-setup-works");
+
+    // Debugging works now, with the host the entry is for.
+    h.state_mut()
+        .test_command(crate::commands::Command::DebugStart);
+    wait_until(&mut h, "the second run to end", |app| {
+        !app.test_debug_running()
+    });
+    let debug = h.state().test_debug();
+    assert_eq!(debug.problem, None, "{:?}", debug.log);
+    assert!(
+        debug.log.iter().any(|l| l.starts_with("Connected")),
+        "{:?}",
+        debug.log
+    );
+    drop(h);
+    crate::test_db::as_dba(&cleanup);
 }
 
 /// Needs DEBUG CONNECT SESSION / DEBUG ANY PROCEDURE and a JDWP ACL for the

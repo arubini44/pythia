@@ -8,14 +8,17 @@
 //! `$Oracle.Builtin.<TYPE>` whose `_value` field holds the value as text.
 //!
 //! - [`Debugger`]: the debugger worker (UI side, channel based).
-//! - [`target`]: running code under the debugger, debug compilation,
-//!   privilege checks and the admin setup script.
+//! - [`target`]: running code under the debugger and debug compilation.
+//! - [`setup`]: what the database needs to connect back (privileges,
+//!   network ACL, a host it reaches), finding out what's missing and the
+//!   SQL that allows it.
 //! - [`ui`]: an egui debugger panel and the breakpoint model.
 //! - [`jdwp`]: the wire protocol.
 
 mod condition;
 mod debugger;
 pub mod jdwp;
+pub mod setup;
 pub mod target;
 mod types;
 pub mod ui;

@@ -121,6 +121,11 @@ pub fn demo_schema() {
     *done = true;
 }
 
+/// One test at a time creates and drops users, roles, profiles and
+/// directories: in parallel, that DDL deadlocks in the dictionary
+/// (ORA-00060).
+pub static ACCOUNTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Runs `statements` as the DBA (`PYTHIA_TEST_DB_DBA`), with `{user}` as
 /// the test user; does nothing without a DBA, then a DBA has to have done it.
 pub fn as_dba(statements: &[&str]) {

@@ -192,6 +192,8 @@ pub enum SettingsResult {
     Changed,
     /// The window was closed; persist the settings.
     Closed,
+    /// Open the debugger setup.
+    DebugSetup,
 }
 
 impl SettingsDialog {
@@ -246,6 +248,7 @@ impl SettingsDialog {
         let before = settings.clone();
         let mut open = true;
         let mut learn = None;
+        let mut debug_setup = false;
         let screen = ctx.content_rect();
         egui::Window::new("Settings")
             // Not the title's id: drops the size saved while a hint on one
@@ -286,7 +289,11 @@ impl SettingsDialog {
                                     learn = formatter(ui, settings, &mut self.format);
                                 }
                                 Section::Keyboard => keyboard(ui, settings, &mut self.keys),
-                                Section::Debugger => debugger(ui, settings),
+                                Section::Debugger => {
+                                    if debugger(ui, settings) {
+                                        debug_setup = true;
+                                    }
+                                }
                                 Section::InvalidObjects => invalid_objects(ui, settings),
                                 Section::Ai => ai(ui, settings, &mut self.ai),
                             });
@@ -299,6 +306,8 @@ impl SettingsDialog {
         }
         if let Some(from) = learn {
             SettingsResult::Learn(from)
+        } else if debug_setup {
+            SettingsResult::DebugSetup
         } else if !open {
             SettingsResult::Closed
         } else if *settings != before {
@@ -677,7 +686,9 @@ fn invalid_objects(ui: &mut Ui, s: &mut Settings) {
     );
 }
 
-fn debugger(ui: &mut Ui, s: &mut Settings) {
+/// The Debugger page; true when *Check setup…* was clicked.
+fn debugger(ui: &mut Ui, s: &mut Settings) -> bool {
+    let mut check = false;
     row(
         ui,
         "Debugger host",
@@ -693,6 +704,31 @@ fn debugger(ui: &mut Ui, s: &mut Settings) {
     );
     row(
         ui,
+        "Debugger ports",
+        "Ports the debugger listens on, e.g. 4000-4009. Empty: any free port. Firewall rules \
+         and network ACL entries for a few ports need them fixed",
+        |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut s.debug_ports)
+                    .hint_text("any free port")
+                    .desired_width(120.0),
+            );
+            if let Err(e) = pythia_debugger::setup::parse_ports(&s.debug_ports) {
+                ui.colored_label(ui.visuals().error_fg_color, e);
+            }
+        },
+    );
+    row(
+        ui,
+        "Setup",
+        "Finds out what the database needs to connect to the debugger (privileges, network \
+         ACL, a host it reaches, the firewall) and fixes it",
+        |ui| {
+            check = ui.button("Check setup…").clicked();
+        },
+    );
+    row(
+        ui,
         "Compile with debug information",
         "Program windows compile with debug information, so Step into can enter their units \
          without a breakpoint there. Oracle runs such code less optimized: keep it off for \
@@ -702,6 +738,7 @@ fn debugger(ui: &mut Ui, s: &mut Settings) {
             ui.checkbox(&mut s.compile_debug_info, "");
         },
     );
+    check
 }
 
 fn ai(ui: &mut Ui, s: &mut Settings, st: &mut AiState) {

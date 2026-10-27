@@ -41,6 +41,10 @@ pub struct Settings {
     /// Host name or address the database uses to reach Pythia's debugger
     /// (empty: this machine's host name).
     pub debug_host: String,
+    /// Ports the debugger listens on: `4000` or `4000-4009` (empty: any
+    /// free port). Firewall rules and narrow network ACL entries need them
+    /// fixed.
+    pub debug_ports: String,
     /// Program windows compile with debug information, so the debugger can
     /// step into their units without a breakpoint there. Off by default:
     /// Oracle runs such code at a lower optimization level, which shouldn't
@@ -121,6 +125,7 @@ impl Default for Settings {
             switch_window_connection: false,
             editor: EditorSettings::default(),
             debug_host: String::new(),
+            debug_ports: String::new(),
             compile_debug_info: false,
             format: pythia_plsql::FormatOptions::default(),
             format_profiles: Default::default(),

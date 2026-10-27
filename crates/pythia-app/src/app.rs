@@ -104,6 +104,9 @@ pub struct PythiaApp {
     debug: pythia_debugger::ui::DebugSession,
     /// The running debug call: (document, task request id).
     debug_run: Option<(DocId, u64)>,
+    /// The connection of the last debug run, for the setup window.
+    debug_connection: Option<String>,
+    debug_setup: crate::debug_setup::DebugSetup,
     /// Commands asked for by documents, run with the next frame's commands.
     queued_commands: Vec<Command>,
     assistant: crate::ai::Assistant,
@@ -199,6 +202,8 @@ impl PythiaApp {
             save_report: None,
             debug: Default::default(),
             debug_run: None,
+            debug_connection: None,
+            debug_setup: Default::default(),
             queued_commands: Vec::new(),
             assistant: Default::default(),
             catalogs: HashMap::new(),
@@ -1731,12 +1736,24 @@ impl PythiaApp {
         let host = Some(self.settings.debug_host.trim().to_owned())
             .filter(|h| !h.is_empty())
             .unwrap_or_else(pythia_debugger::target::default_host);
+        let ports = match pythia_debugger::setup::parse_ports(&self.settings.debug_ports) {
+            Ok(ports) => ports,
+            Err(e) => {
+                self.log(format!(
+                    "Debugger ports (Settings → Debugger): {e}; using any port"
+                ));
+                None
+            }
+        };
         let entry = match self.docs.get(&doc).map(|d| &d.kind) {
             Some(DocKind::Sql(w)) => w.state.debug_entry.clone(),
             _ => None,
         };
-        let actions = self.debug.start(block, host, entry, self.notify.callback());
+        let actions = self
+            .debug
+            .start(block, host, ports.as_ref(), entry, self.notify.callback());
         self.debug_run = Some((doc, 0));
+        self.debug_connection = self.docs.get(&doc).and_then(|d| d.connection.clone());
         // Only this window shows where its block is stopped.
         for (id, d) in &mut self.docs {
             if let DocKind::Sql(w) = &mut d.kind
@@ -1748,6 +1765,29 @@ impl PythiaApp {
         self.open_tab(Tab::Debugger);
         self.open_tab(Tab::Doc(doc));
         self.debug_actions(actions);
+    }
+
+    /// Opens the debugger setup for the connection of the last debug run,
+    /// else the current one. `reason` is why: a run that didn't connect.
+    fn open_debug_setup(&mut self, reason: Option<String>) {
+        let connected = |c: &String| self.conns.get(c).is_some_and(Connection::is_connected);
+        let Some(name) = self
+            .debug_connection
+            .clone()
+            .filter(connected)
+            .or_else(|| self.current_connection().filter(connected))
+        else {
+            self.log("Debugger setup: connect to an Oracle database first");
+            return;
+        };
+        let conn = &self.conns.open[&name];
+        if !conn.dialect().supports(Feature::Debugger) {
+            self.log(format!("Debugger setup: {name} has no PL/SQL debugger"));
+            return;
+        }
+        let params = conn.params().clone();
+        self.debug_setup
+            .open(&self.notify.0, name, params, &self.settings, reason);
     }
 
     /// Continues the stopped debug run to the cursor line of the focused
@@ -1893,6 +1933,7 @@ impl PythiaApp {
                     conn.send_meta(id, DbRequest::Task { id, task }, &self.notify);
                 }
                 DebugAction::Finished => self.log("Debug session ended"),
+                DebugAction::Setup { reason } => self.open_debug_setup(reason),
             }
         }
     }
@@ -2187,6 +2228,7 @@ impl PythiaApp {
             Command::DebugStepOut => self.debug.command(pythia_debugger::DebugCommand::StepOut),
             Command::DebugRunToCursor => self.debug_run_to_cursor(),
             Command::DebugStop => self.debug.stop(),
+            Command::DebugSetup => self.open_debug_setup(None),
             Command::ShowDebugger => self.open_tab(Tab::Debugger),
             Command::ShowVariables => {
                 if let Some(id) = self.focused
@@ -2925,7 +2967,8 @@ impl PythiaApp {
                                 // The debugger waits for a session that
                                 // won't come (#123).
                                 if !connected {
-                                    self.debug.target_failed(&e);
+                                    let actions = self.debug.target_failed(&e);
+                                    self.debug_actions(actions);
                                 }
                                 self.log(format!("Debugged block failed: {e}"));
                                 self.deliver(id, DbEvent::Error(e));
@@ -3257,7 +3300,7 @@ impl PythiaApp {
                                 Command::DebugRunToCursor,
                                 Command::DebugStop,
                             ],
-                            &[Command::ShowDebugger],
+                            &[Command::ShowDebugger, Command::DebugSetup],
                         ],
                     )
                 });
@@ -3949,7 +3992,24 @@ impl PythiaApp {
                 self.save_settings();
             }
             crate::settings_dialog::SettingsResult::Learn(from) => self.learn_format(from),
+            crate::settings_dialog::SettingsResult::DebugSetup => self.open_debug_setup(None),
             crate::settings_dialog::SettingsResult::None => {}
+        }
+        for action in self
+            .debug_setup
+            .ui(ctx, &self.settings, &self.saved.profiles)
+        {
+            match action {
+                crate::debug_setup::SetupAction::SetHost(host) => {
+                    self.log(format!("Debugger host is now {host}"));
+                    self.settings.debug_host = host;
+                }
+                crate::debug_setup::SetupAction::SetPorts(ports) => {
+                    self.log(format!("Debugger ports are now {ports}"));
+                    self.settings.debug_ports = ports;
+                }
+            }
+            self.save_settings();
         }
         if let Some(command) = self.palette.ui(ctx, &self.keymap, self.dialect()) {
             commands.push(command);
@@ -4601,6 +4661,14 @@ impl PythiaApp {
     pub fn test_debug_setup(&mut self, host: &str, unit: pythia_debugger::Unit, line: u32) {
         self.settings.debug_host = host.to_owned();
         self.debug.toggle_breakpoint(unit, line);
+    }
+
+    pub fn test_setup_window(&mut self) -> &mut crate::debug_setup::DebugSetup {
+        &mut self.debug_setup
+    }
+
+    pub fn test_setup_window_ref(&self) -> &crate::debug_setup::DebugSetup {
+        &self.debug_setup
     }
 
     pub fn test_debug(&self) -> &pythia_debugger::ui::DebugSession {

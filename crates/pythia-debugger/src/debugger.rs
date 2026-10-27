@@ -30,7 +30,14 @@ impl Debugger {
     /// Binds a listener (e.g. `0.0.0.0:0` for any free port) and starts the
     /// worker. `notify` is called whenever an event is available.
     pub fn listen(bind: &str, notify: impl Fn() + Send + 'static) -> io::Result<Self> {
-        let listener = TcpListener::bind(bind)?;
+        Self::with_listener(TcpListener::bind(bind)?, notify)
+    }
+
+    /// Starts the worker on a bound listener (see [`crate::setup::listen`]).
+    pub fn with_listener(
+        listener: TcpListener,
+        notify: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let (cmd_tx, cmd_rx) = mpsc::channel();

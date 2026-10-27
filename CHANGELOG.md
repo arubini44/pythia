@@ -7,6 +7,26 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Debugger setup** (#122): *Debug → Debugger Setup…*, *Setup…* in the
+  Debugger panel and Settings → Debugger, and on its own when a debug run
+  can't connect. To debug, the database connects back to Pythia, which
+  takes `DEBUG CONNECT SESSION`, a network ACL entry for the host it
+  connects to, and a way through firewalls. The setup tries each host the
+  database might reach this computer by for real (the address the
+  database sees for it, its full and short name, one typed in) and says
+  why one fails: no ACL entry, a name the server can't resolve, refused,
+  or dropped on the way. It offers what's missing: *Use* a host that
+  works; the grants and the ACL entry (this host, its subnet or domain,
+  or any), run as yourself, through a saved DBA connection or a user and
+  password (in your PDB when the DBA logs in to the root), or copied for a
+  DBA, with the script to undo it; and a rule for Windows Firewall
+  (also removing rules that block Pythia, left by answering *Cancel* to
+  Windows' prompt), ufw, firewalld or the macOS firewall, run with
+  administrator rights after asking. New setting *Debugger ports*
+  (Settings → Debugger) fixes the ports the debugger listens on, for
+  firewall rules and ACL entries limited to a few; when the ACL allows
+  only some ports, the setup offers to listen there. While the session
+  is slow to connect, the panel says what may be wrong.
 - Debugger: change values while stopped (#117). Double-click a value in
   Variables or Watches, or right-click it → *Set value…* or *Set to
   NULL*, to change a local variable, an IN OUT or OUT parameter, a record
