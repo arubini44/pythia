@@ -329,6 +329,15 @@ impl DbError {
         }
     }
 
+    /// The PL/SQL error stack of an Oracle error: its `ORA-06512` lines.
+    /// Their `text_line` counts the lines of [`DbError::text`].
+    pub fn stack(&self) -> Vec<crate::error_stack::StackFrame> {
+        if !self.oracle {
+            return Vec::new();
+        }
+        crate::error_stack::parse(&self.text())
+    }
+
     /// True if the Oracle client libraries could not be loaded (DPI-1047).
     pub fn is_missing_client(&self) -> bool {
         self.message.contains("DPI-1047")

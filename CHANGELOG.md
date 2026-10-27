@@ -6,7 +6,22 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Errors lead to the code they were raised in. In Messages, each line of a
+  PL/SQL error stack (`ORA-06512: at "OWNER.NAME", line N`) is a link that
+  opens the package body, procedure, function, type body or trigger at that
+  line; hovering shows the line's code. **Open where raised**, next to
+  *Fix with AI*, opens the innermost one whose source you can see. Lines in
+  code you can't see (another schema's body without the privilege, wrapped
+  code) say why on hover, and the line of the block that ran selects it in
+  the editor. A program window with unsaved changes notes that the line is
+  the one in the database (#112).
+
 ### Fixed
+- Trigger compile errors were marked too high, by the number of lines of
+  the trigger's header: Oracle counts their lines from the trigger's body.
+  Program windows, SQL windows and the invalid objects window now show them
+  on the right line (#114).
 - The fields of the Variables prompt (binds and `&substitutions`, before
   running or debugging) were only a few characters wide, so what you
   typed couldn't be read (#109).

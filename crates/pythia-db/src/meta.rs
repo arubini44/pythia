@@ -926,7 +926,33 @@ pub(crate) fn errors(
             warning: attribute == "WARNING",
         });
     }
+    if out.iter().any(|e| e.object_type == "TRIGGER") {
+        let offset = trigger_body_line(conn, owner, name)? - 1;
+        for e in out.iter_mut().filter(|e| e.object_type == "TRIGGER") {
+            e.line += offset;
+        }
+    }
     Ok(out)
+}
+
+/// The line of a trigger's source (`ALL_SOURCE`) on which its PL/SQL block
+/// starts, 1 if there is none. Oracle counts a trigger's error lines from
+/// there (#114).
+pub(crate) fn trigger_body_line(
+    conn: &Connection,
+    owner: &str,
+    name: &str,
+) -> Result<u32, DbError> {
+    let rows = conn.query_as::<Option<String>>(
+        "select text from all_source where owner = :1 and name = :2 and type = 'TRIGGER' \
+          order by line",
+        &[&owner, &name],
+    )?;
+    let mut source = String::new();
+    for line in rows {
+        source.push_str(&line?.unwrap_or_default());
+    }
+    Ok(pythia_plsql::trigger_body_line(&source).map_or(1, |l| l as u32))
 }
 
 /// One step of another database's execution plan, for [`plan_table`].

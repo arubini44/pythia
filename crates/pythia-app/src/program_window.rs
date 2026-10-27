@@ -125,7 +125,16 @@ impl ProgramWindow {
         if self.state.loading.values().any(|p| *p == i) {
             self.state.pending_goto = Some((i, line));
         } else {
-            self.parts[i].editor.goto(line, 1);
+            let part = &mut self.parts[i];
+            part.editor.goto(line, 1);
+            if part.is_dirty() {
+                // Lines from the database (error stacks, the profiler, source
+                // search) may have moved.
+                self.state.message = Some((
+                    false,
+                    format!("Line {line} in the database: this part has unsaved changes"),
+                ));
+            }
         }
     }
 

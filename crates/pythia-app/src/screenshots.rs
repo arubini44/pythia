@@ -5311,3 +5311,132 @@ fn sqlserver_dashboard() {
     assert_eq!(h.state().test_focused_title().as_deref(), Some("Dashboard"));
     save(&mut h, "sqlserver-dashboard");
 }
+
+/// An error raised in a package called from a trigger: one click opens the
+/// code where it was raised, and each stack line opens its own (#112).
+#[test]
+fn error_stack() {
+    use crate::sql_window::FrameTarget;
+    use pythia_db::ObjectType;
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(false);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "create table pythia_es_orders (id number, qty number);
+create or replace package pythia_es_stock as
+  procedure reserve(p_qty number);
+end;
+/
+create or replace package body pythia_es_stock as
+  procedure check_qty(p_qty number) is
+    l_ok number;
+  begin
+    select 1 into l_ok from dual where p_qty <= 3;
+  end;
+
+  procedure reserve(p_qty number) is
+  begin
+    check_qty(p_qty);
+  end;
+end;
+/
+create or replace trigger pythia_es_orders_trg
+before insert on pythia_es_orders
+for each row
+begin
+  pythia_es_stock.reserve(:new.qty);
+end;
+/"
+        .into(),
+        run: true,
+    });
+    wait_until(&mut h, "setup", |app| !app.test_focused_busy());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "begin\n  insert into pythia_es_orders values (1, 5);\nend;".into(),
+        run: true,
+    });
+    let sql = h.state().test_focused();
+    wait_until(&mut h, "error stack", |app| {
+        app.test_sql_window_ref().is_some_and(|w| {
+            w.state.messages.iter().any(|m| {
+                !m.stack.is_empty()
+                    && !m
+                        .stack
+                        .iter()
+                        .any(|f| matches!(f.target, FrameTarget::Pending(_)))
+            })
+        })
+    });
+    let w = h.state_mut().test_sql_window();
+    let message = w
+        .state
+        .messages
+        .iter()
+        .find(|m| !m.stack.is_empty())
+        .unwrap();
+    let opens = message.stack.iter().filter(|f| f.target.opens()).count();
+    assert_eq!(
+        opens, 4,
+        "package twice, trigger, statement: {}",
+        message.text
+    );
+    h.get_by_label("Open where raised").hover();
+    save(&mut h, "error_stack");
+
+    h.get_by_label("Open where raised").click();
+    wait_until(&mut h, "package body at the line", |app| {
+        app.test_focused_title()
+            .is_some_and(|t| t == "pythia_es_stock")
+    });
+    wait_for_source(&mut h);
+    let program = h.state_mut().test_program();
+    let part = &program.parts[program.active];
+    assert_eq!(part.object_type, ObjectType::PackageBody);
+    assert_eq!(part.editor.line_col().0, 5, "select 1 into l_ok ...");
+    save(&mut h, "error_stack_open");
+
+    // The trigger's line counts from its block: line 2 there is line 5.
+    h.state_mut().test_focus(sql);
+    h.run_steps(3);
+    h.get_by_label_contains("PYTHIA_ES_ORDERS_TRG\", line")
+        .click();
+    wait_until(&mut h, "trigger", |app| {
+        app.test_focused_title()
+            .is_some_and(|t| t == "pythia_es_orders_trg")
+    });
+    wait_for_source(&mut h);
+    let program = h.state_mut().test_program();
+    let part = &program.parts[program.active];
+    assert_eq!(part.object_type, ObjectType::Trigger);
+    assert_eq!(part.editor.line_col().0, 5, "{}", part.editor.text());
+
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "drop table pythia_es_orders purge;\ndrop package pythia_es_stock;".into(),
+        run: true,
+    });
+    wait_until(&mut h, "cleanup", |app| !app.test_focused_busy());
+}
+
+/// Steps the app until the focused program window shows its source.
+fn wait_for_source(harness: &mut Harness<'_, PythiaApp>) {
+    let start = Instant::now();
+    loop {
+        let editor = harness.state_mut().test_program_editor();
+        if editor.is_some_and(|e| !e.text().is_empty()) {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "timed out waiting for the source"
+        );
+        harness.step();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    harness.run_steps(3);
+}

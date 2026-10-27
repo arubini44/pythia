@@ -607,3 +607,185 @@ fn database_links() {
         .unwrap();
     dba.execute("drop database link pythia_t_sys", &[]).unwrap();
 }
+
+/// Trigger compile errors come at the line of the trigger's source, not
+/// Oracle's line counted from the trigger body (#114).
+#[test]
+fn trigger_compile_errors_at_source_lines() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    let exec = |h: &mut Harness, id, sql: &str| {
+        h.session.send(DbRequest::Execute {
+            id,
+            sql: sql.into(),
+            max_rows: 10,
+            binds: vec![],
+        });
+        h.next_result()
+    };
+    exec(&mut h, 1, "create table pythia_stk_ce (n number)");
+    let DbEvent::Executed { summary, .. } = exec(
+        &mut h,
+        2,
+        "create or replace trigger pythia_stk_ce_trg\n\
+         before insert on pythia_stk_ce\n\
+         for each row\n\
+         when (new.n > 0)\n\
+         declare\n  \
+           x number;\n\
+         begin\n  \
+           x := nosuchthing;\n\
+         end;",
+    ) else {
+        panic!("expected Executed")
+    };
+    let compiled = summary.compiled.expect("compile info");
+    let error = compiled
+        .errors
+        .iter()
+        .find(|e| e.text.contains("PLS-00201"))
+        .unwrap_or_else(|| panic!("{compiled:?}"));
+    assert_eq!((error.line, error.position), (8, 8), "{error:?}");
+
+    h.session.send(DbRequest::Meta {
+        id: 3,
+        query: MetaQuery::Errors {
+            owner: compiled.owner.clone(),
+            name: "PYTHIA_STK_CE_TRG".into(),
+            object_type: ObjectType::Trigger,
+        },
+    });
+    let DbEvent::Meta {
+        result: Ok(MetaResult::Errors(errors)),
+        ..
+    } = h.next_result()
+    else {
+        panic!("expected errors")
+    };
+    assert!(errors.iter().all(|e| e.line == 8), "{errors:?}");
+
+    let conn = pythia_db::open_connection(&params().unwrap()).unwrap();
+    let scope = pythia_db::recompile::InvalidScope::Schema(compiled.owner.clone());
+    let invalid = pythia_db::recompile::invalid_objects(&conn, &scope).unwrap();
+    let trigger = invalid
+        .iter()
+        .find(|o| o.id.name == "PYTHIA_STK_CE_TRG")
+        .expect("invalid trigger");
+    assert_eq!(trigger.first_error.as_ref().map(|e| e.0), Some(8));
+
+    exec(&mut h, 4, "drop table pythia_stk_ce purge");
+}
+
+/// The ORA-06512 frames of an error raised in a package called from a
+/// trigger, and the lines of source they point at (#112).
+#[test]
+fn error_stack_frames_point_at_source_lines() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    let exec = |h: &mut Harness, id, sql: &str| {
+        h.session.send(DbRequest::Execute {
+            id,
+            sql: sql.into(),
+            max_rows: 10,
+            binds: vec![],
+        });
+        h.next_result()
+    };
+    exec(&mut h, 1, "create table pythia_stk_t (n number)");
+    exec(
+        &mut h,
+        2,
+        "create or replace package pythia_stk_p as\n  procedure boom(n number);\nend;",
+    );
+    exec(
+        &mut h,
+        3,
+        "create or replace package body pythia_stk_p as\n\
+         \x20 procedure inner(n number) is\n\
+         \x20   x number;\n\
+         \x20 begin\n\
+         \x20   select 1 into x from dual where 1 = n;\n\
+         \x20 end;\n\
+         \x20 procedure boom(n number) is\n\
+         \x20 begin\n\
+         \x20   inner(n);\n\
+         \x20 end;\n\
+         end;",
+    );
+    exec(
+        &mut h,
+        4,
+        "create or replace trigger pythia_stk_trg\n\
+         before insert on pythia_stk_t\n\
+         for each row\n\
+         declare\n\
+         \x20 x number;\n\
+         begin\n\
+         \x20 x := 1;\n\
+         \x20 pythia_stk_p.boom(:new.n);\n\
+         end;",
+    );
+    let DbEvent::Failed { error, .. } = exec(
+        &mut h,
+        5,
+        "begin\n  insert into pythia_stk_t values (5);\nend;",
+    ) else {
+        panic!("expected Failed")
+    };
+    let frames = error.stack();
+    let lines: Vec<_> = frames
+        .iter()
+        .map(|f| (f.unit.as_ref().map(|u| u.1.as_str()), f.line))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            (Some("PYTHIA_STK_P"), 5),
+            (Some("PYTHIA_STK_P"), 9),
+            (Some("PYTHIA_STK_TRG"), 5),
+            (None, 2),
+        ],
+        "{}",
+        error.text()
+    );
+    let text: Vec<_> = error.text().lines().map(str::to_owned).collect();
+    assert!(text[frames[0].text_line].contains("line 5"), "{text:?}");
+
+    use pythia_db::error_stack::{FrameSource, locate};
+    let conn = pythia_db::open_connection(&params().unwrap()).unwrap();
+    let located: Vec<_> = frames
+        .iter()
+        .filter_map(|f| {
+            f.unit
+                .as_ref()
+                .map(|(o, n)| locate(&conn, o, n, f.line).unwrap())
+        })
+        .collect();
+    let source = |object_type, line, text: &str| FrameSource::Source {
+        object_type,
+        line,
+        text: text.into(),
+    };
+    assert_eq!(
+        located,
+        [
+            source(
+                ObjectType::PackageBody,
+                5,
+                "    select 1 into x from dual where 1 = n;"
+            ),
+            source(ObjectType::PackageBody, 9, "    inner(n);"),
+            source(ObjectType::Trigger, 8, "  pythia_stk_p.boom(:new.n);"),
+        ]
+    );
+    // A built-in's body isn't visible.
+    let FrameSource::Hidden(why) = locate(&conn, "SYS", "DBMS_ASSERT", 192).unwrap() else {
+        panic!("DBMS_ASSERT's body is visible")
+    };
+    assert!(why.contains("package body"), "{why}");
+
+    exec(&mut h, 6, "drop table pythia_stk_t purge");
+    exec(&mut h, 7, "drop package pythia_stk_p");
+}

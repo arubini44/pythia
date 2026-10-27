@@ -44,6 +44,10 @@ for Linux, Windows and macOS.
 - **Execute to file** streams a query of any size into CSV, TSV, JSON,
   INSERT statements or Markdown, with live row count and cancel.
 - Explain plan (F5), DBMS_OUTPUT, statement history (Ctrl+E).
+- **Errors lead to the code**: each line of a PL/SQL error stack
+  (`ORA-06512`) is a link to its package, procedure or trigger at the line,
+  with the line's code on hover; **Open where raised** goes straight to
+  where the error was raised.
 
 ![Editing a result](docs/screenshots/grid-editing.png)
 
