@@ -1966,13 +1966,16 @@ impl SqlWindow {
             ui.add_space(8.0);
             let mut first = prompt.focus_first;
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            // A minimum, not a desired width: a grid column offers only last
+            // frame's width, so the fields would never grow past the first (#109).
+            let field = |value| egui::TextEdit::singleline(value).min_size(egui::vec2(260.0, 0.0));
             egui::Grid::new("vars")
                 .num_columns(3)
                 .spacing([8.0, 6.0])
                 .show(ui, |ui| {
                     for (name, value) in &mut prompt.substitutions {
                         ui.label(format!("&{name}"));
-                        let r = ui.add(egui::TextEdit::singleline(value).desired_width(260.0));
+                        let r = ui.add(field(value));
                         if std::mem::take(&mut first) {
                             r.request_focus();
                         }
@@ -1981,10 +1984,7 @@ impl SqlWindow {
                     }
                     for (name, value, is_null) in &mut prompt.binds {
                         ui.label(format!(":{name}"));
-                        let r = ui.add_enabled(
-                            !*is_null,
-                            egui::TextEdit::singleline(value).desired_width(260.0),
-                        );
+                        let r = ui.add_enabled(!*is_null, field(value));
                         if std::mem::take(&mut first) {
                             r.request_focus();
                         }
@@ -2586,5 +2586,47 @@ mod tests {
         // A selection is debugged from its first statement.
         assert_eq!(at(pos("begin")..text.len()), (true, true));
         assert_eq!(at(0..text.len()), (false, true));
+    }
+
+    /// The variable prompt's fields are wide enough to read what's typed,
+    /// not squeezed to the grid's first-frame column width (#109).
+    #[test]
+    fn variable_fields_are_wide() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let settings = pythia_config::Settings::default();
+        let mut w = SqlWindow::new(
+            "SQL 1".into(),
+            "select :email_address, &&tab from dual".into(),
+        );
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 600.0))
+            .build_ui(move |ui| {
+                let cx = DocContext {
+                    id: crate::documents::DocId(1),
+                    settings: &settings,
+                    connected: true,
+                    fetch_size: 100,
+                    connection: Some("db".into()),
+                    catalog: None,
+                    catalog_revision: 0,
+                    connections: &[],
+                    debug: None,
+                    marks: None,
+                    privilege: None,
+                    dialect: pythia_db::Dialect::ORACLE,
+                    read_only: false,
+                };
+                if w.state.prompt.is_none() {
+                    w.execute(true, &cx);
+                }
+                w.prompt_ui(ui.ctx(), &cx);
+            });
+        h.run_steps(4);
+        let fields: Vec<_> = h.get_all_by_role(Role::TextInput).collect();
+        assert_eq!(fields.len(), 2);
+        for field in fields {
+            assert!(field.rect().width() >= 250.0, "{:?}", field.rect());
+        }
     }
 }

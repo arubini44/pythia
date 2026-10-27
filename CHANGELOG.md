@@ -6,6 +6,11 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The fields of the Variables prompt (binds and `&substitutions`, before
+  running or debugging) were only a few characters wide, so what you
+  typed couldn't be read (#109).
+
 ## [0.6.0] - 2026-10-27
 
 ### Added
