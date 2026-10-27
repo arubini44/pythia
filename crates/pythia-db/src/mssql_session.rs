@@ -94,10 +94,12 @@ pub(crate) fn run(
         pending: false,
     };
     match worker.prepare_session() {
-        Ok(server) => {
+        Ok((server, failed)) => {
             worker.release = server.release;
             worker.events.send(DbEvent::Connected(server));
-            worker.run_init_sql();
+            for notice in failed {
+                worker.events.send(DbEvent::Notice(notice));
+            }
         }
         Err(e) => {
             *shared.lock().expect("cancel mutex") = None;
@@ -269,11 +271,22 @@ impl Worker {
         }
     }
 
-    /// Sets the session up and reads what the server is.
-    fn prepare_session(&mut self) -> Result<ServerInfo, DbError> {
-        let mut ms = self.ms();
-        ms.execute(SESSION_OPTIONS)?;
-        let row = ms
+    /// Sets the session up and runs the login statements, then reads what
+    /// the server is: a login script may change the schema (#103). The
+    /// statements' failures come back as notices.
+    fn prepare_session(&mut self) -> Result<(ServerInfo, Vec<String>), DbError> {
+        self.ms().execute(SESSION_OPTIONS)?;
+        let mut failed = Vec::new();
+        for sql in self.init_sql.clone() {
+            if let Err(e) = self.ms().execute(&sql) {
+                failed.push(format!(
+                    "Login script: {e} ({})",
+                    sql.lines().next().unwrap_or_default()
+                ));
+            }
+        }
+        let row = self
+            .ms()
             .rows(
                 "select cast(serverproperty('ProductVersion') as nvarchar(128)), @@version, \
                         schema_name()",
@@ -285,24 +298,14 @@ impl Worker {
         let mut values = row.into_iter().map(Option::unwrap_or_default);
         let version = values.next().unwrap_or_default();
         let banner = values.next().unwrap_or_default();
-        Ok(ServerInfo {
+        let server = ServerInfo {
             dialect: Dialect::SQLSERVER,
             release: release(&version),
             banner: banner.lines().next().unwrap_or_default().trim().to_owned(),
             version,
             current_schema: values.next().unwrap_or_default(),
-        })
-    }
-
-    fn run_init_sql(&mut self) {
-        for sql in self.init_sql.clone() {
-            if let Err(e) = self.ms().execute(&sql) {
-                self.events.send(DbEvent::Notice(format!(
-                    "Login script: {e} ({})",
-                    sql.lines().next().unwrap_or_default()
-                )));
-            }
-        }
+        };
+        Ok((server, failed))
     }
 
     /// Connects again when the connection got out of step (`why`); what
@@ -322,8 +325,10 @@ impl Worker {
         };
         self.pending = false;
         match prepared {
-            Ok(_) => {
-                self.run_init_sql();
+            Ok((_, failed)) => {
+                for notice in failed {
+                    self.events.send(DbEvent::Notice(notice));
+                }
                 self.events.send(DbEvent::Notice(format!(
                     "{why}: the connection was opened again{rolled_back}"
                 )));

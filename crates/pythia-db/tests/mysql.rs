@@ -280,6 +280,26 @@ fn errors_carry_mysql_code_and_position() {
     assert_eq!(error.offset, Some(11), "{}", error.message);
 }
 
+/// Without a database in the address, the login statements pick it (the
+/// profile's default schema): `Connected` reports the one they leave the
+/// session in, then their failures (#103).
+#[test]
+fn connected_reports_the_database_after_the_login_statements() {
+    let Some(mut params) = params() else {
+        return;
+    };
+    let (server, database) = params.connect_string.rsplit_once('/').unwrap();
+    let database = database.to_owned();
+    params.connect_string = server.to_owned();
+    params.init_sql = vec![format!("use {database}"), "select no_such_column".into()];
+    let mut h = Harness::with(params);
+    assert_eq!(h.schema, database);
+    let DbEvent::Notice(notice) = h.next() else {
+        panic!("expected the login script's failure")
+    };
+    assert!(notice.starts_with("Login script: ERROR 1054"), "{notice}");
+}
+
 #[test]
 fn transactions_and_autocommit() {
     let Some(mut h) = Harness::connect() else {

@@ -61,17 +61,11 @@ pub(crate) fn run(
         autocommit: false,
         tx: Transaction::default(),
     };
-    match worker.on_connect() {
-        Ok(server) => {
+    match worker.on_connect(&params.init_sql) {
+        Ok((server, failed)) => {
             worker.events.send(DbEvent::Connected(server));
-            for sql in &params.init_sql {
-                if let Err(e) = worker.conn.query_drop(sql) {
-                    let e = DbError::from(e);
-                    worker.events.send(DbEvent::Notice(format!(
-                        "Login script: {e} ({})",
-                        sql.lines().next().unwrap_or_default()
-                    )));
-                }
+            for notice in failed {
+                worker.events.send(DbEvent::Notice(notice));
             }
         }
         Err(e) => {
@@ -164,14 +158,27 @@ enum Outcome {
 }
 
 impl Worker {
-    fn on_connect(&mut self) -> Result<ServerInfo, DbError> {
+    /// Sets the session up and runs the login statements, which may pick
+    /// the database (#103): what the server reports is read after them.
+    /// Their failures come back as notices.
+    fn on_connect(&mut self, init_sql: &[String]) -> Result<(ServerInfo, Vec<String>), DbError> {
         // Whatever the server's default: see `Transaction`.
         self.conn.query_drop("set autocommit = 1")?;
+        let mut failed = Vec::new();
+        for sql in init_sql {
+            if let Err(e) = self.conn.query_drop(sql) {
+                let e = DbError::from(e);
+                failed.push(format!(
+                    "Login script: {e} ({})",
+                    sql.lines().next().unwrap_or_default()
+                ));
+            }
+        }
         let (version, comment, schema): (String, Option<String>, Option<String>) = self
             .conn
             .query_first("select version(), @@version_comment, database()")?
             .ok_or_else(|| DbError::new("The server didn't report its version"))?;
-        Ok(ServerInfo {
+        let server = ServerInfo {
             dialect: Dialect::MYSQL,
             release: release(&version),
             banner: match comment {
@@ -180,7 +187,8 @@ impl Worker {
             },
             version,
             current_schema: schema.unwrap_or_default(),
-        })
+        };
+        Ok((server, failed))
     }
 
     /// Runs a statement. A query's result stays open for `FetchMore`s;

@@ -430,6 +430,37 @@ fn oracle_tasks_are_refused() {
     );
 }
 
+/// The login statements may set the search path (the profile's default
+/// schema): `Connected` reports the schema they leave the session in, then
+/// their failures (#103).
+#[test]
+fn connected_reports_the_schema_after_the_login_statements() {
+    let Some(mut params) = params() else {
+        return;
+    };
+    params.init_sql = vec![
+        "set search_path to pg_catalog".into(),
+        "select no_such_column".into(),
+    ];
+    let (tx, wake) = mpsc::channel();
+    let session = Session::connect(params, move || {
+        let _ = tx.send(());
+    });
+    let mut h = Harness {
+        session,
+        wake,
+        schema: String::new(),
+    };
+    let DbEvent::Connected(server) = h.next() else {
+        panic!("expected Connected")
+    };
+    assert_eq!(server.current_schema, "pg_catalog");
+    let DbEvent::Notice(notice) = h.next() else {
+        panic!("expected the login script's failure")
+    };
+    assert!(notice.starts_with("Login script: "), "{notice}");
+}
+
 #[test]
 fn notices_become_messages() {
     let Some(mut h) = Harness::connect() else {

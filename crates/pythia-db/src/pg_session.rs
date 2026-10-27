@@ -99,17 +99,12 @@ pub(crate) fn run(
         autocommit: false,
         tx: Transaction::default(),
     };
-    match worker.on_connect() {
-        Ok(server) => {
+    match worker.on_connect(&params.init_sql) {
+        Ok((server, failed)) => {
             worker.release = server.release;
             worker.events.send(DbEvent::Connected(server));
-            for sql in &params.init_sql {
-                if let Err(e) = worker.pg().execute(sql) {
-                    worker.events.send(DbEvent::Notice(format!(
-                        "Login script: {e} ({})",
-                        sql.lines().next().unwrap_or_default()
-                    )));
-                }
+            for notice in failed {
+                worker.events.send(DbEvent::Notice(notice));
             }
             worker.report_notices();
         }
@@ -276,7 +271,19 @@ impl Worker {
         }
     }
 
-    fn on_connect(&mut self) -> Result<ServerInfo, DbError> {
+    /// Runs the login statements, which may set the search path (#103),
+    /// then reads what the server is and its current schema. The
+    /// statements' failures come back as notices.
+    fn on_connect(&mut self, init_sql: &[String]) -> Result<(ServerInfo, Vec<String>), DbError> {
+        let mut failed = Vec::new();
+        for sql in init_sql {
+            if let Err(e) = self.pg().execute(sql) {
+                failed.push(format!(
+                    "Login script: {e} ({})",
+                    sql.lines().next().unwrap_or_default()
+                ));
+            }
+        }
         let row = self
             .pg()
             .first(
@@ -292,13 +299,14 @@ impl Worker {
             .next()
             .unwrap_or_default()
             .to_owned();
-        Ok(ServerInfo {
+        let server = ServerInfo {
             dialect: Dialect::POSTGRES,
             release: release(&version),
             banner: values.next().unwrap_or(full),
             version,
             current_schema: values.next().unwrap_or_default(),
-        })
+        };
+        Ok((server, failed))
     }
 
     /// Runs a statement. A query's result stays open for `FetchMore`s;
