@@ -46,6 +46,9 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- Debugger: when the debugged session couldn't connect (ORA-24247 and the
+  like), the panel kept saying *Waiting for the session…* until Stop. The
+  run now ends and the panel says why (#123).
 - The object browser's favorites and recently opened objects, and the open
   project, were lost when Pythia was closed with no document open (#118).
 - Debugger: *Watch* on an element of a collection with text keys

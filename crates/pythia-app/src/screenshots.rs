@@ -771,6 +771,37 @@ fn import_csv() {
 
 /// Debugs a block calling `demo_pkg.raise_salary` with a breakpoint in the
 /// package body: stops at the line, shows variables, steps and finishes.
+/// A debug run whose session can't connect to the debugger (no network ACL
+/// entry names its host) ends instead of waiting for it.
+#[test]
+fn debug_run_that_cannot_connect() {
+    let Some((profile, password)) = profile() else {
+        eprintln!("PYTHIA_TEST_DB not set, skipping");
+        return;
+    };
+    let mut h = headless_harness();
+    h.state_mut().test_settings_mut().debug_host = "no-acl.invalid".into();
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: "pythia@FREEPDB1".into(),
+        text: "begin\n  null;\nend;".into(),
+        run: false,
+    });
+    h.run_steps(2);
+    h.state_mut()
+        .test_command(crate::commands::Command::DebugStart);
+    wait_until(&mut h, "the run to end", |app| !app.test_debug_running());
+    h.run_steps(2);
+    let debug = h.state().test_debug();
+    assert_eq!(
+        debug.state,
+        pythia_debugger::ui::State::Finished,
+        "{:?}",
+        debug.log
+    );
+}
+
 /// Needs DEBUG CONNECT SESSION / DEBUG ANY PROCEDURE and a JDWP ACL for the
 /// test user (see pythia-debugger's setup script) and PYTHIA_DEBUG_HOST.
 #[test]

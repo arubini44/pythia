@@ -17,27 +17,36 @@ pub fn run_under_debugger(
     port: u16,
     block: &str,
 ) -> Result<(), DbError> {
+    run(conn, host, port, block).1
+}
+
+/// [`run_under_debugger`], also saying whether the session connected to
+/// the debugger (`CONNECT_TCP` failing is a setup problem, see
+/// [`crate::setup::Problem`]).
+fn run(conn: &Connection, host: &str, port: u16, block: &str) -> (bool, Result<(), DbError>) {
     // Compiled at level 1 the block itself has debug information, so it
     // can be stepped through (and stepping out of a unit lands in it).
     let level = optimize_level(conn);
-    conn.execute("alter session set plsql_optimize_level = 1", &[])?;
-    let result = conn
+    if let Err(e) = conn.execute("alter session set plsql_optimize_level = 1", &[]) {
+        return (false, Err(e.into()));
+    }
+    let connected = conn
         .execute(
             "begin dbms_debug_jdwp.connect_tcp(:1, :2); end;",
             &[&host, &i32::from(port)],
         )
-        .map_err(DbError::from)
-        .and_then(|_| {
-            let result = conn.execute(block, &[]).map(drop).map_err(DbError::from);
-            // The session may be gone if the debugger terminated it.
-            let _ = conn.execute("begin dbms_debug_jdwp.disconnect; end;", &[]);
-            result
-        });
+        .map_err(DbError::from);
+    let result = connected.as_ref().map_err(Clone::clone).and_then(|_| {
+        let result = conn.execute(block, &[]).map(drop).map_err(DbError::from);
+        // The session may be gone if the debugger terminated it.
+        let _ = conn.execute("begin dbms_debug_jdwp.disconnect; end;", &[]);
+        result
+    });
     let _ = conn.execute(
         &format!("alter session set plsql_optimize_level = {level}"),
         &[],
     );
-    result
+    (connected.is_ok(), result)
 }
 
 /// The session's `PLSQL_OPTIMIZE_LEVEL`, or Oracle's default (2) when
@@ -58,6 +67,9 @@ fn optimize_level(conn: &Connection) -> u8 {
 #[derive(Debug)]
 pub struct DebugOutcome {
     pub output: Vec<String>,
+    /// The session connected to the debugger. If not, `error` is why
+    /// `CONNECT_TCP` failed and the debugger is still waiting for it.
+    pub connected: bool,
     pub error: Option<DbError>,
 }
 
@@ -66,9 +78,13 @@ pub struct DebugOutcome {
 /// output isn't lost).
 pub fn debug_task(host: String, port: u16, block: String) -> TaskFn {
     Box::new(move |conn: &Connection| {
-        let error = run_under_debugger(conn, &host, port, &block).err();
+        let (connected, result) = run(conn, &host, port, &block);
         let output = read_output(conn).unwrap_or_default();
-        Ok(Box::new(DebugOutcome { output, error }) as Box<dyn std::any::Any + Send>)
+        Ok(Box::new(DebugOutcome {
+            output,
+            connected,
+            error: result.err(),
+        }) as Box<dyn std::any::Any + Send>)
     })
 }
 

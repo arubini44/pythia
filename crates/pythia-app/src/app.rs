@@ -2910,18 +2910,23 @@ impl PythiaApp {
                             any.downcast::<pythia_debugger::target::DebugOutcome>()
                                 .map_err(|_| pythia_db::DbError::new("unexpected debug result"))
                         });
-                        let error = match outcome {
+                        let (connected, error) = match outcome {
                             Ok(outcome) => {
                                 if !outcome.output.is_empty() {
                                     self.deliver(id, DbEvent::Output(outcome.output));
                                 }
-                                outcome.error
+                                (outcome.connected, outcome.error)
                             }
-                            Err(e) => Some(e),
+                            Err(e) => (true, Some(e)),
                         };
                         match error {
                             None => self.log("Debugged block finished"),
                             Some(e) => {
+                                // The debugger waits for a session that
+                                // won't come (#123).
+                                if !connected {
+                                    self.debug.target_failed(&e);
+                                }
                                 self.log(format!("Debugged block failed: {e}"));
                                 self.deliver(id, DbEvent::Error(e));
                             }

@@ -230,6 +230,17 @@ impl DebugSession {
         }
     }
 
+    /// The debugged session ended without connecting: `CONNECT_TCP`
+    /// failed with `error`. Stops waiting for it and says why.
+    pub fn target_failed(&mut self, error: &pythia_db::DbError) {
+        if let Some(d) = self.debugger.take() {
+            d.send(DebugCommand::Terminate);
+        }
+        self.state = State::Finished;
+        self.log
+            .push(format!("The session didn't connect: {}", error.text()));
+    }
+
     /// Terminates the running call, if any.
     pub fn stop(&mut self) {
         if let Some(d) = self.debugger.take() {
@@ -1324,6 +1335,25 @@ mod tests {
             value: value.map(Into::into),
             children,
         }
+    }
+
+    #[test]
+    fn a_start_that_cannot_connect_ends() {
+        let mut s = DebugSession::default();
+        s.start("begin null; end;".into(), "devbox".into(), None, || {});
+        assert_eq!(s.state, State::Waiting);
+        s.target_failed(&pythia_db::DbError::new(
+            "ORA-24247: network access denied by access control list (ACL)",
+        ));
+        assert_eq!(s.state, State::Finished);
+        assert!(!s.is_active());
+        assert_eq!(
+            s.log.last().map(String::as_str),
+            Some(
+                "The session didn't connect: ORA-24247: network access denied by access \
+                 control list (ACL)"
+            )
+        );
     }
 
     #[test]
