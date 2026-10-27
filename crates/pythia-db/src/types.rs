@@ -19,7 +19,7 @@ pub struct ConnectParams {
     /// Statements run on every new session (login script, NLS, schema).
     pub init_sql: Vec<String>,
     /// Reach the database through this SSH connection, shared by the
-    /// connection's sessions (MySQL).
+    /// connection's sessions (MySQL, PostgreSQL, SQL Server).
     pub ssh: Option<Arc<Tunnel>>,
 }
 

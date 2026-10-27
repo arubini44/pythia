@@ -79,6 +79,8 @@ const COLORS: [[u8; 3]; 8] = [
 /// What the connect form's fields take on each database.
 struct Hints {
     database: &'static str,
+    /// The address through an SSH tunnel; `None` without tunnels.
+    tunnel: Option<&'static str>,
     /// `None`: the database has no default schema to set.
     schema: Option<&'static str>,
     login_script: &'static str,
@@ -89,21 +91,25 @@ impl Hints {
         match kind {
             DbKind::Oracle => Hints {
                 database: "TNS alias or host:1521/service",
+                tunnel: None,
                 schema: Some("work in another schema after connecting"),
                 login_script: "alter session set nls_date_format = 'YYYY-MM-DD HH24:MI:SS';",
             },
             DbKind::MySql => Hints {
                 database: "host:3306/database, ?tls for TLS",
+                tunnel: Some("localhost:3306/database, as the SSH server sees it"),
                 schema: Some("database to use after connecting"),
                 login_script: "set session time_zone = '+00:00';",
             },
             DbKind::Postgres => Hints {
                 database: "host:5432/database, ?sslmode=require for TLS",
+                tunnel: Some("localhost:5432/database, as the SSH server sees it"),
                 schema: Some("schema to search first after connecting"),
                 login_script: "set timezone = 'UTC';",
             },
             DbKind::SqlServer => Hints {
                 database: "host:1433/database or host\\instance, ?trust for a self-signed certificate",
+                tunnel: Some("localhost:1433/database, as the SSH server sees it (no \\instance)"),
                 schema: None,
                 login_script: "set dateformat ymd;",
             },
@@ -341,15 +347,19 @@ impl ConnectDialog {
                     let width = if aliases { 250.0 } else { 280.0 };
                     let db = ui.add(
                         egui::TextEdit::singleline(&mut self.form.connect_string)
-                            .hint_text(
-                                if self.form.ssh.enabled
-                                    && Dialect::from(self.form.kind).supports(Feature::SshTunnel)
-                                {
-                                    "localhost:3306/database, as the SSH server sees it"
-                                } else {
-                                    Hints::of(self.form.kind).database
-                                },
-                            )
+                            .hint_text({
+                                let hints = Hints::of(self.form.kind);
+                                match hints.tunnel {
+                                    Some(tunnel)
+                                        if self.form.ssh.enabled
+                                            && Dialect::from(self.form.kind)
+                                                .supports(Feature::SshTunnel) =>
+                                    {
+                                        tunnel
+                                    }
+                                    _ => hints.database,
+                                }
+                            })
                             .desired_width(width),
                     );
                     submit |= db.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));

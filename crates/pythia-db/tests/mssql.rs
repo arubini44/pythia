@@ -3,17 +3,45 @@
 //! Skipped unless `PYTHIA_TEST_MSSQL` is set to `user/password@host[:port]/database[?trust]`,
 //! e.g. the SQL Server container from `docker-compose.yml`:
 //! `PYTHIA_TEST_MSSQL=pythia/pythia@localhost:1433/pythia?trust cargo test -p pythia-db --test mssql`
+//!
+//! The SSH tunnel test also needs `PYTHIA_TEST_SSH=user:password@host[:port]`
+//! and `PYTHIA_TEST_MSSQL_VIA_SSH`, the database as the SSH server sees it
+//! (the `ssh` service: `pythia:pythia@localhost:2222` and
+//! `pythia/pythia@mssql:1433/pythia?trust`).
 
-use std::sync::mpsc;
+use std::path::Path;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use pythia_db::ssh::{SshParams, Tunnel};
 use pythia_db::{
     ConnectParams, DbEvent, DbKind, DbRequest, Detail, Dialect, MetaQuery, MetaResult, ObjectType,
     Session,
 };
 
 fn params() -> Option<ConnectParams> {
-    let spec = std::env::var("PYTHIA_TEST_MSSQL").ok()?;
+    from_spec(&std::env::var("PYTHIA_TEST_MSSQL").ok()?)
+}
+
+/// The database through the SSH server, trusting the host keys kept in
+/// `known_hosts`.
+fn ssh_params(known_hosts: &Path) -> Option<ConnectParams> {
+    let ssh = std::env::var("PYTHIA_TEST_SSH").ok()?;
+    let mut params = from_spec(&std::env::var("PYTHIA_TEST_MSSQL_VIA_SSH").ok()?)?;
+    let (credentials, host) = ssh.rsplit_once('@')?;
+    let (username, password) = credentials.split_once(':')?;
+    params.ssh = Some(Arc::new(Tunnel::new(SshParams {
+        host: host.into(),
+        username: username.into(),
+        password: password.into(),
+        key_file: None,
+        known_hosts: known_hosts.to_owned(),
+    })));
+    Some(params)
+}
+
+/// `user/password@connect string`.
+fn from_spec(spec: &str) -> Option<ConnectParams> {
     let (credentials, connect_string) = spec.rsplit_once('@')?;
     let (username, password) = credentials.split_once('/')?;
     Some(ConnectParams {
@@ -35,7 +63,10 @@ struct Harness {
 
 impl Harness {
     fn connect() -> Option<Self> {
-        let params = params()?;
+        Some(Self::with(params()?))
+    }
+
+    fn with(params: ConnectParams) -> Self {
         let (tx, wake) = mpsc::channel();
         let session = Session::connect(params, move || {
             let _ = tx.send(());
@@ -54,7 +85,7 @@ impl Harness {
                     "{server:?}"
                 );
                 h.schema = server.current_schema;
-                Some(h)
+                h
             }
             other => panic!("connect failed: {other:?}"),
         }
@@ -464,6 +495,44 @@ fn several_result_sets() {
     );
 }
 
+/// PRINT output and informational messages show as messages, in order
+/// with the result: before its columns, after its rows (#98).
+#[test]
+fn print_and_info_messages() {
+    let Some(mut h) = Harness::connect() else {
+        return;
+    };
+    let events = |h: &mut Harness, sql: &str| {
+        h.execute(1, sql, 10);
+        let mut seen = Vec::new();
+        loop {
+            match h.next() {
+                DbEvent::QueryStarted { .. } => seen.push("(columns)".to_owned()),
+                DbEvent::Rows { .. } => seen.push("(rows)".to_owned()),
+                DbEvent::Notice(n) => seen.push(n),
+                DbEvent::Failed { error, .. } => seen.push(format!("(failed: {})", error.message)),
+                DbEvent::Transaction { .. } => return seen,
+                _ => {}
+            }
+        }
+    };
+    assert_eq!(
+        events(
+            &mut h,
+            "print 'before'; select 1 as a; raiserror('after', 10, 1) with nowait"
+        ),
+        ["before", "(columns)", "(rows)", "after"]
+    );
+    // No result at all; and messages before an error.
+    assert_eq!(events(&mut h, "print 'only a message'"), ["only a message"]);
+    let failed = events(&mut h, "print 'first'; select 1 / 0");
+    assert_eq!(failed[0], "first");
+    assert!(
+        failed.iter().any(|e| e.contains("Divide by zero")),
+        "{failed:?}"
+    );
+}
+
 #[test]
 fn oracle_tasks_are_refused() {
     let Some(mut h) = Harness::connect() else {
@@ -692,4 +761,79 @@ fn dictionary() {
     h.ok("drop procedure meta_p");
     h.ok("drop table meta_emp");
     h.ok("drop table meta_dept");
+}
+
+/// Waits for a session's connect to fail.
+fn connect_error(params: ConnectParams) -> pythia_db::DbError {
+    let (tx, wake) = mpsc::channel();
+    let session = Session::connect(params, move || {
+        let _ = tx.send(());
+    });
+    loop {
+        match session.try_recv() {
+            Some(DbEvent::ConnectFailed(error)) => return error,
+            Some(other) => panic!("expected ConnectFailed, got {other:?}"),
+            None => wake
+                .recv_timeout(Duration::from_secs(60))
+                .expect("timed out waiting for the connect"),
+        }
+    }
+}
+
+/// Through the SSH server (#97): trusting its key, the login over the
+/// tunnel (encrypted, as SQL Server's is by default), sessions sharing it,
+/// Break (the driver connects again, through the tunnel), a named instance,
+/// and an address the SSH server can't reach.
+#[test]
+fn through_an_ssh_tunnel() {
+    let dir = std::env::temp_dir().join(format!("pythia-mssql-ssh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let known_hosts = dir.join("known_hosts");
+    let Some(params) = ssh_params(&known_hosts) else {
+        return;
+    };
+
+    // The first connect asks to trust the server.
+    let error = connect_error(params.clone());
+    let key = error.host_key.expect("an unknown host key");
+    key.trust().unwrap();
+
+    let mut h = Harness::with(params.clone());
+    assert_eq!(h.scalar("select 6 * 7").as_deref(), Some("42"));
+    let mut other = Harness::with(params.clone());
+    assert_eq!(other.scalar("select db_name()").as_deref(), Some("pythia"));
+
+    h.execute(1, "waitfor delay '00:00:30'; select 1", 10);
+    std::thread::sleep(Duration::from_millis(500));
+    h.session.cancel();
+    let error = loop {
+        if let DbEvent::Failed { error, .. } = h.next() {
+            break error;
+        }
+    };
+    assert_eq!(error.message, "Cancelled");
+    h.settle();
+    assert_eq!(h.scalar("select 'again'").as_deref(), Some("again"));
+
+    // The SQL Server Browser can't be reached through the tunnel.
+    let named = ConnectParams {
+        connect_string: "mssql\\sqlexpress/pythia?trust".into(),
+        ..params.clone()
+    };
+    let error = connect_error(named);
+    assert!(error.message.contains("host:port"), "{error}");
+
+    // An address the SSH server can't reach: the tunnel says why.
+    let unreachable = ConnectParams {
+        connect_string: "nosuchhost.invalid:1433/pythia?trust".into(),
+        ..params
+    };
+    let error = connect_error(unreachable);
+    assert!(
+        error
+            .message
+            .contains("the server couldn't connect to nosuchhost.invalid:1433"),
+        "{error}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
