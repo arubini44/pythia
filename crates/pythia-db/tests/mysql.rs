@@ -625,6 +625,19 @@ fn dictionary() {
     assert!(used_by.contains(&"meta_v".to_owned()), "{used_by:?}");
     assert!(used_by.contains(&"meta_emp".to_owned()), "{used_by:?}");
 
+    let MetaResult::Table { rows, .. } = h.meta(MetaQuery::Details {
+        owner: schema.clone(),
+        name: "meta_v".into(),
+        detail: Detail::Uses,
+    }) else {
+        panic!("expected a table")
+    };
+    let uses: Vec<_> = rows
+        .iter()
+        .map(|r| r[1].clone().unwrap_or_default())
+        .collect();
+    assert_eq!(uses, ["meta_dept", "meta_emp"]);
+
     let MetaResult::Text(ddl) = h.meta(MetaQuery::Ddl {
         owner: schema.clone(),
         name: "meta_emp".into(),

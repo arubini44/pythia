@@ -282,12 +282,62 @@ fn details(
         }
         Detail::Link => return Err(DbError::unsupported("Database links", Dialect::MYSQL)),
     };
-    let params: Params = if detail == Detail::UsedBy {
-        (owner, name, owner, name).into()
-    } else {
-        (owner, name).into()
+    let params = || -> Params {
+        if detail == Detail::UsedBy {
+            (owner, name, owner, name).into()
+        } else {
+            (owner, name).into()
+        }
     };
-    table(conn, sql, params, &["ORDER"])
+    match table(conn, sql, params(), &["ORDER"]) {
+        // No view_table_usage (MariaDB, MySQL before 8.0.13): the view
+        // definitions then.
+        Err(e) if e.code == Some(1109) && matches!(detail, Detail::Uses | Detail::UsedBy) => {
+            table(conn, &view_usage_by_definition(detail), params(), &[])
+        }
+        result => result,
+    }
+}
+
+/// Uses / Used by from `information_schema.views`: the server writes each
+/// table in a view's definition as `` `schema`.`table` ``.
+fn view_usage_by_definition(detail: Detail) -> String {
+    // A LIKE pattern for `schema`.`table` anywhere, from SQL expressions.
+    let mentions = |schema: &str, table: &str| {
+        let quoted = |e: &str| {
+            format!(
+                "replace(replace(replace(replace({e}, '!', '!!'), '%', '!%'), '_', '!_'), \
+                 '`', '``')"
+            )
+        };
+        format!(
+            "v.view_definition like concat('%`', {}, '`.`', {}, '`%') escape '!'",
+            quoted(schema),
+            quoted(table)
+        )
+    };
+    if detail == Detail::Uses {
+        format!(
+            "select t.table_schema as OWNER, t.table_name as NAME, 'TABLE' as TYPE \
+               from information_schema.views v \
+               join information_schema.tables t on {} \
+              where v.table_schema = ? and v.table_name = ? \
+              order by 1, 2",
+            mentions("t.table_schema", "t.table_name")
+        )
+    } else {
+        format!(
+            "select v.table_schema as OWNER, v.table_name as NAME, 'VIEW' as TYPE \
+               from information_schema.views v \
+              where {} \
+             union all \
+             select constraint_schema, table_name, 'TABLE' \
+               from information_schema.referential_constraints \
+              where unique_constraint_schema = ? and referenced_table_name = ? \
+              order by 1, 3, 2",
+            mentions("?", "?")
+        )
+    }
 }
 
 /// Runs a query into a generic table; `numeric` names right-aligned columns.
@@ -356,7 +406,9 @@ fn explain_plan(conn: &mut Conn, sql: &str) -> Result<MetaResult, DbError> {
     let rows = match tree {
         Ok(Some(tree)) => tree_rows(&tree),
         Ok(None) => Vec::new(),
-        Err(mysql::Error::MySqlError(e)) if matches!(e.code, 1064 | 1791) => classic_rows(conn, sql)?,
+        Err(mysql::Error::MySqlError(e)) if matches!(e.code, 1064 | 1791) => {
+            classic_rows(conn, sql)?
+        }
         Err(e) => return Err(e.into()),
     };
     let column = |name: &str, numeric: bool| Column {

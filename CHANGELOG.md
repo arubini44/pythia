@@ -79,6 +79,10 @@ All notable changes to Pythia are documented here. The format follows
 - Explain plan failed on MariaDB with *Unknown EXPLAIN format name:
   'tree'* (#128). MariaDB has no tree format; it gets the classic plan
   table, as MySQL before 8.0.16 does.
+- The *Uses* tab of a view and the *Used by* tab of a table failed on
+  MariaDB with *Unknown table 'view_table_usage' in information_schema*
+  (#129). Without that table (MariaDB, MySQL before 8.0.13), they are
+  found in the view definitions.
 - The status bar's invalid objects count didn't follow compiles in a
   program window, changes made with an object or table editor, or PL/SQL
   blocks run in a SQL window (`exec dbms_utility.compile_schema(user)` and
