@@ -29,6 +29,8 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- The object browser's favorites and recently opened objects, and the open
+  project, were lost when Pythia was closed with no document open (#118).
 - Debugger: *Watch* on an element of a collection with text keys
   (`l_map('Key')`) said the collection "has no ('key')": the key was
   lowercased, also in the element's label (#119).

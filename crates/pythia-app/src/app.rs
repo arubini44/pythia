@@ -223,19 +223,22 @@ impl PythiaApp {
             about_open: false,
             quit_confirmed: false,
         };
-        match workspace {
-            Some(ws) if !ws.docs.is_empty() => {
+        if let Some(ws) = workspace {
+            // Kept also when no document was open (#118).
+            app.last_profile = ws.last_profile;
+            app.project = ws.project;
+            app.browser.marks = ws.marks;
+            if !ws.docs.is_empty() {
                 app.dock = ws.dock;
                 app.docs = ws.docs;
                 app.next_doc = ws.next_doc;
-                app.last_profile = ws.last_profile;
-                app.project = ws.project;
-                app.browser.marks = ws.marks;
                 let docs = &app.docs;
                 app.dock
                     .retain_tabs(|tab| !matches!(tab, Tab::Doc(id) if !docs.contains_key(id)));
             }
-            _ => app.reset_layout(),
+        }
+        if app.docs.is_empty() {
+            app.reset_layout();
         }
         app.focused = app.docs.keys().next().copied();
 
@@ -5304,6 +5307,59 @@ fn event_id(event: &DbEvent) -> Option<u64> {
         | DbEvent::Meta { id, .. }
         | DbEvent::TaskDone { id, .. } => Some(*id),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    /// eframe's storage, in memory.
+    #[derive(Default)]
+    pub(super) struct Memory(BTreeMap<String, String>);
+
+    impl eframe::Storage for Memory {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    /// Starts Pythia with what `storage` holds.
+    pub(super) fn start(storage: &Memory) -> PythiaApp {
+        let mut cc = eframe::CreationContext::_new_kittest(egui::Context::default());
+        cc.storage = Some(storage);
+        PythiaApp::new(&cc, None)
+    }
+
+    /// Favorites and recent objects survive a restart with no document
+    /// open (#118).
+    #[test]
+    fn restored_without_documents() {
+        let mut storage = Memory::default();
+        let mut app = start(&storage);
+        let object = ObjectRef {
+            owner: "HR".into(),
+            name: "EMPLOYEES".into(),
+            object_type: pythia_db::ObjectType::Table,
+        };
+        app.browser.marks.touch("hr@db", object.clone());
+        app.docs.clear();
+        app.dock = DockState::new(vec![]);
+        eframe::App::save(&mut app, &mut storage);
+
+        let app = start(&storage);
+        assert_eq!(app.browser.marks.recent.get("hr@db"), Some(&vec![object]));
+        assert_eq!(app.docs.len(), 1, "a new SQL window");
     }
 }
 
