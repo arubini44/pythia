@@ -759,6 +759,204 @@ fn top_statements(c: &mut dyn Client, s: &mut PgSnapshot) -> Result<(), DbError>
     Ok(())
 }
 
+/// A backend's open transaction.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BackendTransaction {
+    pub age_secs: f64,
+    /// Assigned once it writes; none while it only reads.
+    pub xid: Option<String>,
+    /// The oldest transaction its snapshot still sees, and how many
+    /// transactions ago that was: what it keeps VACUUM from cleaning up.
+    pub xmin: Option<String>,
+    pub xmin_age: Option<i64>,
+}
+
+/// A lock a backend holds or waits for (`pg_locks`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Lock {
+    /// `relation`, `tuple`, `transactionid`, …
+    pub kind: String,
+    pub relation: Option<String>,
+    pub mode: String,
+    pub granted: bool,
+    /// The row (`page,tuple`), transaction or other target.
+    pub target: Option<String>,
+}
+
+/// One backend of the server and what it holds (session details).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BackendDetail {
+    pub pid: i64,
+    /// Its `pg_stat_activity` row; none when it is gone.
+    pub backend: Option<Backend>,
+    /// How it connected: name, value.
+    pub connection: Vec<(String, String)>,
+    pub transaction: Option<BackendTransaction>,
+    pub locks: Vec<Lock>,
+    /// The backends whose locks it waits for.
+    pub blocked_by: Vec<i64>,
+    /// The backends waiting for its locks.
+    pub blocks: Vec<i64>,
+    pub errors: Vec<SectionError>,
+}
+
+/// Everything about one backend; each part may fail alone.
+pub fn backend_detail(c: &mut dyn Client, pid: i64) -> BackendDetail {
+    let mut d = BackendDetail {
+        pid,
+        ..BackendDetail::default()
+    };
+    let mut errors = Vec::new();
+    let mut section = |name: &'static str, needs: &str, r: Result<(), DbError>| {
+        if let Err(e) = r {
+            errors.push((name, explain(&e, needs)));
+        }
+    };
+    // The pid is a number: safe in the statements.
+    section(
+        "Backend",
+        "",
+        (|| {
+            let rows = c.query(
+                &format!(
+                    "select pid, usename, datname, application_name, \
+                            coalesce(client_hostname, host(client_addr), 'local'), \
+                            state, wait_event_type || ': ' || wait_event, \
+                            extract(epoch from now() - query_start), \
+                            extract(epoch from now() - xact_start), \
+                            extract(epoch from now() - state_change), query, \
+                            backend_type, to_char(backend_start, 'YYYY-MM-DD HH24:MI:SS'), \
+                            client_port, backend_xid, backend_xmin, age(backend_xmin) \
+                       from pg_stat_activity where pid = {pid}"
+                ),
+                &[],
+            )?;
+            let Some(r) = rows.first() else {
+                return Ok(());
+            };
+            d.backend = Some(Backend {
+                pid: int(r, 0),
+                user: opt(r, 1),
+                database: opt(r, 2),
+                application: text(r, 3),
+                client: text(r, 4),
+                state: opt(r, 5),
+                wait: opt(r, 6),
+                query_secs: float(r, 7),
+                transaction_secs: float(r, 8),
+                state_secs: float(r, 9),
+                query: opt(r, 10).filter(|q| q.as_str() != HIDDEN && !q.is_empty()),
+            });
+            let client = match (opt(r, 4), opt(r, 13).filter(|p| p != "-1")) {
+                (Some(host), Some(port)) => Some(format!("{host}:{port}")),
+                (host, _) => host,
+            };
+            for (name, value) in [
+                ("Process", opt(r, 11)),
+                ("Started", opt(r, 12)),
+                ("Client", client),
+                ("Application", opt(r, 3).filter(|a| !a.is_empty())),
+            ] {
+                if let Some(v) = value {
+                    d.connection.push((name.to_owned(), v));
+                }
+            }
+            d.transaction = float(r, 8).map(|age_secs| BackendTransaction {
+                age_secs,
+                xid: opt(r, 14),
+                xmin: opt(r, 15),
+                xmin_age: opt(r, 16).and_then(|a| a.parse().ok()),
+            });
+            Ok(())
+        })(),
+    );
+    if d.backend.is_none() {
+        d.errors = errors;
+        return d;
+    }
+    section(
+        "Connection",
+        STATS_ROLE,
+        (|| {
+            let rows = c.query(
+                &format!("select version, cipher from pg_stat_ssl where pid = {pid} and ssl"),
+                &[],
+            )?;
+            let encryption = rows.first().map_or("none".to_owned(), |r| {
+                format!("{} {}", text(r, 0), text(r, 1))
+            });
+            d.connection.push(("Encryption".into(), encryption));
+            Ok(())
+        })(),
+    );
+    section(
+        "Locks",
+        "",
+        (|| {
+            // Every backend holds its own virtual transaction id: not worth a
+            // line.
+            let rows = c.query(
+                &format!(
+                    "select locktype, relation::regclass::text, mode, granted, \
+                            case locktype when 'tuple' then page || ',' || tuple \
+                                          when 'page' then page::text \
+                                          when 'transactionid' then transactionid::text \
+                                          when 'virtualxid' then virtualxid \
+                                          when 'advisory' then objid::text end \
+                       from pg_locks \
+                      where pid = {pid} and not (locktype = 'virtualxid' and granted) \
+                      order by granted, relation::regclass::text, locktype \
+                      limit 50"
+                ),
+                &[],
+            )?;
+            d.locks = rows
+                .iter()
+                .map(|r| Lock {
+                    kind: text(r, 0),
+                    relation: opt(r, 1),
+                    mode: text(r, 2),
+                    granted: flag(r, 3),
+                    target: opt(r, 4),
+                })
+                .collect();
+            let rows = c.query(&format!("select unnest(pg_blocking_pids({pid}))"), &[])?;
+            d.blocked_by = rows.iter().map(|r| int(r, 0)).collect();
+            let rows = c.query(
+                &format!(
+                    "select pid from pg_stat_activity \
+                      where {pid} = any(pg_blocking_pids(pid)) order by pid"
+                ),
+                &[],
+            )?;
+            d.blocks = rows.iter().map(|r| int(r, 0)).collect();
+            Ok(())
+        })(),
+    );
+    d.errors = errors;
+    d
+}
+
+/// Signals a backend: cancels the statement it runs, or (`terminate`) ends
+/// the session and rolls back its transaction. Allowed on the user's own
+/// backends, and with `pg_signal_backend` on others (not a superuser's).
+pub fn signal(c: &mut dyn Client, pid: i64, terminate: bool) -> Result<(), DbError> {
+    let function = if terminate {
+        "pg_terminate_backend"
+    } else {
+        "pg_cancel_backend"
+    };
+    // A number: safe in the statement.
+    let rows = c.query(&format!("select {function}({pid})"), &[])?;
+    if rows.first().is_some_and(|r| flag(r, 0)) {
+        Ok(())
+    } else {
+        Err(DbError::new(format!(
+            "Backend {pid} wasn't signalled: it has ended, or isn't a backend"
+        )))
+    }
+}
+
 /// Transaction IDs run out at 2^31: VACUUM must freeze old rows before.
 const WRAPAROUND: f64 = 2_147_483_648.0;
 

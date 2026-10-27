@@ -20,6 +20,9 @@ const STORAGE_EVERY: f64 = 60.0;
 /// Keeps about an hour at 5 s refresh.
 const HISTORY: usize = 720;
 
+/// What a backend's pid in the tables opens.
+const SESSION_LINK: &str = "Show the session";
+
 /// One point of the rolling history.
 #[derive(Debug, Clone, Copy)]
 struct Sample {
@@ -183,13 +186,13 @@ impl PostgresDashboardView {
                 }
                 if !snap.lock_waits.is_empty() {
                     ui.add_space(8.0);
-                    lock_waits(ui, snap);
+                    lock_waits(ui, snap, wants);
                 }
                 ui.add_space(8.0);
-                running(ui, snap);
+                running(ui, snap, wants);
                 if !snap.transactions.is_empty() {
                     ui.add_space(8.0);
-                    transactions(ui, snap);
+                    transactions(ui, snap, wants);
                 }
                 if !snap.replicas.is_empty() || snap.receiver.is_some() || !snap.slots.is_empty() {
                     ui.add_space(8.0);
@@ -463,7 +466,7 @@ fn secs(s: Option<f64>) -> String {
     s.map_or(String::new(), duration)
 }
 
-fn lock_waits(ui: &mut Ui, snap: &PgSnapshot) {
+fn lock_waits(ui: &mut Ui, snap: &PgSnapshot, wants: &mut Wants) {
     section(ui, "Lock waits", |ui| {
         let rows: Vec<Vec<String>> = snap
             .lock_waits
@@ -486,7 +489,7 @@ fn lock_waits(ui: &mut Ui, snap: &PgSnapshot) {
                 ]
             })
             .collect();
-        style::text_table(
+        let clicked = style::text_table(
             ui,
             "postgres-lock-waits",
             &[
@@ -498,13 +501,16 @@ fn lock_waits(ui: &mut Ui, snap: &PgSnapshot) {
                 ("Waiting statement", 0.0, false),
             ],
             &rows,
-            &[],
-            "",
+            &[0, 2],
+            SESSION_LINK,
         );
+        if let Some(id) = clicked {
+            wants.push(Want::OpenConnection { id });
+        }
     });
 }
 
-fn running(ui: &mut Ui, snap: &PgSnapshot) {
+fn running(ui: &mut Ui, snap: &PgSnapshot, wants: &mut Wants) {
     section(ui, "Running statements, longest first", |ui| {
         if snap.running.is_empty() {
             ui.weak("—");
@@ -524,7 +530,7 @@ fn running(ui: &mut Ui, snap: &PgSnapshot) {
                 ]
             })
             .collect();
-        style::text_table(
+        let clicked = style::text_table(
             ui,
             "postgres-running",
             &[
@@ -536,13 +542,16 @@ fn running(ui: &mut Ui, snap: &PgSnapshot) {
                 ("Statement", 0.0, false),
             ],
             &rows,
-            &[],
-            "",
+            &[0],
+            SESSION_LINK,
         );
+        if let Some(id) = clicked {
+            wants.push(Want::OpenConnection { id });
+        }
     });
 }
 
-fn transactions(ui: &mut Ui, snap: &PgSnapshot) {
+fn transactions(ui: &mut Ui, snap: &PgSnapshot, wants: &mut Wants) {
     let title = match snap.open_transactions {
         Some(n) if n as usize > snap.transactions.len() => {
             format!("Open transactions, oldest first ({n} in all)")
@@ -569,7 +578,7 @@ fn transactions(ui: &mut Ui, snap: &PgSnapshot) {
                 ]
             })
             .collect();
-        style::text_table(
+        let clicked = style::text_table(
             ui,
             "postgres-transactions",
             &[
@@ -581,9 +590,12 @@ fn transactions(ui: &mut Ui, snap: &PgSnapshot) {
                 ("Statement (or the last one)", 0.0, false),
             ],
             &rows,
-            &[],
-            "",
+            &[0],
+            SESSION_LINK,
         );
+        if let Some(id) = clicked {
+            wants.push(Want::OpenConnection { id });
+        }
     });
 }
 

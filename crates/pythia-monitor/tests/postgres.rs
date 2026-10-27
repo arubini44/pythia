@@ -95,6 +95,22 @@ impl Harness {
         }
     }
 
+    /// Runs a task on the session's client and waits for its result.
+    fn run<T: Send + 'static>(
+        &mut self,
+        task: impl FnOnce(&mut dyn pythia_db::Client) -> Result<T, pythia_db::DbError> + Send + 'static,
+    ) -> Result<T, pythia_db::DbError> {
+        self.session.send(DbRequest::Run {
+            id: 4,
+            task: Box::new(move |c| task(c).map(|v| Box::new(v) as Box<dyn std::any::Any + Send>)),
+        });
+        loop {
+            if let DbEvent::TaskDone { result, .. } = self.next() {
+                return result.map(|any| *any.downcast::<T>().expect("the task's result"));
+            }
+        }
+    }
+
     fn snapshot(&mut self, storage: bool) -> PgSnapshot {
         self.session.send(DbRequest::Run {
             id: 3,
@@ -267,4 +283,118 @@ fn without_read_all_stats() {
     }
     admin.ok("drop role pythia_mon_plain");
     admin.ok("commit");
+}
+
+/// A blocking pair in its details: each side shows the lock and the other.
+/// Cancelling the waiter's statement ends it; terminating the holder ends
+/// its session and rolls back its update (#96).
+#[test]
+fn backend_details_cancel_and_terminate() {
+    let Some(p) = params(None) else {
+        return;
+    };
+    let mut setup = Harness::connect(p.clone());
+    setup.ok("drop table if exists pythia_det_locks");
+    setup.ok("create table pythia_det_locks (id int primary key, v int)");
+    setup.ok("insert into pythia_det_locks values (1, 0)");
+    setup.ok("commit");
+    let mut holder = Harness::connect(p.clone());
+    let holder_pid: i64 = holder.scalar("select pg_backend_pid()").parse().unwrap();
+    holder.ok("update pythia_det_locks set v = v + 1 where id = 1");
+    let mut waiter = Harness::connect(p.clone());
+    let waiter_pid: i64 = waiter.scalar("select pg_backend_pid()").parse().unwrap();
+    waiter.send("update pythia_det_locks set v = v + 1 where id = 1");
+
+    let mut monitor = Harness::connect(p);
+    let detail = |m: &mut Harness, pid: i64| {
+        m.run(move |c| Ok(postgres::backend_detail(c, pid)))
+            .unwrap()
+    };
+    let start = Instant::now();
+    let waiting = loop {
+        let d = detail(&mut monitor, waiter_pid);
+        if !d.blocked_by.is_empty() {
+            break d;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "no lock wait");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(waiting.errors.is_empty(), "{:?}", waiting.errors);
+    assert_eq!(waiting.blocked_by, [holder_pid]);
+    assert!(
+        waiting.locks.iter().any(|l| !l.granted),
+        "{:?}",
+        waiting.locks
+    );
+    let backend = waiting.backend.as_ref().expect("the waiter");
+    assert_eq!(backend.state.as_deref(), Some("active"));
+    assert!(
+        backend
+            .wait
+            .as_deref()
+            .is_some_and(|w| w.starts_with("Lock:"))
+    );
+    assert!(
+        waiting
+            .connection
+            .iter()
+            .any(|(name, _)| name == "Encryption")
+    );
+
+    let holding = detail(&mut monitor, holder_pid);
+    assert_eq!(holding.blocks, [waiter_pid]);
+    let transaction = holding
+        .transaction
+        .as_ref()
+        .expect("the holder's transaction");
+    assert!(transaction.xid.is_some(), "it wrote: {transaction:?}");
+    assert!(
+        holding.locks.iter().any(|l| l.granted
+            && l.relation
+                .as_deref()
+                .is_some_and(|r| r.contains("pythia_det_locks"))),
+        "{:?}",
+        holding.locks
+    );
+
+    // Cancelled, the waiter's update fails (57014); its session stays.
+    monitor
+        .run(move |c| postgres::signal(c, waiter_pid, false))
+        .unwrap();
+    let mut failed = None;
+    loop {
+        match waiter.next() {
+            DbEvent::Failed { error, .. } => failed = Some(error.to_string()),
+            DbEvent::Transaction { .. } => break,
+            _ => {}
+        }
+    }
+    let failed = failed.expect("the update was cancelled");
+    assert!(failed.contains("57014"), "{failed}");
+    waiter.ok("rollback");
+    assert_eq!(waiter.scalar("select 1"), "1");
+
+    // Terminated, the holder's session ends and its update is undone.
+    monitor
+        .run(move |c| postgres::signal(c, holder_pid, true))
+        .unwrap();
+    let start = Instant::now();
+    while detail(&mut monitor, holder_pid).backend.is_some() {
+        assert!(start.elapsed() < Duration::from_secs(10), "still there");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let gone = monitor
+        .run(move |c| postgres::signal(c, holder_pid, false))
+        .unwrap_err();
+    assert!(
+        gone.message.contains("wasn't signalled"),
+        "{}",
+        gone.message
+    );
+    assert_eq!(
+        setup.scalar("select v from pythia_det_locks where id = 1"),
+        "0"
+    );
+    setup.ok("drop table pythia_det_locks");
+    setup.ok("commit");
 }

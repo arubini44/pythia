@@ -760,6 +760,389 @@ fn top_statements(c: &mut dyn Client, s: &mut MsSnapshot) -> Result<(), DbError>
     Ok(())
 }
 
+/// A session's own row (`sys.dm_exec_sessions`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionInfo {
+    pub login: String,
+    pub host: Option<String>,
+    pub program: Option<String>,
+    pub database: Option<String>,
+    /// `running`, `sleeping`, …
+    pub status: String,
+    pub login_time: String,
+    pub last_request_end: Option<String>,
+    /// Since login.
+    pub cpu_ms: i64,
+    pub logical_reads: i64,
+    pub writes: i64,
+    pub open_transactions: i64,
+    pub isolation: String,
+    /// How it connected: name, value (client interface, network, …).
+    pub connection: Vec<(String, String)>,
+}
+
+/// A transaction a session has open (`sys.dm_tran_*`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionTransaction {
+    pub name: String,
+    pub age_secs: i64,
+    /// Read/write, read-only, system, distributed.
+    pub kind: String,
+    pub state: String,
+    pub log_bytes: f64,
+}
+
+/// A lock a session holds or waits for (`sys.dm_tran_locks`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Lock {
+    /// `OBJECT`, `KEY`, `PAGE`, `RID`, …
+    pub resource: String,
+    pub database: Option<String>,
+    /// The table, where it can be named.
+    pub object: Option<String>,
+    pub mode: String,
+    /// `GRANT`, `WAIT`, `CONVERT`.
+    pub status: String,
+    pub description: Option<String>,
+}
+
+/// One session of the server and what it holds (session details).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionDetail {
+    pub id: i64,
+    /// None when it is gone, or (without VIEW SERVER STATE) another login's.
+    pub session: Option<SessionInfo>,
+    /// What it runs now.
+    pub request: Option<Request>,
+    /// The batch it sent last.
+    pub last_batch: Option<String>,
+    /// The running statement's cached plan, as an outline ([`plan_outline`]).
+    pub plan: Vec<String>,
+    /// The plan as SQL Server shows it (showplan XML), for copying.
+    pub plan_xml: Option<String>,
+    pub transactions: Vec<SessionTransaction>,
+    pub locks: Vec<Lock>,
+    /// The sessions it blocks.
+    pub blocks: Vec<i64>,
+    pub errors: Vec<SectionError>,
+}
+
+/// Everything about one session; each part may fail alone.
+pub fn session_detail(c: &mut dyn Client, id: i64) -> SessionDetail {
+    let mut d = SessionDetail {
+        id,
+        ..SessionDetail::default()
+    };
+    let mut errors = Vec::new();
+    let mut section = |name: &'static str, r: Result<(), DbError>| {
+        if let Err(e) = r {
+            errors.push((name, explain(&e)));
+        }
+    };
+    // The id is a number: safe in the statements.
+    section(
+        "Session",
+        (|| {
+            let rows = c.query(
+                &format!(
+                    "select login_name, host_name, program_name, db_name(database_id), status, \
+                            convert(varchar(19), login_time, 120), \
+                            convert(varchar(19), last_request_end_time, 120), cpu_time, \
+                            logical_reads, writes, open_transaction_count, \
+                            case transaction_isolation_level when 1 then 'read uncommitted' \
+                                 when 2 then 'read committed' when 3 then 'repeatable read' \
+                                 when 4 then 'serializable' when 5 then 'snapshot' \
+                                 else 'unspecified' end, \
+                            client_interface_name, nt_user_name \
+                       from sys.dm_exec_sessions where session_id = {id}"
+                ),
+                &[],
+            )?;
+            d.session = rows.first().map(|r| {
+                let mut connection = Vec::new();
+                for (name, i) in [("Client interface", 12), ("Windows user", 13)] {
+                    if let Some(v) = opt(r, i).filter(|v| !v.is_empty()) {
+                        connection.push((name.to_owned(), v));
+                    }
+                }
+                SessionInfo {
+                    login: text(r, 0),
+                    host: opt(r, 1).filter(|v| !v.is_empty()),
+                    program: opt(r, 2).filter(|v| !v.is_empty()),
+                    database: opt(r, 3),
+                    status: text(r, 4),
+                    login_time: text(r, 5),
+                    last_request_end: opt(r, 6),
+                    cpu_ms: int(r, 7),
+                    logical_reads: int(r, 8),
+                    writes: int(r, 9),
+                    open_transactions: int(r, 10),
+                    isolation: text(r, 11),
+                    connection,
+                }
+            });
+            Ok(())
+        })(),
+    );
+    if d.session.is_none() {
+        d.errors = errors;
+        return d;
+    }
+    section(
+        "Connection",
+        (|| {
+            let rows = c.query(
+                &format!(
+                    "select c.client_net_address, c.client_tcp_port, c.net_transport, \
+                            c.encrypt_option, c.auth_scheme, lt.text \
+                       from sys.dm_exec_connections c \
+                      outer apply sys.dm_exec_sql_text(c.most_recent_sql_handle) lt \
+                      where c.session_id = {id}"
+                ),
+                &[],
+            )?;
+            if let Some(r) = rows.first() {
+                let address = match (opt(r, 0), opt(r, 1)) {
+                    (Some(a), Some(p)) => Some(format!("{a}:{p}")),
+                    (a, _) => a,
+                };
+                let session = d.session.as_mut().expect("read above");
+                for (name, value) in [
+                    ("Client address", address),
+                    ("Transport", opt(r, 2)),
+                    (
+                        "Encrypted",
+                        opt(r, 3).map(|v| if v == "TRUE" { "yes" } else { "no" }.to_owned()),
+                    ),
+                    ("Authentication", opt(r, 4)),
+                ] {
+                    if let Some(v) = value {
+                        session.connection.push((name.to_owned(), v));
+                    }
+                }
+                d.last_batch = opt(r, 5);
+            }
+            Ok(())
+        })(),
+    );
+    section(
+        "Request",
+        (|| {
+            let rows = c.query(
+                &format!(
+                    "select r.session_id, s.login_name, db_name(r.database_id), r.status, r.command, \
+                            r.total_elapsed_time / 1000.0, r.wait_type, r.wait_time / 1000.0, \
+                            r.blocking_session_id, r.wait_resource, {STATEMENT}, p.query_plan \
+                       from sys.dm_exec_requests r \
+                       join sys.dm_exec_sessions s on s.session_id = r.session_id \
+                      outer apply sys.dm_exec_sql_text(r.sql_handle) t \
+                      outer apply sys.dm_exec_text_query_plan(r.plan_handle, \
+                                  r.statement_start_offset, r.statement_end_offset) p \
+                      where r.session_id = {id}"
+                ),
+                &[],
+            )?;
+            if let Some(r) = rows.first() {
+                d.request = Some(Request {
+                    session: int(r, 0),
+                    login: text(r, 1),
+                    database: opt(r, 2),
+                    status: text(r, 3),
+                    command: text(r, 4),
+                    elapsed_secs: num(r, 5),
+                    wait_type: opt(r, 6),
+                    wait_secs: num(r, 7),
+                    blocked_by: Some(int(r, 8)).filter(|b| *b > 0),
+                    wait_resource: opt(r, 9).filter(|w| !w.is_empty()),
+                    statement: opt(r, 10),
+                });
+                d.plan_xml = opt(r, 11);
+                d.plan = d.plan_xml.as_deref().map(plan_outline).unwrap_or_default();
+            }
+            let rows = c.query(
+                &format!(
+                    "select session_id from sys.dm_exec_requests \
+                      where blocking_session_id = {id} order by session_id"
+                ),
+                &[],
+            )?;
+            d.blocks = rows.iter().map(|r| int(r, 0)).collect();
+            Ok(())
+        })(),
+    );
+    section(
+        "Transactions",
+        (|| {
+            let rows = c.query(
+                &format!(
+                    "select a.name, datediff(second, a.transaction_begin_time, getdate()), \
+                            case a.transaction_type when 1 then 'read/write' \
+                                 when 2 then 'read-only' when 3 then 'system' \
+                                 when 4 then 'distributed' end, \
+                            case a.transaction_state when 0 then 'initializing' \
+                                 when 1 then 'initialized' when 2 then 'active' when 3 then 'ended' \
+                                 when 4 then 'commit started' when 5 then 'prepared' \
+                                 when 6 then 'committed' when 7 then 'rolling back' \
+                                 when 8 then 'rolled back' end, \
+                            (select sum(t.database_transaction_log_bytes_used) \
+                               from sys.dm_tran_database_transactions t \
+                              where t.transaction_id = a.transaction_id) \
+                       from sys.dm_tran_session_transactions st \
+                       join sys.dm_tran_active_transactions a \
+                         on a.transaction_id = st.transaction_id \
+                      where st.session_id = {id} \
+                      order by a.transaction_begin_time"
+                ),
+                &[],
+            )?;
+            d.transactions = rows
+                .iter()
+                .map(|r| SessionTransaction {
+                    name: text(r, 0),
+                    age_secs: int(r, 1),
+                    kind: text(r, 2),
+                    state: text(r, 3),
+                    log_bytes: num(r, 4),
+                })
+                .collect();
+            Ok(())
+        })(),
+    );
+    section(
+        "Locks",
+        (|| {
+            // Rows and pages name their table through sys.partitions, which
+            // only knows the current database's.
+            let rows = c.query(
+                &format!(
+                    "select top 50 l.resource_type, db_name(l.resource_database_id), \
+                            case when l.resource_type = 'OBJECT' \
+                                 then object_schema_name(l.resource_associated_entity_id, \
+                                                         l.resource_database_id) + '.' + \
+                                      object_name(l.resource_associated_entity_id, \
+                                                  l.resource_database_id) \
+                                 when l.resource_database_id = db_id() \
+                                  and l.resource_type in ('KEY', 'PAGE', 'RID', 'HOBT') \
+                                 then (select object_schema_name(p.object_id) + '.' + \
+                                              object_name(p.object_id) \
+                                         from sys.partitions p \
+                                        where p.hobt_id = l.resource_associated_entity_id) \
+                            end, \
+                            l.request_mode, l.request_status, \
+                            nullif(rtrim(l.resource_description), '') \
+                       from sys.dm_tran_locks l \
+                      where l.request_session_id = {id} and l.resource_type <> 'DATABASE' \
+                      order by case l.request_status when 'GRANT' then 1 else 0 end, \
+                               l.resource_type"
+                ),
+                &[],
+            )?;
+            d.locks = rows
+                .iter()
+                .map(|r| Lock {
+                    resource: text(r, 0),
+                    database: opt(r, 1),
+                    object: opt(r, 2),
+                    mode: text(r, 3),
+                    status: text(r, 4),
+                    description: opt(r, 5),
+                })
+                .collect();
+            Ok(())
+        })(),
+    );
+    d.errors = errors;
+    d
+}
+
+/// A showplan's operators as an indented outline, one per line: the
+/// operation, the table and index it works on, the estimated rows.
+pub fn plan_outline(xml: &str) -> Vec<String> {
+    struct Op {
+        line: String,
+        object: bool,
+    }
+    let attribute = |tag: &str, name: &str| -> Option<String> {
+        let start = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+        let end = tag[start..].find('"')? + start;
+        Some(
+            tag[start..end]
+                .replace("&apos;", "'")
+                .replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&"),
+        )
+    };
+    let unbracket = |name: String| name.trim_matches(['[', ']']).to_owned();
+    let mut out: Vec<Op> = Vec::new();
+    // Indexes into `out` of the operators open at this point.
+    let mut open: Vec<usize> = Vec::new();
+    let mut rest = xml;
+    while let Some(at) = rest.find('<') {
+        rest = &rest[at..];
+        let Some(end) = rest.find('>') else {
+            break;
+        };
+        let tag = &rest[..=end];
+        rest = &rest[end + 1..];
+        if tag.starts_with("</RelOp") {
+            open.pop();
+        } else if tag.starts_with("<RelOp ") {
+            let physical = attribute(tag, "PhysicalOp").unwrap_or_default();
+            let mut line = format!("{}{physical}", "  ".repeat(open.len()));
+            if let Some(logical) = attribute(tag, "LogicalOp").filter(|l| *l != physical) {
+                line.push_str(&format!(" ({logical})"));
+            }
+            if let Some(rows) = attribute(tag, "EstimateRows").and_then(|r| r.parse::<f64>().ok()) {
+                let rows = (rows * 10.0).round() / 10.0;
+                line.push_str(&format!(
+                    " · ~{} {}",
+                    crate::ui::style::compact(rows),
+                    if rows == 1.0 { "row" } else { "rows" }
+                ));
+            }
+            out.push(Op {
+                line,
+                object: false,
+            });
+            if !tag.ends_with("/>") {
+                open.push(out.len() - 1);
+            }
+        } else if tag.starts_with("<Object ") {
+            // The first object inside an operator, before the operators
+            // under it, is the one it works on.
+            if let Some(&i) = open.last()
+                && !out[i].object
+                && let Some(table) = attribute(tag, "Table").map(unbracket)
+            {
+                let schema = attribute(tag, "Schema").map(unbracket);
+                let name = match schema {
+                    Some(schema) => format!("{schema}.{table}"),
+                    None => table,
+                };
+                let index = attribute(tag, "Index")
+                    .map(|i| format!(" ({})", unbracket(i)))
+                    .unwrap_or_default();
+                let op = &mut out[i];
+                // Before the estimate.
+                let at = op.line.find(" · ~").unwrap_or(op.line.len());
+                op.line.insert_str(at, &format!(" {name}{index}"));
+                op.object = true;
+            }
+        }
+    }
+    out.into_iter().map(|op| op.line).collect()
+}
+
+/// Ends a session (`KILL`): its connection closes and its open transaction
+/// rolls back. Needs ALTER ANY CONNECTION.
+pub fn kill(c: &mut dyn Client, id: i64) -> Result<(), DbError> {
+    // A number: safe in the statement.
+    c.query(&format!("kill {id}"), &[])?;
+    Ok(())
+}
+
 /// Findings, most severe first; empty means all is well. `rates` are the
 /// counters per second since the previous snapshot.
 pub fn insights(snap: &MsSnapshot, rates: Option<&Counters>) -> Vec<Insight> {
@@ -928,6 +1311,28 @@ pub fn insights(snap: &MsSnapshot, rates: Option<&Counters>) -> Vec<Insight> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A showplan as SQL Server 2022 caches it, trimmed: one line per
+    /// operator, nested, with the table it works on (#96).
+    #[test]
+    fn plan_outlines() {
+        let xml = r#"<ShowPlanXML><BatchSequence><Batch><Statements><StmtSimple StatementText="update t set v = v + 1 from det_plan_t t where t.name = &apos;x&apos;"><QueryPlan>
+<RelOp NodeId="0" PhysicalOp="Clustered Index Update" LogicalOp="Update" EstimateRows="1"><OutputList/><Update><Object Database="[pythia]" Schema="[dbo]" Table="[det_plan_t]" Index="[PK_det]" Alias="[t]" IndexKind="Clustered"></Object>
+<RelOp NodeId="1" PhysicalOp="Nested Loops" LogicalOp="Inner Join" EstimateRows="1.5"><NestedLoops>
+<RelOp NodeId="2" PhysicalOp="Index Seek" LogicalOp="Index Seek" EstimateRows="2779"><IndexScan><Object Database="[pythia]" Schema="[dbo]" Table="[det_plan_t]" Index="[det_ix]"/></IndexScan></RelOp>
+<RelOp NodeId="3" PhysicalOp="Compute Scalar" LogicalOp="Compute Scalar" EstimateRows="1"/>
+</NestedLoops></RelOp></Update></RelOp></QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>"#;
+        assert_eq!(
+            plan_outline(xml),
+            [
+                "Clustered Index Update (Update) dbo.det_plan_t (PK_det) · ~1 row",
+                "  Nested Loops (Inner Join) · ~1.5 rows",
+                "    Index Seek dbo.det_plan_t (det_ix) · ~2779 rows",
+                "    Compute Scalar · ~1 row",
+            ]
+        );
+        assert!(plan_outline("").is_empty());
+    }
 
     #[test]
     fn rates_and_ratios() {

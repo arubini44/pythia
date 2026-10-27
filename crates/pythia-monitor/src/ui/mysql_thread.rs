@@ -57,7 +57,7 @@ impl ThreadDetailView {
         if !self.requested && !self.loading {
             self.requested = true;
             self.loading = true;
-            wants.push(Want::ThreadDetail { id: self.id });
+            wants.push(Want::ConnectionDetail { id: self.id });
         }
         let thread = self.detail.as_ref().and_then(|d| d.thread.as_ref());
         let (mut confirm, mut refresh) = (None, false);
@@ -200,7 +200,7 @@ impl ThreadDetailView {
         }
         if let Some(yes) = decision {
             if yes {
-                wants.push(Want::KillThread {
+                wants.push(Want::KillConnection {
                     id: self.id,
                     query_only,
                 });
@@ -297,7 +297,7 @@ fn details(ui: &mut Ui, d: &ThreadDetail, wants: &mut Wants) {
                     .on_hover_text("Show the thread")
                     .clicked()
                 {
-                    wants.push(Want::OpenThread { id: blocker });
+                    wants.push(Want::OpenConnection { id: blocker });
                 }
             });
         }
@@ -409,7 +409,7 @@ mod tests {
         harness.run_steps(2);
         assert!(matches!(
             harness.state().1.list.as_slice(),
-            [Want::OpenThread { id: 41 }]
+            [Want::OpenConnection { id: 41 }]
         ));
         harness.state_mut().1.list.clear();
         harness.get_by_label("Thread ⏷").click();
@@ -421,7 +421,7 @@ mod tests {
         harness.run_steps(2);
         assert!(matches!(
             harness.state().1.list.as_slice(),
-            [Want::KillThread {
+            [Want::KillConnection {
                 id: 42,
                 query_only: true
             }]

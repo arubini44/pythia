@@ -27,9 +27,11 @@ mod history;
 mod mysql;
 mod mysql_thread;
 mod postgres;
+mod postgres_backend;
 mod sessions;
 mod sql_detail;
 mod sqlserver;
+mod sqlserver_session;
 pub mod style;
 mod trace;
 
@@ -48,9 +50,11 @@ pub use detail::SessionDetailView;
 pub use mysql::MySqlDashboardView;
 pub use mysql_thread::ThreadDetailView;
 pub use postgres::PostgresDashboardView;
+pub use postgres_backend::BackendDetailView;
 pub use sessions::{FieldFilter, SessionsView};
 pub use sql_detail::SqlDetailView;
 pub use sqlserver::SqlServerDashboardView;
+pub use sqlserver_session::MsSessionDetailView;
 pub use trace::TraceView;
 
 /// Identifies a request inside one [`Monitor`].
@@ -186,16 +190,18 @@ pub(crate) enum Want {
     },
     /// The sessions using the most PGA.
     PgaUsers,
-    /// Open a MySQL thread's details tab (handled by the driver, no task).
-    OpenThread {
+    /// Open the details tab of a connection: a MySQL thread, a PostgreSQL
+    /// backend, a SQL Server session (handled by the driver, no task).
+    OpenConnection {
         id: i64,
     },
-    /// A MySQL thread's details.
-    ThreadDetail {
+    /// A connection's details.
+    ConnectionDetail {
         id: i64,
     },
-    /// End a MySQL thread's statement, or its connection.
-    KillThread {
+    /// End the statement a connection runs (`query_only`: MySQL's KILL
+    /// QUERY, PostgreSQL's cancel), or the connection itself.
+    KillConnection {
         id: i64,
         query_only: bool,
     },
@@ -257,12 +263,17 @@ pub(crate) enum Want {
     Act(MonitorAction),
 }
 
-/// An open details tab: of a session or of a statement.
+/// An open details tab: of a session or of a statement, or of a
+/// connection of a database that has its dashboard only.
 enum DetailView {
     Session(Box<SessionDetailView>),
     Sql(Box<SqlDetailView>),
     /// A MySQL thread.
     Thread(Box<ThreadDetailView>),
+    /// A PostgreSQL backend.
+    Backend(Box<BackendDetailView>),
+    /// A SQL Server session.
+    MsSession(Box<MsSessionDetailView>),
 }
 
 impl DetailView {
@@ -271,6 +282,39 @@ impl DetailView {
             DetailView::Session(d) => d.title(),
             DetailView::Sql(d) => d.title(),
             DetailView::Thread(d) => d.title(),
+            DetailView::Backend(d) => d.title(),
+            DetailView::MsSession(d) => d.title(),
+        }
+    }
+
+    /// The id of the connection it shows.
+    fn connection_id(&self) -> Option<i64> {
+        match self {
+            DetailView::Thread(d) => Some(d.id),
+            DetailView::Backend(d) => Some(d.pid),
+            DetailView::MsSession(d) => Some(d.id),
+            DetailView::Session(_) | DetailView::Sql(_) => None,
+        }
+    }
+
+    /// Draws a connection's details; false for a session or a statement.
+    fn connection_ui(&mut self, ui: &mut Ui, wants: &mut Wants) -> bool {
+        match self {
+            DetailView::Thread(d) => d.ui(ui, wants),
+            DetailView::Backend(d) => d.ui(ui, wants),
+            DetailView::MsSession(d) => d.ui(ui, wants),
+            DetailView::Session(_) | DetailView::Sql(_) => return false,
+        }
+        true
+    }
+
+    /// Reads a connection's details again, after a kill.
+    fn refresh_connection(&mut self) {
+        match self {
+            DetailView::Thread(d) => d.refresh(),
+            DetailView::Backend(d) => d.refresh(),
+            DetailView::MsSession(d) => d.refresh(),
+            DetailView::Session(_) | DetailView::Sql(_) => {}
         }
     }
 }
@@ -288,7 +332,7 @@ enum Job {
     EventHistogram(String),
     Tablespace(String),
     PgaUsers,
-    ThreadDetail(i64),
+    ConnectionDetail(i64),
     History(queries::Scope, history::HistoryPart),
     Control(String),
     Transaction(i64, i64),
@@ -441,19 +485,27 @@ impl Monitor {
         let mut out = MonitorOutput::default();
 
         if self.dashboard_only() {
-            // The dashboard, and the threads opened from it.
-            if !self.details.is_empty() {
+            // The dashboard, and the connections opened from it.
+            if !self.details.is_empty() || self.toast.is_some() {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.tab, MonitorTab::Dashboard, "Dashboard");
                     self.detail_tabs(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.toast_ui(ui, now);
+                    });
                 });
                 ui.separator();
             }
             match self.tab {
-                MonitorTab::Detail(i) => match self.details.get_mut(i) {
-                    Some(DetailView::Thread(d)) => d.ui(ui, &mut wants),
-                    _ => self.tab = MonitorTab::Dashboard,
-                },
+                MonitorTab::Detail(i) => {
+                    let shown = self
+                        .details
+                        .get_mut(i)
+                        .is_some_and(|d| d.connection_ui(ui, &mut wants));
+                    if !shown {
+                        self.tab = MonitorTab::Dashboard;
+                    }
+                }
                 _ => match self.dialect.kind() {
                     DbKind::Postgres => self.postgres.ui(ui, now, &mut wants),
                     DbKind::SqlServer => self.sqlserver.ui(ui, now, &mut wants),
@@ -475,22 +527,7 @@ impl Monitor {
                 ui.selectable_value(&mut self.tab, MonitorTab::Trace, "Trace analyzer");
                 self.detail_tabs(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some((text, error, until)) = &self.toast {
-                        if now < *until {
-                            let color = if *error {
-                                ui.visuals().error_fg_color
-                            } else {
-                                style::Palette::GREEN
-                            };
-                            ui.label(RichText::new(text).color(color));
-                            ui.ctx()
-                                .request_repaint_after(std::time::Duration::from_secs_f64(
-                                    until - now,
-                                ));
-                        } else {
-                            self.toast = None;
-                        }
-                    }
+                    self.toast_ui(ui, now);
                     if let Some(Err(e)) = &self.caps {
                         ui.colored_label(ui.visuals().error_fg_color, "⚠")
                             .on_hover_text(e);
@@ -509,7 +546,9 @@ impl Monitor {
             MonitorTab::Detail(i) => match self.details.get_mut(i) {
                 Some(DetailView::Session(d)) => d.ui(ui, caps, &mut wants),
                 Some(DetailView::Sql(d)) => d.ui(ui, caps, &mut wants),
-                Some(DetailView::Thread(d)) => d.ui(ui, &mut wants),
+                Some(d) => {
+                    d.connection_ui(ui, &mut wants);
+                }
                 None => self.tab = MonitorTab::Sessions,
             },
         }
@@ -553,14 +592,21 @@ impl Monitor {
                 self.tab = MonitorTab::Detail(idx);
                 continue;
             }
-            if let Want::OpenThread { id } = want {
+            if let Want::OpenConnection { id } = want {
                 let found = self
                     .details
                     .iter()
-                    .position(|d| matches!(d, DetailView::Thread(t) if t.id == id));
+                    .position(|d| d.connection_id() == Some(id));
                 let idx = found.unwrap_or_else(|| {
-                    self.details
-                        .push(DetailView::Thread(Box::new(ThreadDetailView::new(id))));
+                    self.details.push(match self.dialect.kind() {
+                        DbKind::Postgres => {
+                            DetailView::Backend(Box::new(BackendDetailView::new(id)))
+                        }
+                        DbKind::SqlServer => {
+                            DetailView::MsSession(Box::new(MsSessionDetailView::new(id)))
+                        }
+                        _ => DetailView::Thread(Box::new(ThreadDetailView::new(id))),
+                    });
                     self.details.len() - 1
                 });
                 self.tab = MonitorTab::Detail(idx);
@@ -615,8 +661,27 @@ impl Monitor {
     fn session_details(&mut self) -> impl Iterator<Item = &mut SessionDetailView> {
         self.details.iter_mut().filter_map(|d| match d {
             DetailView::Session(s) => Some(&mut **s),
-            DetailView::Sql(_) | DetailView::Thread(_) => None,
+            _ => None,
         })
+    }
+
+    /// A short note on what an action did, for a few seconds.
+    fn toast_ui(&mut self, ui: &mut Ui, now: f64) {
+        let Some((text, error, until)) = &self.toast else {
+            return;
+        };
+        if now < *until {
+            let color = if *error {
+                ui.visuals().error_fg_color
+            } else {
+                style::Palette::GREEN
+            };
+            ui.label(RichText::new(text).color(color));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(until - now));
+        } else {
+            self.toast = None;
+        }
     }
 
     fn token(&mut self, job: Job) -> Token {
@@ -654,25 +719,47 @@ impl Monitor {
                 })),
             });
         }
-        if let Want::ThreadDetail { id } = want {
-            return Some(MonitorRequest {
-                token: self.token(Job::ThreadDetail(id)),
-                task: MonitorTask::Client(Box::new(move |c| {
-                    boxed(Ok(crate::mysql::thread_detail(c, id)))
-                })),
-            });
-        }
-        if let Want::KillThread { id, query_only } = want {
-            let what = if query_only {
-                "Query of thread"
-            } else {
-                "Thread"
+        if let Want::ConnectionDetail { id } = want {
+            let task: RunFn = match self.dialect.kind() {
+                DbKind::Postgres => {
+                    Box::new(move |c| boxed(Ok(crate::postgres::backend_detail(c, id))))
+                }
+                DbKind::SqlServer => {
+                    Box::new(move |c| boxed(Ok(crate::sqlserver::session_detail(c, id))))
+                }
+                _ => Box::new(move |c| boxed(Ok(crate::mysql::thread_detail(c, id)))),
             };
             return Some(MonitorRequest {
-                token: self.token(Job::Control(format!("{what} {id} killed"))),
-                task: MonitorTask::Client(Box::new(move |c| {
-                    boxed(crate::mysql::kill(c, id, query_only))
-                })),
+                token: self.token(Job::ConnectionDetail(id)),
+                task: MonitorTask::Client(task),
+            });
+        }
+        if let Want::KillConnection { id, query_only } = want {
+            let (done, task): (String, RunFn) = match (self.dialect.kind(), query_only) {
+                (DbKind::Postgres, true) => (
+                    format!("Query of backend {id} cancelled"),
+                    Box::new(move |c| boxed(crate::postgres::signal(c, id, false))),
+                ),
+                (DbKind::Postgres, false) => (
+                    format!("Backend {id} terminated"),
+                    Box::new(move |c| boxed(crate::postgres::signal(c, id, true))),
+                ),
+                (DbKind::SqlServer, _) => (
+                    format!("Session {id} killed"),
+                    Box::new(move |c| boxed(crate::sqlserver::kill(c, id))),
+                ),
+                (_, true) => (
+                    format!("Query of thread {id} killed"),
+                    Box::new(move |c| boxed(crate::mysql::kill(c, id, true))),
+                ),
+                (_, false) => (
+                    format!("Thread {id} killed"),
+                    Box::new(move |c| boxed(crate::mysql::kill(c, id, false))),
+                ),
+            };
+            return Some(MonitorRequest {
+                token: self.token(Job::Control(done)),
+                task: MonitorTask::Client(task),
             });
         }
         let (job, task): (Job, TaskFn) = match want {
@@ -840,9 +927,9 @@ impl Monitor {
             | Want::ShowSessions(_)
             | Want::Analyze(_)
             | Want::Act(_)
-            | Want::OpenThread { .. }
-            | Want::ThreadDetail { .. }
-            | Want::KillThread { .. }
+            | Want::OpenConnection { .. }
+            | Want::ConnectionDetail { .. }
+            | Want::KillConnection { .. }
             | Want::MySqlDashboard { .. }
             | Want::PostgresDashboard { .. }
             | Want::SqlServerDashboard { .. } => return None,
@@ -891,14 +978,16 @@ impl Monitor {
             Job::EventHistogram(event) => self.dashboard.on_histogram(&event, take(result)),
             Job::Tablespace(name) => self.dashboard.on_tablespace(&name, take(result)),
             Job::PgaUsers => self.dashboard.on_pga_users(take(result)),
-            Job::ThreadDetail(id) => {
-                let result = take(result);
-                let found = self.details.iter_mut().find_map(|d| match d {
-                    DetailView::Thread(t) if t.id == id => Some(t),
-                    _ => None,
-                });
-                if let Some(d) = found {
-                    d.on_detail(result);
+            Job::ConnectionDetail(id) => {
+                match self
+                    .details
+                    .iter_mut()
+                    .find(|d| d.connection_id() == Some(id))
+                {
+                    Some(DetailView::Thread(d)) => d.on_detail(take(result)),
+                    Some(DetailView::Backend(d)) => d.on_detail(take(result)),
+                    Some(DetailView::MsSession(d)) => d.on_detail(take(result)),
+                    _ => {}
                 }
             }
             Job::History(scope, part) => {
@@ -958,9 +1047,7 @@ impl Monitor {
                         d.refresh();
                     }
                     for d in &mut self.details {
-                        if let DetailView::Thread(t) = d {
-                            t.refresh();
-                        }
+                        d.refresh_connection();
                     }
                 }
                 Err(e) => self.toast(queries::explain_error(&e), true, now),
@@ -1045,7 +1132,11 @@ mod tests {
         harness.run_steps(3);
         assert_eq!(harness.state().0.title(), "Thread 77");
         assert!(
-            harness.state().1.iter().any(|j| j.contains("thread 77")),
+            harness
+                .state()
+                .1
+                .iter()
+                .any(|j| j.contains("connection 77")),
             "{:?}",
             harness.state().1
         );
@@ -1054,9 +1145,79 @@ mod tests {
         assert_eq!(harness.state().0.title(), "Dashboard");
     }
 
+    /// On PostgreSQL and SQL Server, a session on the dashboard opens its
+    /// details in a tab of their own, which reads them (#96).
+    #[test]
+    fn postgres_and_sqlserver_session_tabs() {
+        let postgres = {
+            let mut monitor = Monitor::new(MonitorTab::Dashboard);
+            monitor.set_dialect(Dialect::POSTGRES);
+            monitor.postgres.on_snapshot(
+                Ok(crate::postgres::PgSnapshot {
+                    running: vec![crate::postgres::Backend {
+                        pid: 4711,
+                        state: Some("active".into()),
+                        query: Some("select pg_sleep(60)".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                0.0,
+            );
+            monitor
+        };
+        let sqlserver = {
+            let mut monitor = Monitor::new(MonitorTab::Dashboard);
+            monitor.set_dialect(Dialect::SQLSERVER);
+            monitor.sqlserver.on_snapshot(
+                Ok(crate::sqlserver::MsSnapshot {
+                    running: vec![crate::sqlserver::Request {
+                        session: 57,
+                        status: "suspended".into(),
+                        statement: Some("waitfor delay '00:01'".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                0.0,
+            );
+            monitor
+        };
+        for (monitor, id, title) in [
+            (postgres, "4711", "Backend 4711"),
+            (sqlserver, "57", "Session 57"),
+        ] {
+            let mut harness =
+                Harness::builder()
+                    .with_size(egui::vec2(1200.0, 1600.0))
+                    .build_ui_state(
+                        |ui, (monitor, out): &mut (Monitor, Vec<String>)| {
+                            let o = monitor.ui(ui);
+                            out.extend(o.requests.iter().map(|r| {
+                                format!("{:?}", monitor.jobs.get(&r.token).map(job_name))
+                            }));
+                        },
+                        (monitor, Vec::new()),
+                    );
+            harness.run_steps(2);
+            harness.get_by_label(id).click();
+            harness.run_steps(3);
+            assert_eq!(harness.state().0.title(), title);
+            assert!(
+                harness
+                    .state()
+                    .1
+                    .iter()
+                    .any(|j| j.contains(&format!("connection {id}"))),
+                "{:?}",
+                harness.state().1
+            );
+        }
+    }
+
     fn job_name(job: &Job) -> String {
         match job {
-            Job::ThreadDetail(id) => format!("thread {id}"),
+            Job::ConnectionDetail(id) => format!("connection {id}"),
             _ => "other".into(),
         }
     }
