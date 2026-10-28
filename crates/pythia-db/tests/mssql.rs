@@ -344,6 +344,8 @@ fn transactions_and_autocommit() {
     // The server tells: a transaction the batch opens itself is pending.
     assert!(h.ok("begin tran"));
     assert!(!h.ok("commit"));
+    // Statistics aren't rows: updating them opens no transaction.
+    assert!(!h.ok("update statistics tx_t with fullscan"));
 
     h.session.send(DbRequest::SetAutocommit(true));
     let DbEvent::Executed { summary, .. } = h.run(2, "insert into tx_t values (2), (3)") else {

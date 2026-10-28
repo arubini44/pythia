@@ -822,6 +822,8 @@ fn changes(sql: &str) -> bool {
     let first = words.first().map(String::as_str).unwrap_or_default();
     let second = words.get(1).map(String::as_str).unwrap_or_default();
     match first {
+        // Statistics, not rows.
+        "UPDATE" if second == "STATISTICS" => false,
         _ if CHANGES.contains(&first) => true,
         "BEGIN" if matches!(second, "TRAN" | "TRANSACTION" | "DISTRIBUTED") => false,
         "SELECT" => has_word(sql, LOCKS),
@@ -1195,6 +1197,7 @@ mod tests {
             ("select * from t", false),
             ("select * from t with (updlock)", true),
             ("update t set a = 1", true),
+            ("update statistics dbo.t with fullscan", false),
             ("exec dbo.p", true),
             ("begin tran", false),
             ("declare @n int = 1; update t set a = @n", true),
