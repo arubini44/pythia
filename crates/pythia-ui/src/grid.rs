@@ -601,6 +601,13 @@ impl GridState {
         self.value_editor = None;
     }
 
+    /// Switches between the grid and the record view. An open inline edit
+    /// is committed first.
+    fn set_record_view(&mut self, rows: &[Vec<Cell>], on: bool) {
+        self.finish_edit(rows, true);
+        self.record_view = on;
+    }
+
     fn finish_edit(&mut self, rows: &[Vec<Cell>], commit: bool) {
         let Some((r, c, text)) = self.edit.as_mut().and_then(|e| e.active.take()) else {
             return;
@@ -665,12 +672,21 @@ impl<'a> ResultGrid<'a> {
             selection_summary: None,
         };
 
-        let focus_id = id.with("focus");
+        // Unique where the grid is placed: the compare window's grids have
+        // fixed ids.
+        let focus_id = ui.make_persistent_id(id.with("focus"));
+        // egui takes the focus from an id no widget uses in a pass: the
+        // keys would only reach the grid in the frame after a click.
+        ui.interact(
+            ui.available_rect_before_wrap(),
+            focus_id,
+            Sense::focusable_noninteractive(),
+        );
         if ui.memory(|m| m.has_focus(focus_id)) {
             handle_keys(ui, state, columns, rows);
         }
         if state.record_view {
-            record_view(ui, columns, rows, state, id);
+            record_view(ui, columns, rows, state, id, focus_id);
         } else {
             out.reached_end = table(ui, columns, rows, state, id, focus_id);
         }
@@ -1633,7 +1649,7 @@ fn context_menu(ui: &mut Ui, columns: &[Column], rows: &[Vec<Cell>], state: &mut
         })
         .clicked()
     {
-        state.record_view = !state.record_view;
+        state.set_record_view(rows, !state.record_view);
         ui.close();
     }
 }
@@ -1753,32 +1769,61 @@ fn fmt_num(n: f64) -> String {
     }
 }
 
+/// One row at a time, a field per column. The fields edit like the grid's
+/// cells, and the records are the grid's rows: the ones passing the filter,
+/// then the inserted ones.
 fn record_view(
     ui: &mut Ui,
     columns: &[Column],
     rows: &[Vec<Cell>],
     state: &mut GridState,
     id: egui::Id,
+    focus_id: egui::Id,
 ) {
-    let (mut r, c) = state.cursor.unwrap_or((0, 0));
+    let visible = state.visible_columns(columns.len());
+    let count = state.view_len(rows);
+    let (shown, c) = state
+        .cursor
+        .unwrap_or((0, visible.first().copied().unwrap_or(0)));
+    let mut r = shown.min(count.saturating_sub(1));
     ui.horizontal(|ui| {
         if ui.button("◀").clicked() {
             r = r.saturating_sub(1);
         }
-        ui.label(format!("Record {} of {}", r + 1, rows.len()));
-        if ui.button("▶").clicked() && r + 1 < rows.len() {
+        if count == 0 {
+            ui.label("No records");
+        } else {
+            ui.label(format!("Record {} of {}", r + 1, count));
+        }
+        if ui.button("▶").clicked() && r + 1 < count {
             r += 1;
         }
         if ui.button("Grid view").clicked() {
-            state.record_view = false;
+            state.set_record_view(rows, false);
+        }
+        let status = match state.cell_state(r, c) {
+            _ if count == 0 => None,
+            CellState::Inserted => Some("New row"),
+            CellState::Deleted => Some("To be deleted"),
+            _ => None,
+        };
+        if let Some(status) = status {
+            ui.weak(status);
         }
     });
+    // An edit left on the record before would stay open, unseen.
+    if r != shown {
+        state.finish_edit(rows, true);
+    }
     state.cursor = Some((r, c));
     state.anchor = state.cursor;
-    let Some(row) = rows.get(state.row_index(r)) else {
+    if count == 0 {
         return;
-    };
+    }
     let look = Look::new(ui);
+    let editable = state.is_editable();
+    let focused = ui.memory(|m| m.has_focus(focus_id));
+    let mut edit_done = None;
     egui::ScrollArea::vertical()
         .id_salt(id.with("record"))
         .auto_shrink(false)
@@ -1788,18 +1833,108 @@ fn record_view(
                 .num_columns(3)
                 .spacing([16.0, 6.0])
                 .show(ui, |ui| {
-                    for c in state.visible_columns(columns.len()) {
-                        let col = &columns[c];
-                        ui.label(RichText::new(&col.name).strong());
-                        ui.weak(&col.type_name);
-                        match row.get(c).and_then(|v| v.as_deref()) {
-                            Some(v) => ui.add(egui::Label::new(look.text(v)).wrap()),
-                            None => ui.label(look.null()),
+                    for col in visible {
+                        let column = &columns[col];
+                        ui.label(RichText::new(&column.name).strong());
+                        ui.weak(&column.type_name);
+                        let editing_here = state
+                            .edit
+                            .as_ref()
+                            .and_then(|e| e.active.as_ref())
+                            .is_some_and(|(er, ec, _)| (*er, *ec) == (r, col));
+                        if editing_here
+                            && let Some(edit) = state.edit.as_mut()
+                            && let Some((_, _, text)) = edit.active.as_mut()
+                        {
+                            let response = ui.add(
+                                egui::TextEdit::singleline(text)
+                                    .font(look.font.clone())
+                                    .desired_width(ui.available_width()),
+                            );
+                            if std::mem::take(&mut edit.focus_editor) {
+                                response.request_focus();
+                            }
+                            let (enter, escape) = ui.input(|i| {
+                                (
+                                    i.key_pressed(Key::Enter) || i.key_pressed(Key::Tab),
+                                    i.key_pressed(Key::Escape),
+                                )
+                            });
+                            if escape {
+                                edit_done = Some(false);
+                            } else if enter || response.lost_focus() {
+                                edit_done = Some(true);
+                            }
+                            ui.end_row();
+                            continue;
+                        }
+                        let cell_state = state.cell_state(r, col);
+                        let tint = match cell_state {
+                            CellState::Changed => look.changed_bg,
+                            CellState::Inserted => look.inserted_bg,
+                            CellState::Deleted => look.deleted_bg,
+                            CellState::Clean => egui::Color32::TRANSPARENT,
                         };
+                        let mut text = match state.value(rows, r, col) {
+                            Some(v) => look.text(v),
+                            None => look.null(),
+                        };
+                        if cell_state == CellState::Deleted {
+                            text = text.strikethrough();
+                        }
+                        // The cursor's outline only while the keys come
+                        // here: without, it looks like an open editor.
+                        // Transparent elsewhere, so the text doesn't move.
+                        let mut stroke = look.cursor_stroke;
+                        if col != c || !focused {
+                            stroke.color = egui::Color32::TRANSPARENT;
+                        }
+                        // Top-down: in the cell's centered row layout, the
+                        // frame would keep the height of the row before.
+                        let field = ui
+                            .with_layout(Layout::top_down(Align::Min), |ui| {
+                                egui::Frame::new()
+                                    .fill(tint)
+                                    .stroke(stroke)
+                                    .corner_radius(2.0)
+                                    .inner_margin(egui::Margin::symmetric(4, 1))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.add(egui::Label::new(text).wrap().selectable(!editable))
+                                    })
+                            })
+                            .inner;
+                        // Editable, the whole field takes the clicks;
+                        // read-only, the text stays selectable.
+                        let response = if editable {
+                            ui.interact(
+                                field.response.rect,
+                                id.with(("record-field", col)),
+                                Sense::click(),
+                            )
+                        } else {
+                            field.inner
+                        };
+                        if col == c && state.scroll_to_cursor {
+                            response.scroll_to_me(None);
+                        }
+                        if response.clicked() || response.secondary_clicked() {
+                            state.select((r, col), false);
+                            ui.memory_mut(|m| m.request_focus(focus_id));
+                        }
+                        if response.double_clicked() && editable {
+                            state.start_edit(rows, (r, col), None);
+                        }
+                        response.context_menu(|ui| context_menu(ui, columns, rows, state));
                         ui.end_row();
                     }
                 });
         });
+    state.scroll_to_cursor = false;
+    if let Some(commit) = edit_done {
+        state.finish_edit(rows, commit);
+        ui.memory_mut(|m| m.request_focus(focus_id));
+    }
 }
 
 fn is_temporal(col: &Column) -> bool {
@@ -2398,5 +2533,222 @@ mod tests {
             "{} vs {header_only}",
             state.widths[&0]
         );
+    }
+
+    /// Runs a frame of the grid with `events`: the texts drawn, with their
+    /// centers.
+    fn frame(
+        ctx: &egui::Context,
+        columns: &[Column],
+        rows: &[Vec<Cell>],
+        state: &mut GridState,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, egui::Pos2)> {
+        frame_after(ctx, columns, rows, state, events, 1.0 / 60.0)
+    }
+
+    /// A frame `dt` seconds after the one before.
+    fn frame_after(
+        ctx: &egui::Context,
+        columns: &[Column],
+        rows: &[Vec<Cell>],
+        state: &mut GridState,
+        events: Vec<egui::Event>,
+        dt: f64,
+    ) -> Vec<(String, egui::Pos2)> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            time: Some(ctx.input(|i| i.time) + dt),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            ResultGrid::new(columns, rows, state, "grid").show(ui);
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some((
+                    t.galley.text().to_owned(),
+                    t.pos + t.galley.rect.center().to_vec2(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn texts(drawn: &[(String, egui::Pos2)]) -> Vec<&str> {
+        drawn.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    /// Clicks (twice: double click) the text drawn last frame.
+    fn click(
+        ctx: &egui::Context,
+        columns: &[Column],
+        rows: &[Vec<Cell>],
+        state: &mut GridState,
+        text: &str,
+        times: usize,
+    ) {
+        let drawn = frame(ctx, columns, rows, state, vec![]);
+        let pos = drawn
+            .iter()
+            .find(|(t, _)| t == text)
+            .unwrap_or_else(|| panic!("{text} not in {:?}", texts(&drawn)))
+            .1;
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // Long enough after the clicks before not to count with them.
+        let moved = vec![egui::Event::PointerMoved(pos)];
+        frame_after(ctx, columns, rows, state, moved, 1.0);
+        for _ in 0..times {
+            frame(ctx, columns, rows, state, vec![button(true)]);
+            frame(ctx, columns, rows, state, vec![button(false)]);
+        }
+    }
+
+    fn key(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// The keys keep reaching the grid after the click that focused it
+    /// (#143).
+    #[test]
+    fn keys_reach_the_grid_after_a_click() {
+        let (c, r) = (cols(), rows());
+        let ctx = egui::Context::default();
+        let mut state = GridState::default();
+        click(&ctx, &c, &r, &mut state, "x", 1);
+        assert_eq!(state.cursor, Some((0, 1)));
+        for _ in 0..3 {
+            frame(&ctx, &c, &r, &mut state, vec![]);
+        }
+        frame(&ctx, &c, &r, &mut state, vec![key(Key::ArrowDown)]);
+        assert_eq!(state.cursor, Some((1, 1)));
+        frame(&ctx, &c, &r, &mut state, vec![key(Key::ArrowDown)]);
+        assert_eq!(state.cursor, Some((2, 1)));
+    }
+
+    /// The record view shows the pending edits and the inserted rows, and
+    /// its fields edit like the grid's cells (#141).
+    #[test]
+    fn record_view_edits() {
+        let (c, r) = (cols(), rows());
+        let ctx = egui::Context::default();
+        let mut state = GridState::default();
+        state.set_editable(None);
+        state.edit_cell(&r, 0, 1, Some("changed".into()));
+        state.add_row(&r, 2);
+        state.cursor = Some((0, 1));
+        state.set_record_view(&r, true);
+        let drawn = frame(&ctx, &c, &r, &mut state, vec![]);
+        let shown = texts(&drawn);
+        assert!(shown.contains(&"Record 1 of 4"), "{shown:?}");
+        assert!(
+            shown.contains(&"changed") && !shown.contains(&"x"),
+            "{shown:?}"
+        );
+
+        // Typing on a field edits it, Enter keeps the value.
+        click(&ctx, &c, &r, &mut state, "10", 1);
+        assert_eq!(state.cursor, Some((0, 0)));
+        frame(
+            &ctx,
+            &c,
+            &r,
+            &mut state,
+            vec![egui::Event::Text("7".into())],
+        );
+        assert!(texts(&frame(&ctx, &c, &r, &mut state, vec![])).contains(&"7"));
+        frame(&ctx, &c, &r, &mut state, vec![key(Key::Enter)]);
+        let changes = state.changes().unwrap();
+        assert_eq!(changes.updates[&0][&0].as_deref(), Some("7"));
+        assert!(state.edit.as_ref().unwrap().active.is_none());
+
+        // A double click opens the editor, Escape drops it.
+        click(&ctx, &c, &r, &mut state, "changed", 2);
+        let active = state.edit.as_ref().unwrap().active.clone();
+        assert_eq!(active, Some((0, 1, "changed".into())));
+        frame(&ctx, &c, &r, &mut state, vec![]);
+        frame(&ctx, &c, &r, &mut state, vec![key(Key::Escape)]);
+        assert!(state.edit.as_ref().unwrap().active.is_none());
+        assert_eq!(
+            state.changes().unwrap().updates[&0][&1].as_deref(),
+            Some("changed")
+        );
+
+        // Going to another record keeps an open edit; the inserted row is
+        // the last record.
+        state.start_edit(&r, (0, 1), Some("kept".into()));
+        for _ in 0..3 {
+            click(&ctx, &c, &r, &mut state, "▶", 1);
+        }
+        assert_eq!(
+            state.changes().unwrap().updates[&0][&1].as_deref(),
+            Some("kept")
+        );
+        let shown = frame(&ctx, &c, &r, &mut state, vec![]);
+        let shown = texts(&shown);
+        assert!(shown.contains(&"Record 4 of 4"), "{shown:?}");
+        assert!(shown.contains(&"New row"), "{shown:?}");
+        click(&ctx, &c, &r, &mut state, "NULL", 2);
+        frame(&ctx, &c, &r, &mut state, vec![]);
+        state.edit.as_mut().unwrap().active.as_mut().unwrap().2 = "11".into();
+        frame(&ctx, &c, &r, &mut state, vec![key(Key::Enter)]);
+        assert_eq!(
+            state.changes().unwrap().inserts[0][0].as_deref(),
+            Some("11")
+        );
+
+        // The filter leaves out the same rows as in the grid.
+        state.set_filter("a");
+        state.cursor = Some((5, 0));
+        let shown = frame(&ctx, &c, &r, &mut state, vec![]);
+        let shown = texts(&shown);
+        assert!(shown.contains(&"Record 2 of 2"), "{shown:?}");
+        assert!(shown.contains(&"11"), "{shown:?}");
+
+        // Switching views keeps an open edit.
+        state.start_edit(&r, (0, 1), Some("b".into()));
+        state.set_record_view(&r, false);
+        assert!(state.edit.as_ref().unwrap().active.is_none());
+        assert_eq!(
+            state.changes().unwrap().updates[&1][&1].as_deref(),
+            Some("b")
+        );
+    }
+
+    /// A value wraps in the record view's first frame, when its column is
+    /// still narrow; the field is one line high again after that.
+    #[test]
+    fn record_view_rows_fit_their_fields() {
+        let columns = cols();
+        let rows = vec![vec![Some("1".into()), Some("2020-01-01 00:00:00".into())]];
+        let ctx = egui::Context::default();
+        let mut state = GridState::default();
+        state.set_editable(None);
+        state.record_view = true;
+        let mut drawn = Vec::new();
+        for _ in 0..3 {
+            drawn = frame(&ctx, &columns, &rows, &mut state, vec![]);
+        }
+        let y = |text: &str| drawn.iter().find(|(t, _)| t == text).unwrap().1.y;
+        let (a, b) = (y("A"), y("B"));
+        assert!(b - a < 40.0, "A at {a}, B at {b}");
     }
 }

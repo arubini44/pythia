@@ -465,6 +465,26 @@ fn data_editing() {
             .edit_cell(&rows, 1, 2, Some("2021-02-03 04:05:06".into()));
     }
     save(&mut h, "06-editing-dark");
+    // The single record view shows the pending values and edits them too
+    // (#141).
+    h.state_mut().test_sql_window().state.results[0]
+        .grid
+        .record_view = true;
+    h.run_steps(2);
+    save(&mut h, "06-editing-record-dark");
+    // Typing on a field replaces its value, Enter keeps it.
+    h.get_by_label("uno").click();
+    h.run();
+    h.event(egui::Event::Text("eins".into()));
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    {
+        let r = &mut h.state_mut().test_sql_window().state.results[0];
+        let changes = r.grid.changes().unwrap();
+        assert_eq!(changes.updates[&0][&1].as_deref(), Some("eins"));
+        r.grid.record_view = false;
+    }
     {
         let w = h.state_mut().test_sql_window();
         let r = &mut w.state.results[0];
@@ -516,7 +536,7 @@ fn data_editing() {
             "{messages:?}"
         );
         let r = &w.state.results[0];
-        assert_eq!(r.rows[0][1].as_deref(), Some("uno"));
+        assert_eq!(r.rows[0][1].as_deref(), Some("eins"));
         assert_eq!(r.rows[1][2].as_deref(), Some("2021-02-03 04:05:06"));
         assert!(r.grid.changes().is_some_and(|c| c.is_empty()));
     }
