@@ -7,6 +7,12 @@ All notable changes to Pythia are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- On MySQL/MariaDB the object browser remembers the database you last
+  picked for each connection (#133). When the connection comes up without
+  one, it opens that database again, and SQL windows run in it. A database
+  set in the profile (in the address, as default schema, or by the login
+  script) still wins. If the remembered database is gone, the log says so
+  and it is forgotten.
 - **Monitor → Sessions** and **Blocking Sessions** for MySQL/MariaDB,
   PostgreSQL and SQL Server (#131). Every session is listed, idle ones too
   (the server's own with *Background*), with its user, host, database,

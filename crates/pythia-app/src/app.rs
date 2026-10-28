@@ -5484,12 +5484,18 @@ mod workspace_tests {
             object_type: pythia_db::ObjectType::Table,
         };
         app.browser.marks.touch("hr@db", object.clone());
+        app.browser
+            .marks
+            .databases
+            .insert("shop@mysql".into(), "shop".into());
         app.docs.clear();
         app.dock = DockState::new(vec![]);
         eframe::App::save(&mut app, &mut storage);
 
         let app = start(&storage);
         assert_eq!(app.browser.marks.recent.get("hr@db"), Some(&vec![object]));
+        // The database last picked in the browser (#133).
+        assert_eq!(app.browser.marks.databases["shop@mysql"], "shop");
         assert_eq!(app.docs.len(), 1, "a new SQL window");
     }
 

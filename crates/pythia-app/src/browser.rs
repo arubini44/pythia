@@ -78,12 +78,16 @@ impl Section {
     }
 }
 
-/// Favorite and recently opened objects per connection; saved with the
-/// workspace.
+/// Favorite and recently opened objects per connection, and the database
+/// last picked; saved with the workspace.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Marks {
     pub favorites: std::collections::BTreeMap<String, Vec<ObjectRef>>,
     pub recent: std::collections::BTreeMap<String, Vec<ObjectRef>>,
+    /// MySQL: the browser opens it again when the connection comes up
+    /// without a database of its own (#133).
+    #[serde(default)]
+    pub databases: std::collections::BTreeMap<String, String>,
 }
 
 impl Marks {
@@ -298,6 +302,34 @@ impl Browser {
         !self.pending.is_empty()
     }
 
+    /// The database last picked, if the connection came up without one
+    /// (MySQL): opened once the list shows it's still there. A database
+    /// from the profile (address, default schema, login script) wins.
+    fn last_database(&self) -> Option<&String> {
+        if self.dialect != Dialect::MYSQL || self.schema.as_deref() != Some("") {
+            return None;
+        }
+        self.marks.databases.get(self.connection.as_ref()?)
+    }
+
+    /// Opens the database last picked once the list is in, or forgets it
+    /// when it's gone (dropped, or no longer granted).
+    fn open_last_database(&mut self, effects: &mut Effects, log: &mut Vec<String>) {
+        let (Some(database), Some(Loaded::Ready(list))) = (self.last_database(), &self.schemas)
+        else {
+            return;
+        };
+        let database = database.clone();
+        if list.contains(&database) {
+            self.set_schema(database, effects);
+        } else if let Some(connection) = &self.connection {
+            log.push(format!(
+                "{connection}: database {database}, last used, isn't there anymore"
+            ));
+            self.marks.databases.remove(connection);
+        }
+    }
+
     /// Whether a user has a schema to show: on Oracle each user is one, on
     /// PostgreSQL one may have the user's name. MySQL's databases and SQL
     /// Server's schemas aren't users'.
@@ -320,9 +352,15 @@ impl Browser {
         if self.schema.as_ref() == Some(&schema) {
             return;
         }
-        // On MySQL the database picked here is the one statements run in.
+        // On MySQL the database picked here is the one statements run in,
+        // and the one to start in next time.
         if self.dialect == Dialect::MYSQL {
             effects.database = Some(schema.clone());
+            if let Some(connection) = &self.connection {
+                self.marks
+                    .databases
+                    .insert(connection.clone(), schema.clone());
+            }
         }
         self.schema = Some(schema);
         self.expanded.retain(|n| matches!(n, Node::Folder(..)));
@@ -664,7 +702,8 @@ impl Browser {
                 {
                     s.insert(at, "PUBLIC".into());
                 }
-                self.schemas = Some(Loaded::Ready(s))
+                self.schemas = Some(Loaded::Ready(s));
+                self.open_last_database(&mut effects, log);
             }
             (Pending::Schemas, Err(e)) => self.schemas = Some(Loaded::Failed(e.to_string())),
             (Pending::Folder(owner, t), Ok(Some(MetaResult::Objects(objects)))) => {
@@ -850,6 +889,12 @@ impl Browser {
         ui.add_space(2.0);
 
         let owner = self.schema.clone().unwrap_or_default();
+        if self.last_database().is_some() && matches!(self.schemas, Some(Loaded::Loading)) {
+            // The database last used opens once the list is in.
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| ui.spinner());
+            return effects;
+        }
         if owner.is_empty() && self.dialect == Dialect::MYSQL {
             // A connection without a database (none in its address or
             // profile): statements need one too.
@@ -2337,6 +2382,51 @@ mod tests {
         };
         assert_eq!(schemas(Dialect::ORACLE), ["HR", "PUBLIC", "SCOTT"]);
         assert_eq!(schemas(Dialect::MYSQL), ["HR", "SCOTT"]);
+    }
+
+    /// A MySQL connection without a database starts in the one last picked,
+    /// if it's still there; one from the profile wins (#133).
+    #[test]
+    fn opens_the_database_last_picked() {
+        // Connects with `current` as the database and loads the list.
+        let connect = |marks: Marks, current: &str| {
+            let mut browser = Browser {
+                marks,
+                ..Browser::default()
+            };
+            let effects = browser.attach("c".into(), current.into(), Dialect::MYSQL);
+            let (_, DbRequest::Meta { id, .. }) = &effects.requests[0] else {
+                panic!("no schema request");
+            };
+            let result = Ok(MetaResult::Schemas(vec!["shop".into(), "sys".into()]));
+            let mut log = Vec::new();
+            let effects = browser.on_event(DbEvent::Meta { id: *id, result }, &mut log);
+            (browser, effects.database, log)
+        };
+
+        let mut browser = Browser::default();
+        browser.attach("c".into(), String::new(), Dialect::MYSQL);
+        browser.set_schema("shop".into(), &mut Effects::default());
+        let marks = browser.marks;
+        assert_eq!(marks.databases["c"], "shop");
+
+        let (browser, database, log) = connect(marks.clone(), "");
+        assert_eq!(browser.schema.as_deref(), Some("shop"));
+        assert_eq!(database.as_deref(), Some("shop"), "sessions switch too");
+        assert!(log.is_empty(), "{log:?}");
+
+        let (browser, database, _) = connect(marks.clone(), "sys");
+        assert_eq!(browser.schema.as_deref(), Some("sys"), "the profile's");
+        assert_eq!(database, None);
+        assert_eq!(browser.marks.databases["c"], "shop", "kept for next time");
+
+        let mut gone = marks;
+        gone.databases.insert("c".into(), "old".into());
+        let (browser, database, log) = connect(gone, "");
+        assert_eq!(browser.schema.as_deref(), Some(""));
+        assert_eq!(database, None);
+        assert_eq!(log, ["c: database old, last used, isn't there anymore"]);
+        assert!(browser.marks.databases.is_empty(), "forgotten");
     }
 
     #[test]
