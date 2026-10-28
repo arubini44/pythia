@@ -5303,7 +5303,7 @@ fn mysql_database_from_the_browser() {
         ..Default::default()
     };
     let mut h = harness(true);
-    h.state_mut().test_connect(profile, password.into());
+    h.state_mut().test_connect(profile.clone(), password.into());
     wait_until(&mut h, "connection", |app| app.test_connected());
     h.run_steps(2);
     assert!(
@@ -5361,6 +5361,40 @@ fn mysql_database_from_the_browser() {
     assert_eq!(current(&mut h).as_deref(), Some(database), "a new window");
     assert_eq!(shown(&h, &format!("nodb@mysql · {database}")), 2);
     assert!(h.query_by_label("No database selected").is_none());
+
+    // Connected again, it starts in the database picked last (#133).
+    let picked = format!("nodb@mysql: database {database}");
+    let picks = |app: &PythiaApp| app.test_log().iter().filter(|l| **l == picked).count();
+    h.state_mut().test_connect(profile.clone(), password.into());
+    wait_until(&mut h, "the database picked last", |app| {
+        app.test_connected() && picks(app) == 2
+    });
+    assert_eq!(current(&mut h).as_deref(), Some(database), "again");
+    assert_eq!(shown(&h, &format!("nodb@mysql · {database}")), 2);
+    assert!(h.query_by_label("No database selected").is_none());
+
+    // A database from the profile wins.
+    let profile = ConnectionProfile {
+        default_schema: "information_schema".into(),
+        ..profile
+    };
+    h.state_mut().test_connect(profile, password.into());
+    wait_until(&mut h, "connection", |app| {
+        app.test_connected() && !app.test_browser_loading()
+    });
+    assert_eq!(
+        current(&mut h).as_deref(),
+        Some("information_schema"),
+        "the profile's"
+    );
+    assert_eq!(picks(h.state()), 2);
+    assert_eq!(shown(&h, "nodb@mysql · information_schema"), 2);
+    let marks = &h.state_mut().test_browser().marks;
+    assert_eq!(
+        marks.databases.get("nodb@mysql").map(String::as_str),
+        Some(database),
+        "kept for a profile without one"
+    );
 }
 
 /// A MySQL connection (`PYTHIA_TEST_MYSQL=user/password@host:port/database`):
