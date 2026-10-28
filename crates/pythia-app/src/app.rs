@@ -592,6 +592,13 @@ impl PythiaApp {
             .is_some_and(|c| c.profile.read_only)
     }
 
+    /// Whether a connection's profile is marked as production.
+    fn production_of(&self, connection: Option<&str>) -> bool {
+        connection
+            .and_then(|c| self.conns.get(c))
+            .is_some_and(|c| c.profile.production)
+    }
+
     fn doc_context(&self, id: DocId) -> DocContext<'_> {
         let connected = self
             .docs
@@ -613,6 +620,8 @@ impl PythiaApp {
             privilege: None,
             dialect: self.dialect_of(self.docs.get(&id).and_then(|d| d.connection.as_deref())),
             read_only: self.read_only_of(self.docs.get(&id).and_then(|d| d.connection.as_deref())),
+            production: self
+                .production_of(self.docs.get(&id).and_then(|d| d.connection.as_deref())),
         }
     }
 
@@ -717,6 +726,28 @@ impl PythiaApp {
                         Some(connection),
                         DocKind::Program(ProgramWindow::new(object)),
                     );
+                }
+            }
+            OpenRequest::Maintenance { connection, object } => {
+                let existing = self.docs.iter().find_map(|(id, d)| match &d.kind {
+                    DocKind::Maintenance(w)
+                        if d.connection.as_deref() == Some(connection.as_str())
+                            && w.object == object =>
+                    {
+                        Some(*id)
+                    }
+                    _ => None,
+                });
+                match existing {
+                    Some(id) => self.open_tab(Tab::Doc(id)),
+                    None => {
+                        self.add_doc(
+                            Some(connection),
+                            DocKind::Maintenance(crate::maintenance::MaintenanceWindow::new(
+                                object,
+                            )),
+                        );
+                    }
                 }
             }
             OpenRequest::InvalidObjects {
@@ -2079,13 +2110,14 @@ impl PythiaApp {
 
     fn deliver(&mut self, id: DocId, event: DbEvent) {
         let cx = self.doc_context(id);
-        let (settings, connected, fetch_size, connection, dialect, read_only) = (
+        let (settings, connected, fetch_size, connection, dialect, read_only, production) = (
             cx.settings.clone(),
             cx.connected,
             cx.fetch_size,
             cx.connection.clone(),
             cx.dialect,
             cx.read_only,
+            cx.production,
         );
         let Some(doc) = self.docs.get_mut(&id) else {
             return;
@@ -2105,6 +2137,7 @@ impl PythiaApp {
             privilege: None,
             dialect,
             read_only,
+            production,
         };
         let effects = doc.on_event(event, &cx);
         self.apply(Some(id), effects);
@@ -2666,6 +2699,7 @@ impl PythiaApp {
             .and_then(|c| self.conns.get(c))
             .map(|c| c.profile.clone());
         let read_only = profile.as_ref().is_some_and(|p| p.read_only);
+        let production = profile.as_ref().is_some_and(|p| p.production);
         // Production: confirm statements that change something.
         if profile.as_ref().is_some_and(|p| p.production)
             && !std::mem::take(&mut self.production_confirmed)
@@ -2714,6 +2748,7 @@ impl PythiaApp {
             privilege: None,
             dialect,
             read_only,
+            production,
         };
         let effects = match &mut doc.kind {
             DocKind::Sql(w) => {
@@ -2756,14 +2791,16 @@ impl PythiaApp {
     }
 
     /// Whether a window's session commits after each statement: SQL windows
-    /// with auto-commit on in the settings, except on production connections.
+    /// with auto-commit on in the settings, except on production
+    /// connections, and maintenance windows.
     fn autocommit_for(&self, id: DocId, conn: &Connection) -> bool {
-        self.settings.autocommit
-            && !conn.profile.production
-            && self
-                .docs
-                .get(&id)
-                .is_some_and(|d| matches!(d.kind, DocKind::Sql(_)))
+        match self.docs.get(&id).map(|d| &d.kind) {
+            Some(DocKind::Sql(_)) => self.settings.autocommit && !conn.profile.production,
+            // Its statements commit each (DDL and DBMS_STATS do anyway);
+            // VACUUM and REINDEX CONCURRENTLY refuse a transaction block.
+            Some(DocKind::Maintenance(_)) => true,
+            _ => false,
+        }
     }
 
     /// Brings the open window sessions in line with the auto-commit setting.
@@ -4305,6 +4342,13 @@ impl eframe::App for PythiaApp {
             .filter(|(_, c)| c.profile.read_only)
             .map(|(n, _)| n.clone())
             .collect();
+        let production: HashSet<String> = self
+            .conns
+            .open
+            .iter()
+            .filter(|(_, c)| c.profile.production)
+            .map(|(n, _)| n.clone())
+            .collect();
         self.assistant.poll();
         self.poll_ai_format();
         let focused_title = self
@@ -4323,6 +4367,7 @@ impl eframe::App for PythiaApp {
             privileges: &privileges,
             dialects: &dialects,
             read_only: &read_only,
+            production: &production,
             connected: &connected,
             catalogs: &self.catalogs,
             catalog_revision: self.catalog_revision,
@@ -4573,6 +4618,7 @@ impl PythiaApp {
         let connection = self.docs[&id].connection.clone();
         let dialect = self.dialect_of(connection.as_deref());
         let read_only = self.read_only_of(connection.as_deref());
+        let production = self.production_of(connection.as_deref());
         let settings = self.settings.clone();
         let cx = DocContext {
             id,
@@ -4588,6 +4634,7 @@ impl PythiaApp {
             privilege: None,
             dialect,
             read_only,
+            production,
         };
         let effects = f(self.test_sql_window(), &cx);
         self.apply(Some(id), effects);
@@ -4632,6 +4679,7 @@ impl PythiaApp {
             privilege: None,
             dialect: Dialect::ORACLE,
             read_only: false,
+            production: false,
         };
         let Some(DocKind::DataSearch(s)) = self.docs.get_mut(&id).map(|d| &mut d.kind) else {
             panic!("not a data search");
@@ -4725,6 +4773,14 @@ impl PythiaApp {
         match self.docs.get_mut(&self.focused?).map(|d| &mut d.kind) {
             Some(DocKind::Program(w)) => w.active_editor(),
             _ => None,
+        }
+    }
+
+    pub fn test_maintenance_window(&mut self) -> &mut crate::maintenance::MaintenanceWindow {
+        let id = self.focused.expect("focused document");
+        match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+            Some(DocKind::Maintenance(m)) => m,
+            _ => panic!("not a maintenance window"),
         }
     }
 
@@ -4990,6 +5046,8 @@ struct Viewer<'a> {
     dialects: &'a HashMap<String, Dialect>,
     /// Connections whose profile is read-only.
     read_only: &'a HashSet<String>,
+    /// Connections whose profile is marked as production.
+    production: &'a HashSet<String>,
     connected: &'a HashMap<String, bool>,
     catalogs: &'a HashMap<String, pythia_lsp_core::CatalogCache>,
     catalog_revision: u64,
@@ -5157,6 +5215,10 @@ impl TabViewer for Viewer<'_> {
                         .connection
                         .as_ref()
                         .is_some_and(|c| self.read_only.contains(c)),
+                    production: doc
+                        .connection
+                        .as_ref()
+                        .is_some_and(|c| self.production.contains(c)),
                 };
                 let effects = doc.ui(ui, &cx);
                 self.effects.push((*id, effects));

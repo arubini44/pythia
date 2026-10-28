@@ -448,6 +448,7 @@ fn data_editing() {
             privilege: None,
             dialect: Default::default(),
             read_only: false,
+            production: false,
         };
         let effects = app.test_sql_window().start_editing(0, &cx);
         app.test_apply(effects);
@@ -522,6 +523,7 @@ fn data_editing() {
             privilege: None,
             dialect: Default::default(),
             read_only: false,
+            production: false,
         };
         let effects = app.test_sql_window().apply_changes(0, &cx);
         app.test_apply(effects);
@@ -6144,4 +6146,368 @@ fn wait_for_source(harness: &mut Harness<'_, PythiaApp>) {
         std::thread::sleep(Duration::from_millis(15));
     }
     harness.run_steps(3);
+}
+
+/// Runs `task` in the focused maintenance window (after `options`) and
+/// waits until it is done and the state is read again: (outcome, whether
+/// it went well, each statement's messages).
+fn run_maintenance(
+    h: &mut Harness<'_, PythiaApp>,
+    dialect: pythia_db::Dialect,
+    task: crate::maintenance::Task,
+    options: impl FnOnce(&mut crate::maintenance::Options),
+) -> (String, bool, Vec<Vec<String>>) {
+    let window = h.state_mut().test_maintenance_window();
+    window.task = Some(task);
+    options(&mut window.options);
+    let effects = window.run_for_test(dialect);
+    h.state_mut().test_apply(effects);
+    h.run_steps(2);
+    wait_until(h, task.label(dialect), |app| !app.test_focused_busy());
+    let (outcome, messages) = h.state_mut().test_maintenance_window().outcome_for_test();
+    let (text, ok) = outcome.expect("an outcome");
+    (text, ok, messages)
+}
+
+/// A line of the focused maintenance window's state: (value, warning).
+fn maintenance_fact(h: &mut Harness<'_, PythiaApp>, label: &str) -> Option<(String, bool)> {
+    let facts = h.state_mut().test_maintenance_window().facts_for_test()?;
+    let fact = facts.state.iter().find(|f| f.label == label)?;
+    Some((fact.value.clone(), fact.warn))
+}
+
+/// Opens the maintenance window of `object` and waits for its state.
+fn open_maintenance(h: &mut Harness<'_, PythiaApp>, connection: &str, object: ObjectRef) {
+    h.state_mut().test_open(OpenRequest::Maintenance {
+        connection: connection.into(),
+        object,
+    });
+    h.run_steps(2);
+    wait_until(h, "maintenance state", |app| !app.test_focused_busy());
+}
+
+/// Runs a script in a new SQL window and closes it.
+fn run_script(h: &mut Harness<'_, PythiaApp>, connection: &str, sql: &str) {
+    h.state_mut().test_open(OpenRequest::Sql {
+        connection: connection.into(),
+        text: sql.into(),
+        run: true,
+    });
+    wait_until(h, sql, |app| !app.test_focused_busy());
+    h.state_mut().test_close_focused();
+}
+
+/// Maintenance of an Oracle table and index (#144): an offline move leaves
+/// the indexes unusable, which the window shows and rebuilds; statistics
+/// are gathered, locked (gathering then needs force) and unlocked; the
+/// table shrinks and moves online; the index rebuilds.
+#[test]
+fn maintenance_oracle() {
+    use crate::maintenance::Task;
+    use pythia_db::{Dialect, ObjectType};
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let owner = profile.username.to_uppercase();
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let connection = "pythia@FREEPDB1";
+    run_script(
+        &mut h,
+        connection,
+        "begin
+  for t in (select table_name from user_tables where table_name = 'PYTHIA_MT_ORDERS') loop
+    execute immediate 'drop table ' || t.table_name || ' purge';
+  end loop;
+end;
+/
+create table pythia_mt_orders (id number primary key, note varchar2(100));
+create index pythia_mt_orders_ix on pythia_mt_orders (note);
+insert into pythia_mt_orders select level, 'order ' || level from dual connect by level <= 2000;
+commit;
+alter table pythia_mt_orders move;",
+    );
+    let table = ObjectRef {
+        owner: owner.clone(),
+        name: "PYTHIA_MT_ORDERS".into(),
+        object_type: ObjectType::Table,
+    };
+    open_maintenance(&mut h, connection, table);
+    assert_eq!(
+        h.state().test_focused_title().as_deref(),
+        Some("pythia_mt_orders maintenance")
+    );
+    let window = h.state().test_focused();
+    assert_eq!(
+        maintenance_fact(&mut h, "Indexes"),
+        Some(("2, 2 indexes unusable".into(), true))
+    );
+    assert_eq!(
+        maintenance_fact(&mut h, "Statistics gathered"),
+        Some(("never".into(), true))
+    );
+
+    // The unusable indexes rebuild, online (Free has it).
+    h.state_mut().test_maintenance_window().task = Some(Task::RebuildUnusable);
+    let statements = h
+        .state_mut()
+        .test_maintenance_window()
+        .statements_for_test(Dialect::ORACLE)
+        .unwrap();
+    assert_eq!(statements.len(), 2, "{statements:?}");
+    assert!(statements.contains(&format!(
+        "alter index {owner}.PYTHIA_MT_ORDERS_IX rebuild online"
+    )));
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::RebuildUnusable, |_| {});
+    assert!(ok, "{text}");
+    assert_eq!(
+        maintenance_fact(&mut h, "Indexes"),
+        Some(("2".into(), false))
+    );
+
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::GatherStats, |_| {});
+    assert!(ok, "{text}");
+    assert_eq!(
+        maintenance_fact(&mut h, "Rows (statistics)"),
+        Some(("2,000".into(), false))
+    );
+    let (gathered, warn) = maintenance_fact(&mut h, "Statistics gathered").unwrap();
+    assert!(gathered.ends_with(" ago") && !warn, "{gathered}");
+
+    // Locked statistics are only gathered with force.
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::LockStats, |_| {});
+    assert!(ok, "{text}");
+    assert_eq!(
+        maintenance_fact(&mut h, "Statistics locked"),
+        Some(("yes".into(), true))
+    );
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::GatherStats, |o| {
+        o.force = false;
+    });
+    assert!(!ok && text.contains("ORA-20005"), "{text}");
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::GatherStats, |o| {
+        o.force = true;
+    });
+    assert!(ok, "{text}");
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::UnlockStats, |_| {});
+    assert!(ok, "{text}");
+    assert_eq!(maintenance_fact(&mut h, "Statistics locked"), None);
+
+    // Half the rows go; the table shrinks (with row movement for as long
+    // as it takes) and moves online, keeping its indexes usable.
+    run_script(
+        &mut h,
+        connection,
+        "delete from pythia_mt_orders where mod(id, 2) = 0;\ncommit;",
+    );
+    h.state_mut().test_focus(window);
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::Shrink, |_| {});
+    assert!(ok, "{text}");
+    assert_eq!(
+        maintenance_fact(&mut h, "Row movement"),
+        Some(("disabled".into(), false))
+    );
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::Move, |o| {
+        o.online = true;
+    });
+    assert!(ok, "{text}");
+    assert_eq!(
+        maintenance_fact(&mut h, "Indexes"),
+        Some(("2".into(), false))
+    );
+    h.state_mut().test_maintenance_window().task = Some(Task::GatherStats);
+    h.run_steps(2);
+    save(&mut h, "maintenance");
+
+    // The index on its own.
+    let index = ObjectRef {
+        owner: owner.clone(),
+        name: "PYTHIA_MT_ORDERS_IX".into(),
+        object_type: ObjectType::Index,
+    };
+    open_maintenance(&mut h, connection, index);
+    assert_eq!(
+        maintenance_fact(&mut h, "Status"),
+        Some(("valid".into(), false))
+    );
+    h.state_mut().test_maintenance_window().task = Some(Task::RebuildIndex);
+    assert_eq!(
+        h.state_mut()
+            .test_maintenance_window()
+            .statements_for_test(Dialect::ORACLE)
+            .unwrap(),
+        [format!(
+            "alter index {owner}.PYTHIA_MT_ORDERS_IX rebuild online"
+        )]
+    );
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::RebuildIndex, |_| {});
+    assert!(ok, "{text}");
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::ORACLE, Task::Shrink, |_| {});
+    assert!(ok, "{text}");
+
+    run_script(&mut h, connection, "drop table pythia_mt_orders purge;");
+}
+
+/// Maintenance of a PostgreSQL table (#144): VACUUM (with VERBOSE's
+/// messages), ANALYZE and REINDEX CONCURRENTLY, which refuses a
+/// transaction block: the window's session autocommits.
+#[test]
+fn maintenance_postgres() {
+    use crate::maintenance::Task;
+    use pythia_db::{Dialect, ObjectType};
+    let connection = "pythia@postgres";
+    let Some(mut h) = connect_to(
+        "PYTHIA_TEST_POSTGRES",
+        connection,
+        pythia_config::DbKind::Postgres,
+    ) else {
+        return;
+    };
+    run_script(
+        &mut h,
+        connection,
+        "drop table if exists pythia_mt_orders;
+create table pythia_mt_orders (id int primary key, note text);
+create index pythia_mt_orders_note on pythia_mt_orders (note);
+insert into pythia_mt_orders select g, 'order ' || g from generate_series(1, 5000) g;
+delete from pythia_mt_orders where id % 2 = 0;
+commit;",
+    );
+    let table = ObjectRef {
+        owner: "public".into(),
+        name: "pythia_mt_orders".into(),
+        object_type: ObjectType::Table,
+    };
+    open_maintenance(&mut h, connection, table);
+    assert_eq!(
+        maintenance_fact(&mut h, "Indexes"),
+        Some(("2".into(), false))
+    );
+    let (text, ok, messages) = run_maintenance(&mut h, Dialect::POSTGRES, Task::Vacuum, |o| {
+        o.analyze = true;
+        o.verbose = true;
+    });
+    assert!(ok, "{text}");
+    assert!(
+        messages[0].iter().any(|m| m.contains("pythia_mt_orders")),
+        "{messages:?}"
+    );
+    let (vacuumed, _) = maintenance_fact(&mut h, "Last vacuum").unwrap();
+    assert!(vacuumed.contains(" ago"), "{vacuumed}");
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::POSTGRES, Task::Reindex, |o| {
+        o.concurrently = true;
+    });
+    assert!(ok, "{text}");
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::POSTGRES, Task::Analyze, |o| {
+        o.verbose = false;
+    });
+    assert!(ok, "{text}");
+    let (text, ok, _) = run_maintenance(&mut h, Dialect::POSTGRES, Task::Vacuum, |o| {
+        o.full = true;
+        o.verbose = false;
+    });
+    assert!(ok, "{text}");
+    run_script(&mut h, connection, "drop table pythia_mt_orders;");
+}
+
+/// Maintenance of a MySQL table (#144): ANALYZE, OPTIMIZE and CHECK TABLE
+/// answer with rows, shown as messages.
+#[test]
+fn maintenance_mysql() {
+    use crate::maintenance::Task;
+    use pythia_db::{Dialect, ObjectType};
+    let connection = "pythia@mysql";
+    let Some(spec) = std::env::var("PYTHIA_TEST_MYSQL").ok() else {
+        return;
+    };
+    let database = spec.rsplit('/').next().unwrap_or_default().to_owned();
+    let Some(mut h) = connect_to(
+        "PYTHIA_TEST_MYSQL",
+        connection,
+        pythia_config::DbKind::MySql,
+    ) else {
+        return;
+    };
+    run_script(
+        &mut h,
+        connection,
+        "drop table if exists pythia_mt_orders;
+create table pythia_mt_orders (id int primary key, note varchar(100), key (note));
+insert into pythia_mt_orders values (1, 'one'), (2, 'two'), (3, 'three');
+commit;",
+    );
+    let table = ObjectRef {
+        owner: database,
+        name: "pythia_mt_orders".into(),
+        object_type: ObjectType::Table,
+    };
+    open_maintenance(&mut h, connection, table);
+    assert_eq!(
+        maintenance_fact(&mut h, "Engine"),
+        Some(("InnoDB".into(), false))
+    );
+    for task in [Task::Analyze, Task::Optimize, Task::Check] {
+        let (text, ok, messages) = run_maintenance(&mut h, Dialect::MYSQL, task, |_| {});
+        assert!(ok, "{task:?}: {text}");
+        assert!(
+            messages[0].iter().any(|m| m == "status: OK"),
+            "{task:?}: {messages:?}"
+        );
+    }
+    run_script(&mut h, connection, "drop table pythia_mt_orders;");
+}
+
+/// Maintenance of a SQL Server table (#144): statistics with a full scan,
+/// rebuilding and reorganizing its indexes.
+#[test]
+fn maintenance_sqlserver() {
+    use crate::maintenance::Task;
+    use pythia_db::{Dialect, ObjectType};
+    let connection = "pythia@sqlserver";
+    let Some(mut h) = connect_to(
+        "PYTHIA_TEST_MSSQL",
+        connection,
+        pythia_config::DbKind::SqlServer,
+    ) else {
+        return;
+    };
+    run_script(
+        &mut h,
+        connection,
+        "drop table if exists pythia_mt_orders;
+create table pythia_mt_orders (id int primary key, note varchar(100));
+create index pythia_mt_orders_note on pythia_mt_orders (note);
+insert into pythia_mt_orders
+select top 5000 row_number() over (order by (select null)), 'order'
+  from sys.all_objects a cross join sys.all_objects b;
+commit;",
+    );
+    let table = ObjectRef {
+        owner: "dbo".into(),
+        name: "pythia_mt_orders".into(),
+        object_type: ObjectType::Table,
+    };
+    open_maintenance(&mut h, connection, table);
+    assert_eq!(
+        maintenance_fact(&mut h, "Rows"),
+        Some(("5,000".into(), false))
+    );
+    assert_eq!(
+        maintenance_fact(&mut h, "Indexes"),
+        Some(("2".into(), false))
+    );
+    for task in [
+        Task::UpdateStatistics,
+        Task::RebuildIndexes,
+        Task::ReorganizeIndexes,
+    ] {
+        let (text, ok, _) = run_maintenance(&mut h, Dialect::SQLSERVER, task, |o| {
+            o.fullscan = true;
+        });
+        assert!(ok, "{task:?}: {text}");
+    }
+    // Each statement committed: nothing waits in the window's session.
+    assert!(!h.state().test_pending_tx());
+    run_script(&mut h, connection, "drop table pythia_mt_orders;");
 }

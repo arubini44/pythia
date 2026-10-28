@@ -171,6 +171,18 @@ for Linux, Windows and macOS.
   date formats), import into a new or existing table with array DML.
   Per column: trim, date format, SQL expression (`upper(:value)`,
   constants); bad rows can be skipped and logged to `<file>.bad.csv`.
+- **Maintenance** of a table, materialized view or index (right-click →
+  *Maintenance…*), on every database. Its state comes first: when its
+  statistics were gathered and whether they are stale or locked, and
+  unusable indexes and partitions on Oracle; dead rows and the last
+  (auto)vacuum on PostgreSQL; reclaimable space on MySQL; fragmentation on
+  SQL Server. Then the database's tasks, with their options and what they
+  lock: gather, delete, lock or unlock statistics, rebuild unusable indexes,
+  shrink, move (online); `VACUUM`, `ANALYZE`, `REINDEX CONCURRENTLY`;
+  `ANALYZE`, `OPTIMIZE` and `CHECK TABLE`; `UPDATE STATISTICS`, rebuild or
+  reorganize indexes. The statements run one by one on the window's own
+  session, which commits each, with Break; production connections ask
+  first.
 
 **Reports**
 - Built-in reports (invalid objects, unindexed foreign keys, largest

@@ -2901,6 +2901,7 @@ mod tests {
             privilege: None,
             dialect: pythia_db::Dialect::MYSQL,
             read_only,
+            production: false,
         };
         let column = |name: &str| Column {
             name: name.into(),
@@ -3121,6 +3122,7 @@ mod tests {
                 privilege: None,
                 dialect: pythia_db::Dialect::ORACLE,
                 read_only: false,
+                production: false,
             }
         }
         let settings = pythia_config::Settings::default();
@@ -3330,6 +3332,7 @@ mod tests {
             privilege: None,
             dialect: pythia_db::Dialect::ORACLE,
             read_only,
+            production: false,
         }
     }
 

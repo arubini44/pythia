@@ -234,6 +234,11 @@ pub enum OpenRequest {
         /// Select this parameter of the member (named notation).
         parameter: Option<String>,
     },
+    /// The maintenance window of a table, materialized view or index.
+    Maintenance {
+        connection: String,
+        object: ObjectRef,
+    },
     /// The invalid objects window of a schema (or all user schemas),
     /// recompiling everything right away if asked.
     InvalidObjects {
@@ -274,6 +279,7 @@ pub enum DocKind {
     ExportTables(crate::export_tables::ExportTables),
     ObjectEditor(crate::object_editor::ObjectEditor),
     Invalid(crate::invalid_window::InvalidObjectsWindow),
+    Maintenance(crate::maintenance::MaintenanceWindow),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -308,6 +314,9 @@ pub struct DocContext<'a> {
     /// The connection's profile is read-only: nothing that changes data is
     /// offered.
     pub read_only: bool,
+    /// The connection's profile is marked as production: ask before what
+    /// can't be undone.
+    pub production: bool,
 }
 
 impl Document {
@@ -327,6 +336,7 @@ impl Document {
             DocKind::ExportTables(e) => e.title(),
             DocKind::ObjectEditor(e) => e.title(),
             DocKind::Invalid(i) => i.title(),
+            DocKind::Maintenance(m) => m.title(),
         }
     }
 
@@ -359,6 +369,7 @@ impl Document {
             DocKind::ExportTables(e) => e.is_busy(),
             DocKind::ObjectEditor(e) => e.is_busy(),
             DocKind::Invalid(i) => i.is_busy(),
+            DocKind::Maintenance(m) => m.is_busy(),
         }
     }
 
@@ -432,6 +443,7 @@ impl Document {
             DocKind::ExportTables(e) => e.on_event(event),
             DocKind::ObjectEditor(e) => e.on_event(event),
             DocKind::Invalid(i) => i.on_event(event),
+            DocKind::Maintenance(m) => m.on_event(event, cx.dialect),
         }
     }
 
@@ -451,6 +463,7 @@ impl Document {
             DocKind::ExportTables(e) => e.ui(ui, cx),
             DocKind::ObjectEditor(e) => e.ui(ui, cx),
             DocKind::Invalid(i) => i.ui(ui, cx),
+            DocKind::Maintenance(m) => m.ui(ui, cx),
         }
     }
 
