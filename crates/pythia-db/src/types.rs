@@ -61,6 +61,10 @@ pub trait Client {
     fn query(&mut self, sql: &str, params: &[&str]) -> Result<Vec<Vec<Cell>>, DbError>;
     /// Answers a dictionary lookup as [`DbRequest::Meta`] does.
     fn meta(&mut self, query: &MetaQuery) -> Result<MetaResult, DbError>;
+    /// Runs a statement without rows, e.g. DDL.
+    fn execute(&mut self, sql: &str) -> Result<(), DbError> {
+        self.query(sql, &[]).map(|_| ())
+    }
 }
 
 /// A closure run on the session's worker thread with its [`Client`].

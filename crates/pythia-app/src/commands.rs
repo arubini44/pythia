@@ -195,9 +195,8 @@ impl Command {
             }
             NewTable | NewView | NewMaterializedView | NewSequence | NewSynonym | NewIndex
             | NewTrigger | NewProcedure | NewFunction | NewPackage | NewType | NewJob
-            | NewDatabaseLink | NewUser | NewRole | NewProfile | NewDirectory => {
-                Feature::ObjectEditors
-            }
+            | NewDatabaseLink | NewProfile | NewDirectory => Feature::ObjectEditors,
+            NewUser | NewRole => Feature::AccountEditors,
             MonitorDashboard => Feature::Dashboard,
             MonitorSessions | MonitorBlocking => Feature::Sessions,
             MonitorAwr | MonitorTrace => Feature::Monitor,

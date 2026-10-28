@@ -5611,6 +5611,15 @@ select id, customer, total from app_orders where total < @limit order by id;
     assert!(h.query_by_label("Packages").is_none());
     assert!(h.query_by_label_contains("app_orders").is_some());
 
+    // The session's own user, `user@host`, and its form; without access to
+    // `mysql` it says what it can't read.
+    let user = format!("{username}@%");
+    h.state_mut().test_browser().set_filter(username);
+    h.run_steps(2);
+    user_forms(&mut h, "mysql", &user);
+    h.state_mut().test_browser().set_filter("");
+    h.run_steps(2);
+
     // Tables open on their columns; MySQL's details are tabs.
     h.state_mut().test_open(OpenRequest::Object {
         connection: "pythia@mysql".into(),
@@ -5736,23 +5745,14 @@ impl OtherDatabase<'_> {
         assert!(h.query_by_label("Packages").is_none());
         assert!(h.query_by_label_contains("app_orders").is_some());
 
-        // Users and roles below the folders (#130); without editors for
-        // them, a user's menu has what works on every database.
+        // Users and roles below the folders (#130), with their forms
+        // (#142): New user… on Users, Edit user… on one.
         assert!(h.query_by_label("Roles").is_some());
         assert!(h.query_by_label("Profiles").is_none());
         h.state_mut().test_browser().set_filter(self.user);
         h.run_steps(2);
-        h.get_by_label("Users").click();
-        h.run_steps(2);
-        wait_until(h, "users", |app| !app.test_browser_loading());
-        h.run_steps(2);
-        h.get_by_label(self.user).click_secondary();
-        h.run_steps(2);
-        save(h, &format!("{}-users", self.tag));
-        assert!(h.query_by_label("Copy name").is_some());
-        assert!(h.query_by_label("Drop…").is_some());
-        assert!(h.query_by_label("Edit user…").is_none());
-        h.key_press(egui::Key::Escape);
+        user_forms(h, self.tag, self.user);
+        assert!(h.query_by_label("Copy name").is_none());
         h.state_mut().test_browser().set_filter("");
         h.run_steps(2);
 
@@ -5785,6 +5785,44 @@ impl OtherDatabase<'_> {
         });
         save(h, &format!("{}-completion", self.tag));
     }
+}
+
+/// The user forms of a database other than Oracle (#142), with the browser
+/// filtered to `user`: New user… on Users opens a new user's form, the
+/// user's menu has what works on every database and Edit user… opens its
+/// form, read from the database.
+fn user_forms(h: &mut Harness<'_, PythiaApp>, tag: &str, user: &str) {
+    h.get_by_label("Users").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("New user…").click();
+    h.run_steps(2);
+    wait_until(h, "new user form", |app| !app.test_focused_busy());
+    assert_eq!(h.state().test_focused_title().as_deref(), Some("New user"));
+    assert!(h.query_by_label("Privileges").is_some(), "the form loaded");
+    save(h, &format!("{tag}-new-user"));
+
+    h.get_by_label("Users").click();
+    h.run_steps(2);
+    wait_until(h, "users", |app| !app.test_browser_loading());
+    h.run_steps(2);
+    h.get_by_label(user).click_secondary();
+    h.run_steps(2);
+    save(h, &format!("{tag}-users"));
+    assert!(h.query_by_label("Copy name").is_some());
+    assert!(h.query_by_label("Drop…").is_some());
+    h.get_by_label("Edit user…").click();
+    h.run_steps(2);
+    wait_until(h, "user form", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    assert_eq!(
+        h.state().test_focused_title(),
+        Some(format!("{user} (user)"))
+    );
+    assert!(
+        h.query_by_label(&format!("User {user}")).is_some(),
+        "the user was read"
+    );
+    save(h, &format!("{tag}-edit-user"));
 }
 
 /// Connects the harness to the database of `env`

@@ -520,6 +520,7 @@ impl PythiaApp {
     fn switch_to(&mut self, name: String, end: Option<bool>) {
         self.active = Some(name.clone());
         self.attach_browser(name.clone());
+        let dialect = self.dialect_of(Some(&name));
         for id in self.moving_windows(&name) {
             match end {
                 Some(commit) => self.conns.end_doc(id, commit),
@@ -534,7 +535,7 @@ impl PythiaApp {
                 w.state.queue.clear();
             }
             doc.connection = Some(name.clone());
-            let effects = doc.on_attach();
+            let effects = doc.on_attach(dialect);
             self.apply(Some(id), effects);
         }
     }
@@ -619,8 +620,9 @@ impl PythiaApp {
 
     fn add_doc(&mut self, connection: Option<String>, kind: DocKind) -> DocId {
         let id = self.new_doc_id();
+        let dialect = self.dialect_of(connection.as_deref());
         let mut doc = Document { connection, kind };
-        let effects = doc.on_attach();
+        let effects = doc.on_attach(dialect);
         self.docs.insert(id, doc);
         self.open_tab(Tab::Doc(id));
         self.focused = Some(id);
@@ -2854,9 +2856,10 @@ impl PythiaApp {
             return;
         }
         self.conns.close_doc(id);
+        let dialect = self.dialect_of(Some(&connection));
         if let Some(doc) = self.docs.get_mut(&id) {
             doc.connection = Some(connection);
-            let effects = doc.on_attach();
+            let effects = doc.on_attach(dialect);
             self.apply(Some(id), effects);
         }
     }
@@ -3048,8 +3051,9 @@ impl PythiaApp {
                         })
                         .map(|(id, _)| *id)
                         .collect();
+                    let dialect = self.dialect_of(Some(name));
                     for id in reload {
-                        let effects = self.docs.get_mut(&id).expect("doc").on_attach();
+                        let effects = self.docs.get_mut(&id).expect("doc").on_attach(dialect);
                         self.apply(Some(id), effects);
                     }
                 }

@@ -454,14 +454,15 @@ impl Document {
         }
     }
 
-    /// Called once after the document was created or its connection changed.
-    pub fn on_attach(&mut self) -> Effects {
+    /// Called once after the document was created or its connection changed;
+    /// `dialect` is the connection's database.
+    pub fn on_attach(&mut self, dialect: pythia_db::Dialect) -> Effects {
         match &mut self.kind {
             DocKind::Sql(_) => Effects::default(),
             DocKind::Program(w) => w.load(),
             DocKind::Object(v) => v.load(),
             DocKind::TableEditor(t) => t.load(),
-            DocKind::ObjectEditor(e) => e.load(),
+            DocKind::ObjectEditor(e) => e.attach(dialect),
             _ => Effects::default(),
         }
     }

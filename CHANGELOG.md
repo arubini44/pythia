@@ -6,7 +6,32 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Users and roles of MySQL/MariaDB, PostgreSQL and SQL Server can be
+  created and edited (#142), like Oracle's. *New user…* / *New role…* on
+  the Users and Roles sections (and in *File → New Object*), and *Edit
+  user…* on one, open a form that shows the statements before *Apply*.
+  - MySQL/MariaDB: user and host, password, expired, locked; the roles
+    granted, with admin option and whether they are enabled at login
+    (MariaDB enables one); privileges on the server (`*.*`), a database
+    or a table, and the grant option for each.
+  - PostgreSQL: password, valid until, connection limit and the role's
+    options (superuser, create databases, inherit, …); the roles it is a
+    member of, with admin option; privileges on databases, schemas,
+    tables and sequences, each with or without grant option.
+  - SQL Server: a user for an existing or a new login, without login, or
+    (contained databases) with a password; default schema, the login's
+    password and whether it is disabled; role memberships; database,
+    schema and object permissions granted, grantable or denied.
+
+  Without the rights to read everything (on MySQL, `SELECT` on the
+  `mysql` database), the form says so, grants what you add, and revokes
+  nothing it couldn't read.
+
 ### Fixed
+- On MySQL/MariaDB, PostgreSQL and SQL Server, *New user…* on the Users
+  section opened a form that only said "This tool isn't available for
+  MySQL connections" (#142).
 - Result grids lost the keys one frame after a click (#143): the arrows,
   Enter/F2, typing, Delete and Ctrl+C/V did nothing unless pressed right
   away, and moving the mouse was enough to lose them. The grid keeps them

@@ -457,6 +457,10 @@ impl Client for OracleClient<'_> {
     fn meta(&mut self, query: &MetaQuery) -> Result<MetaResult, DbError> {
         meta::run(self.0, query)
     }
+
+    fn execute(&mut self, sql: &str) -> Result<(), DbError> {
+        Ok(self.0.execute(sql, &[]).map(|_| ())?)
+    }
 }
 
 /// An Oracle connection of its own (not behind a [`Session`]), e.g. for a

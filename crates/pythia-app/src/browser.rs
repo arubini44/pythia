@@ -15,7 +15,7 @@ use pythia_db::{
 use pythia_ui::icons::{Icon, IconSize, paint_invalid_badge};
 
 use crate::documents::{Effects, ObjectRef, OpenRequest, Target, quote_ident, request_id};
-use crate::object_editor::{EditTarget, can_create, has_editor, has_grants};
+use crate::object_editor::{EditTarget, can_create, has_editor, has_form, has_grants};
 use crate::table_editor::TableTab;
 use crate::table_parts::{Part, PartKind, TableParts};
 
@@ -1432,7 +1432,7 @@ impl Browser {
                     if r.clicked() {
                         toggles.push(Node::Section(*section));
                     }
-                    if let Some(t) = section.accounts() {
+                    if let Some(t) = section.accounts().filter(|t| has_form(self.dialect, *t)) {
                         r.context_menu(|ui| {
                             let kind = t.dictionary_name().to_lowercase();
                             if ui.button(format!("New {kind}…")).clicked() {
@@ -1467,7 +1467,7 @@ impl Browser {
                         selected,
                         RichText::new(shown).font(names.clone()),
                     ));
-                    let editors = self.dialect.supports(Feature::ObjectEditors);
+                    let editors = has_form(self.dialect, *object_type);
                     if response.clicked() {
                         actions.push(ObjectAction::Select(account.clone()));
                     }
@@ -1902,7 +1902,7 @@ fn group_menu(ui: &mut Ui, table: &ObjectRef, group: Group, actions: &mut Vec<Ob
 /// besides copying and dropping it.
 #[derive(Clone, Copy)]
 struct AccountMenu {
-    /// Editing and creating them, and their grants (Oracle's editors).
+    /// Editing and creating them, and (Oracle's directories) their grants.
     editors: bool,
     /// Showing the schema of the same name a user owns.
     show_schema: bool,

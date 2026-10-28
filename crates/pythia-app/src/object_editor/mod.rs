@@ -4,9 +4,12 @@
 //! the statements the edits turn into and applies them on the window's
 //! session. Procedures, functions, packages, types and triggers start from a
 //! form as well: it writes their first source, which a program window takes
-//! over (compiling creates them).
+//! over (compiling creates them). On MySQL/MariaDB, PostgreSQL and SQL
+//! Server only users and roles have a form (`accounts`), run through the
+//! session's [`pythia_db::Client`].
 
 mod account;
+mod accounts;
 mod db_link;
 mod directory;
 mod grants;
@@ -45,7 +48,7 @@ use std::hash::Hash;
 
 use egui::{Color32, RichText, Ui};
 use pythia_db::oracle::Connection;
-use pythia_db::{DbError, DbEvent, DbRequest, ObjectType};
+use pythia_db::{DbError, DbEvent, DbRequest, Dialect, Feature, ObjectType};
 use pythia_ui::icons::Icon;
 use serde::{Deserialize, Serialize};
 
@@ -111,6 +114,15 @@ pub fn has_editor(t: ObjectType) -> bool {
     )
 }
 
+/// Whether objects of type `t` have a form (to edit and create them) on
+/// `dialect`'s databases.
+pub fn has_form(dialect: Dialect, t: ObjectType) -> bool {
+    match t {
+        ObjectType::User | ObjectType::Role => dialect.supports(Feature::AccountEditors),
+        t => has_editor(t) && dialect.supports(Feature::ObjectEditors),
+    }
+}
+
 /// Types created from a form (tables from the table builder).
 pub fn can_create(t: ObjectType) -> bool {
     has_editor(t)
@@ -153,6 +165,8 @@ enum Form {
     Job(job::JobDef),
     Directory(directory::DirectoryDef),
     Account(account::AccountDef),
+    /// A user or role of MySQL, PostgreSQL or SQL Server.
+    Accounts(accounts::UserDef),
     Profile(profile::ProfileDef),
     Grants(grants::GrantsDef),
     Program(program::ProgramDef),
@@ -173,6 +187,7 @@ impl Form {
             Form::Job(d) => ident(&d.name),
             Form::Directory(d) => ident(&d.name),
             Form::Account(d) => ident(&d.name),
+            Form::Accounts(d) => d.browser_name(),
             Form::Profile(d) => ident(&d.name),
             Form::Program(d) => ident(&d.name),
             Form::Type(d) => ident(&d.name),
@@ -188,7 +203,7 @@ impl Form {
         match self {
             Form::Synonym(d) if d.public => "PUBLIC",
             Form::DatabaseLink(d) if d.public => "PUBLIC",
-            Form::Account(_) | Form::Profile(_) | Form::Directory(_) => "",
+            Form::Account(_) | Form::Accounts(_) | Form::Profile(_) | Form::Directory(_) => "",
             _ => schema,
         }
     }
@@ -249,6 +264,8 @@ pub struct Lists {
     /// Objects of the edited type in the schema, to warn before a new
     /// PL/SQL unit replaces one (`CREATE OR REPLACE`).
     pub existing: Vec<String>,
+    /// The pickers of MySQL's, PostgreSQL's and SQL Server's users and roles.
+    pub accounts: accounts::Choices,
     /// Lists a form asked for this frame.
     pub want_objects: Option<String>,
     pub want_columns: Option<String>,
@@ -276,6 +293,7 @@ struct BaseLists {
     verify_functions: Vec<String>,
     session_user: String,
     existing: Vec<String>,
+    accounts: accounts::Choices,
 }
 
 /// The object as loaded (none for a new one), the form to start from, and
@@ -300,6 +318,10 @@ pub struct ObjectEditor {
     pub target: EditTarget,
     #[serde(skip)]
     state: State,
+    /// The connection's database: Oracle's forms, or the user and role
+    /// forms of the others.
+    #[serde(skip)]
+    dialect: Dialect,
 }
 
 #[derive(Default)]
@@ -327,15 +349,30 @@ impl ObjectEditor {
         Self {
             target,
             state: State::default(),
+            dialect: Dialect::default(),
         }
+    }
+
+    /// Loads the object from the document's (new) connection.
+    pub fn attach(&mut self, dialect: Dialect) -> Effects {
+        self.dialect = dialect;
+        self.load()
     }
 
     pub fn title(&self) -> String {
         // The tab adds the unsaved-changes dot.
         let kind = self.target.object_type().dictionary_name().to_lowercase();
+        // Oracle's names are uppercase; the others' as created.
+        let name = |n: &str| {
+            if self.dialect == Dialect::ORACLE {
+                n.to_lowercase()
+            } else {
+                n.to_owned()
+            }
+        };
         match &self.target {
             EditTarget::New { .. } => format!("New {kind}"),
-            EditTarget::Edit(o) => format!("{} ({kind})", o.name.to_lowercase()),
+            EditTarget::Edit(o) => format!("{} ({kind})", name(&o.name)),
             EditTarget::Grants(o) => format!("{} grants", o.name.to_lowercase()),
         }
     }
@@ -381,6 +418,7 @@ impl ObjectEditor {
             Form::Job(d) => f(d),
             Form::Directory(d) => f(d),
             Form::Account(d) => f(d),
+            Form::Accounts(d) => f(d),
             Form::Profile(d) => f(d),
             Form::Grants(d) => f(d),
             Form::Program(d) => f(d),
@@ -410,6 +448,14 @@ impl ObjectEditor {
         self.state.loading = Some(id);
         self.state.load_error = None;
         let target = self.target.clone();
+        if self.dialect != Dialect::ORACLE {
+            let task: pythia_db::RunFn = Box::new(move |client| {
+                let loaded = load_account(client, &target)?;
+                Ok(Box::new(loaded) as Box<dyn std::any::Any + Send>)
+            });
+            effects.request(Target::Meta, DbRequest::Run { id, task });
+            return effects;
+        }
         let task: pythia_db::TaskFn = Box::new(move |conn: &Connection| {
             let loaded = load(conn, &target)?;
             Ok(Box::new(loaded) as Box<dyn std::any::Any + Send>)
@@ -449,6 +495,7 @@ impl ObjectEditor {
                     lists.verify_functions = base.verify_functions;
                     lists.session_user = base.session_user;
                     lists.existing = base.existing;
+                    lists.accounts = base.accounts;
                 }
                 Ok(Err(_)) => self.state.load_error = Some("unexpected result".into()),
                 Err(e) => self.state.load_error = Some(e.to_string()),
@@ -613,6 +660,13 @@ impl ObjectEditor {
                 });
                 account::statements(o, d)
             }
+            (o, Form::Accounts(d)) => {
+                let o = o.and_then(|f| match f {
+                    Form::Accounts(a) => Some(a),
+                    _ => None,
+                });
+                accounts::statements(o, d)
+            }
             (o, Form::Profile(d)) => {
                 let o = o.and_then(|f| match f {
                     Form::Profile(p) => Some(p),
@@ -646,6 +700,7 @@ impl ObjectEditor {
         match &self.state.edited {
             Some(Form::DatabaseLink(d)) => db_link::masked(statements, d),
             Some(Form::Account(d)) => account::masked(statements, d),
+            Some(Form::Accounts(d)) => accounts::masked(statements, d),
             _ => statements.to_vec(),
         }
     }
@@ -665,6 +720,14 @@ impl ObjectEditor {
         let id = request_id();
         self.state.applying = Some(id);
         self.state.outcome = None;
+        if self.dialect != Dialect::ORACLE {
+            let task: pythia_db::RunFn = Box::new(move |client| {
+                let outcome = apply_client(client, &statements);
+                Ok(Box::new(outcome) as Box<dyn std::any::Any + Send>)
+            });
+            effects.request(Target::Own, DbRequest::Run { id, task });
+            return effects;
+        }
         let task: pythia_db::TaskFn = Box::new(move |conn: &Connection| {
             let outcome = apply(conn, &statements, view);
             Ok(Box::new(outcome) as Box<dyn std::any::Any + Send>)
@@ -727,6 +790,20 @@ impl ObjectEditor {
                 continue;
             }
             let id = request_id();
+            if self.dialect != Dialect::ORACLE {
+                // Only the user and role forms ask, for a picker's objects.
+                let ListRequest::Objects(container) = &want else {
+                    continue;
+                };
+                let container = container.clone();
+                self.state.lists_loading.insert(id, want);
+                let task: pythia_db::RunFn = Box::new(move |client| {
+                    let names = accounts::objects(client, &container)?;
+                    Ok(Box::new(names) as Box<dyn std::any::Any + Send>)
+                });
+                effects.request(Target::Meta, DbRequest::Run { id, task });
+                continue;
+            }
             if let ListRequest::NextRuns(start, repeat) = &want {
                 let (start, repeat) = (start.clone(), repeat.clone());
                 self.state.lists_loading.insert(id, want);
@@ -767,6 +844,11 @@ impl ObjectEditor {
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &DocContext) -> Effects {
         let mut effects = Effects::default();
+        if cx.dialect != self.dialect {
+            // Restored with the workspace before its connection said what
+            // it is.
+            return self.attach(cx.dialect);
+        }
         if let Some(e) = &self.state.load_error {
             ui.colored_label(ui.visuals().error_fg_color, e);
             if ui.button("Retry").clicked() {
@@ -927,6 +1009,13 @@ impl ObjectEditor {
                                     _ => None,
                                 });
                                 account::ui(ui, def, original, lists)
+                            }
+                            Form::Accounts(def) => {
+                                let original = original.and_then(|f| match f {
+                                    Form::Accounts(a) => Some(a),
+                                    _ => None,
+                                });
+                                accounts::ui(ui, def, original, lists)
                             }
                             Form::Profile(def) => profile::ui(ui, def, existing, lists),
                             Form::Grants(def) => grants::ui(ui, def, lists),
@@ -1161,6 +1250,41 @@ fn load(conn: &Connection, target: &EditTarget) -> Result<Loaded, DbError> {
         None => new_form(conn, target)?,
     };
     Ok((original, start, base))
+}
+
+/// A user or role of MySQL, PostgreSQL or SQL Server, and its pickers.
+fn load_account(
+    client: &mut dyn pythia_db::Client,
+    target: &EditTarget,
+) -> Result<Loaded, DbError> {
+    if !matches!(target.object_type(), ObjectType::User | ObjectType::Role) {
+        return Err(DbError::new(format!(
+            "No form for a {} on {}",
+            target.object_type().dictionary_name().to_lowercase(),
+            client.dialect().name()
+        )));
+    }
+    let (original, start, choices) = accounts::load(client, target)?;
+    let base = BaseLists {
+        accounts: choices,
+        ..BaseLists::default()
+    };
+    Ok((original.map(Form::Accounts), Form::Accounts(start), base))
+}
+
+/// Runs the statements through the session's client, stopping at the
+/// first error.
+fn apply_client(
+    client: &mut dyn pythia_db::Client,
+    statements: &[String],
+) -> Result<Vec<String>, ApplyError> {
+    for s in statements {
+        client.execute(s).map_err(|error| ApplyError {
+            statement: s.clone(),
+            error,
+        })?;
+    }
+    Ok(Vec::new())
 }
 
 /// Users and roles that can receive grants.

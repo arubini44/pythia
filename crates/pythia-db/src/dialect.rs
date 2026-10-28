@@ -48,6 +48,8 @@ pub enum Feature {
     /// Form editors (sequences, views, synonyms, indexes, grants) and the
     /// table editor.
     ObjectEditors,
+    /// The forms that create and change users and roles.
+    AccountEditors,
     /// The built-in reports.
     Reports,
     /// Completion and navigation with dictionary data.
@@ -103,6 +105,7 @@ impl Dialect {
                     | Feature::Dashboard
                     | Feature::Sessions
                     | Feature::EditResults
+                    | Feature::AccountEditors
             ),
             // Rows found by key: MySQL's way, not yet theirs (#101).
             DbKind::Postgres | DbKind::SqlServer => matches!(
@@ -112,6 +115,7 @@ impl Dialect {
                     | Feature::SshTunnel
                     | Feature::Dashboard
                     | Feature::Sessions
+                    | Feature::AccountEditors
             ),
         }
     }

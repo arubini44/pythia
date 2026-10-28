@@ -249,6 +249,11 @@ for Linux, Windows and macOS.
   and the DDL. *Edit* opens a routine as a script that drops and creates it
   again. Listing every user and role takes `SELECT` on `mysql.user`;
   without it the browser shows your own user and the roles you may use.
+- Users and roles have forms (*New user…*, *Edit user…* in the browser):
+  host, password, expiry, lock, the roles granted (with admin option, and
+  which are enabled at login) and privileges on the server, a database or
+  a table, with the grant option. They show the statements before
+  *Apply*. Reading other accounts takes `SELECT` on the `mysql` database.
 - A monitoring dashboard of its own (Monitor → Dashboard): findings first
   (lock waits and who blocks, metadata locks, connections near the limit,
   buffer pool hit ratio, long transactions, replication), then KPIs and
@@ -258,7 +263,7 @@ for Linux, Windows and macOS.
   statements and lock waits `SELECT` on `performance_schema`.
 - Everything built on Oracle's dictionary or PL/SQL — debugger, profiler,
   the rest of the monitor, reports, scheduler jobs, compare, import/export,
-  the form editors — isn't offered on MySQL connections. As in SQL\*Plus,
+  the other form editors — isn't offered on MySQL connections. As in SQL\*Plus,
   end a routine with `/` on a line of its own (there is no `DELIMITER`).
 
 **PostgreSQL and SQL Server (experimental)**
@@ -273,7 +278,12 @@ for Linux, Windows and macOS.
   the object browser (also materialized views and sequences, synonyms on
   SQL Server, and users and roles: PostgreSQL's roles that can log in are
   its users; SQL Server's are the database's) and object views with the
-  DDL. Transactions work as with
+  DDL. Users and roles have forms as on MySQL: on PostgreSQL the role's
+  options, password, validity, connection limit, memberships and
+  privileges on databases, schemas, tables and sequences; on SQL Server a
+  user for a new or existing login (or without one), its default schema,
+  role memberships and permissions granted, grantable or denied.
+  Transactions work as with
   Oracle; on PostgreSQL a failing statement doesn't abort the transaction,
   and notices (`RAISE NOTICE`) show as messages. Results can't be edited
   in place yet.
