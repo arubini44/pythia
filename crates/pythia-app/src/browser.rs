@@ -1370,6 +1370,15 @@ impl Browser {
                             actions.push(ObjectAction::Edit(trigger.clone()));
                             ui.close();
                         }
+                        if matches!(part.kind, PartKind::Index { .. })
+                            && ui.button("Maintenance…").clicked()
+                        {
+                            actions.push(ObjectAction::Maintenance(ObjectRef {
+                                object_type: ObjectType::Index,
+                                ..trigger.clone()
+                            }));
+                            ui.close();
+                        }
                         if ui.button("Copy name").clicked() {
                             ui.ctx().copy_text(part.name.to_lowercase());
                             ui.close();
@@ -1729,6 +1738,9 @@ impl Browser {
                 self.pending.insert(id, Pending::TestLink(object));
                 effects.request(Target::Meta, DbRequest::Meta { id, query });
             }
+            ObjectAction::Maintenance(object) => effects
+                .open
+                .push(OpenRequest::Maintenance { connection, object }),
             ObjectAction::Test(object, member) => self.request_test(object, member, false, effects),
             ObjectAction::Debug(object, member) => self.request_test(object, member, true, effects),
         }
@@ -2158,6 +2170,13 @@ pub fn object_menu(ui: &mut Ui, object: &ObjectRef, options: &MenuOptions) -> Op
     if t == ObjectType::DatabaseLink {
         item(ui, "Test link", ObjectAction::TestLink(object.clone()));
     }
+    if crate::maintenance::has_tasks(options.dialect, t) {
+        item(
+            ui,
+            "Maintenance…",
+            ObjectAction::Maintenance(object.clone()),
+        );
+    }
     let favorite = if options.favorite {
         "Remove from favorites"
     } else {
@@ -2228,6 +2247,8 @@ pub enum ObjectAction {
     ToggleFavorite(ObjectRef),
     /// Query over a database link and report whether it works.
     TestLink(ObjectRef),
+    /// Statistics, rebuilds, vacuum and the like of a table or index.
+    Maintenance(ObjectRef),
 }
 
 /// Statements generated from a table's columns.
