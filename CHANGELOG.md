@@ -6,6 +6,8 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-28
+
 ### Added
 - On MySQL/MariaDB the object browser remembers the database you last
   picked for each connection (#133). When the connection comes up without
@@ -871,7 +873,8 @@ First release.
 - Scheduler jobs window: run, stop, enable, disable, drop, run history.
 - Saved user reports with parameters.
 
-[Unreleased]: https://github.com/ortic/pythia/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/ortic/pythia/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ortic/pythia/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ortic/pythia/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ortic/pythia/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/ortic/pythia/compare/v0.4.0...v0.4.1
