@@ -94,6 +94,7 @@ commands! {
     SearchData => "Tools: Search Data in Tables…",
     SchedulerJobs => "Tools: Scheduler Jobs",
     InvalidObjects => "Tools: Invalid Objects",
+    MaintenanceScan => "Tools: Maintenance Scan",
     ImportData => "Tools: Import Data (CSV, Excel)…",
     ExportTables => "Tools: Export Tables…",
     CompareSchemas => "Tools: Compare Schemas…",

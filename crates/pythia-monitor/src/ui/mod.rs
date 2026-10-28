@@ -97,6 +97,8 @@ pub enum MonitorAction {
     },
     /// Open a SQL window with this text, on the monitor's connection.
     OpenSql(String),
+    /// Open the maintenance that fixes a finding (#145).
+    Maintain(crate::insights::Fix),
 }
 
 /// Slow SQL or a report to have analyzed, with what the monitor knows.

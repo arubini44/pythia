@@ -6181,6 +6181,7 @@ fn open_maintenance(h: &mut Harness<'_, PythiaApp>, connection: &str, object: Ob
     h.state_mut().test_open(OpenRequest::Maintenance {
         connection: connection.into(),
         object,
+        task: None,
     });
     h.run_steps(2);
     wait_until(h, "maintenance state", |app| !app.test_focused_busy());
@@ -6510,4 +6511,339 @@ commit;",
     // Each statement committed: nothing waits in the window's session.
     assert!(!h.state().test_pending_tx());
     run_script(&mut h, connection, "drop table pythia_mt_orders;");
+}
+
+/// Opens the maintenance scan of the harness's connection (Tools menu) and
+/// waits for it; with `limits`, scans again with those.
+fn open_scan(h: &mut Harness<'_, PythiaApp>, limits: Option<crate::maintenance::Limits>) {
+    h.state_mut()
+        .test_command(crate::commands::Command::MaintenanceScan);
+    h.run_steps(2);
+    wait_until(h, "maintenance scan", |app| !app.test_focused_busy());
+    if let Some(limits) = limits {
+        let window = h.state_mut().test_scan_window();
+        window.set_limits_for_test(limits);
+        let effects = window.load();
+        h.state_mut().test_apply(effects);
+        h.run_steps(2);
+        wait_until(h, "maintenance scan", |app| !app.test_focused_busy());
+    }
+    h.run_steps(2);
+}
+
+/// The focused scan's findings whose name starts with `prefix`, as
+/// (name, problem, picked).
+fn scan_findings(h: &mut Harness<'_, PythiaApp>, prefix: &str) -> Vec<(String, String, bool)> {
+    let scan = h
+        .state_mut()
+        .test_scan_window()
+        .scan_for_test()
+        .expect("a scan");
+    scan.findings
+        .iter()
+        .filter(|f| f.name.starts_with(prefix))
+        .map(|f| (f.name.clone(), f.problem.clone(), f.picked))
+        .collect()
+}
+
+/// Whether the focused scan has a note with `label`.
+fn scan_note(h: &mut Harness<'_, PythiaApp>, label: &str) -> Option<String> {
+    let scan = h.state_mut().test_scan_window().scan_for_test()?;
+    let note = scan.notes.iter().find(|n| n.label == label)?;
+    Some(note.value.clone())
+}
+
+/// Runs the findings whose name starts with `prefix` (and `pick` accepts)
+/// as a batch; waits for it and the scan after. How it ended, and each
+/// statement's object and status.
+fn run_scan(
+    h: &mut Harness<'_, PythiaApp>,
+    prefix: &str,
+    pick: impl Fn(&crate::maintenance::Finding) -> bool,
+) -> (String, bool, Vec<(usize, &'static str)>) {
+    let window = h.state_mut().test_scan_window();
+    window.pick_for_test(|f| f.name.starts_with(prefix) && pick(f));
+    let effects = window.run_for_test();
+    h.state_mut().test_apply(effects);
+    h.run_steps(2);
+    wait_until(h, "maintenance batch", |app| !app.test_focused_busy());
+    h.run_steps(2);
+    let (outcome, statuses) = h.state_mut().test_scan_window().outcome_for_test();
+    let (text, ok) = outcome.expect("an outcome");
+    (text, ok, statuses)
+}
+
+/// The maintenance scan of an Oracle schema (#145): a table without
+/// statistics, its index left unusable by a move, and a table whose
+/// statistics are locked (found, but not picked: gathering takes force).
+/// The batch rebuilds the index first, then gathers; the scan after finds
+/// neither. Without the DBA views, the automatic task can't be read.
+#[test]
+fn maintenance_scan_oracle() {
+    let Some((profile, password)) = profile() else {
+        return;
+    };
+    let mut h = harness(true);
+    h.state_mut().test_connect(profile, password);
+    wait_until(&mut h, "connection", |app| app.test_connected());
+    let connection = "pythia@FREEPDB1";
+    run_script(
+        &mut h,
+        connection,
+        "begin
+  for t in (select table_name from user_tables
+             where table_name in ('PYTHIA_MS_T', 'PYTHIA_MS_L')) loop
+    execute immediate 'drop table ' || t.table_name || ' purge';
+  end loop;
+end;
+/
+create table pythia_ms_t (id number, note varchar2(40));
+insert into pythia_ms_t select level, 'row ' || level from dual connect by level <= 500;
+commit;
+create index pythia_ms_t_note on pythia_ms_t (note);
+alter table pythia_ms_t move;
+begin dbms_stats.delete_table_stats(user, 'PYTHIA_MS_T'); end;
+/
+create table pythia_ms_l (id number);
+begin dbms_stats.lock_table_stats(user, 'PYTHIA_MS_L'); end;
+/",
+    );
+    open_scan(&mut h, None);
+    save(&mut h, "maintenance-scan-oracle");
+    let found = scan_findings(&mut h, "pythia.pythia_ms_");
+    let has = |name: &str, problem: &str, picked: bool| {
+        found.contains(&(name.into(), problem.into(), picked))
+    };
+    assert!(
+        has("pythia.pythia_ms_t_note", "Unusable index", true),
+        "{found:?}"
+    );
+    assert!(
+        has("pythia.pythia_ms_t", "No statistics", true),
+        "{found:?}"
+    );
+    assert!(
+        has("pythia.pythia_ms_l", "No statistics (locked)", false),
+        "{found:?}"
+    );
+    assert!(scan_note(&mut h, "Automatic statistics").is_some());
+
+    let (text, ok, statuses) = run_scan(&mut h, "pythia.pythia_ms_t", |_| true);
+    assert!(ok, "{text}: {statuses:?}");
+    assert!(text.starts_with("Maintenance: 2 done in "), "{text}");
+    assert_eq!(statuses, [(0, "done"), (1, "done")]);
+    let found = scan_findings(&mut h, "pythia.pythia_ms_");
+    assert_eq!(
+        found,
+        [(
+            "pythia.pythia_ms_l".into(),
+            "No statistics (locked)".into(),
+            false
+        )]
+    );
+    run_script(
+        &mut h,
+        connection,
+        "drop table pythia_ms_t purge;
+drop table pythia_ms_l purge;",
+    );
+}
+
+/// The maintenance scan of a PostgreSQL database (#145): a table with
+/// many dead rows, and an index a failed CREATE INDEX CONCURRENTLY left
+/// invalid. The batch vacuums the one and rebuilds the other concurrently
+/// (on the window's own session, which autocommits); the scan after finds
+/// neither.
+#[test]
+fn maintenance_scan_postgres() {
+    use pythia_config::DbKind;
+    let connection = "pythia@postgres";
+    let Some(mut h) = connect_to("PYTHIA_TEST_POSTGRES", connection, DbKind::Postgres) else {
+        return;
+    };
+    let results = crate::test_db::execute_on(
+        "PYTHIA_TEST_POSTGRES",
+        DbKind::Postgres,
+        &[
+            "drop table if exists pythia_ms_dead",
+            "drop table if exists pythia_ms_inv",
+            "create table pythia_ms_dead (id int primary key, note text) \
+             with (autovacuum_enabled = false)",
+            "insert into pythia_ms_dead select g, 'row ' || g from generate_series(1, 3000) g",
+            "analyze pythia_ms_dead",
+            "delete from pythia_ms_dead where id > 1000",
+            "create table pythia_ms_inv (id int) with (autovacuum_enabled = false)",
+            "insert into pythia_ms_inv values (1), (1)",
+            "create unique index concurrently pythia_ms_inv_ux on pythia_ms_inv (id)",
+            "delete from pythia_ms_inv",
+            // The counters of this session reach pg_stat_all_tables now.
+            "select pg_stat_force_next_flush()",
+        ],
+    )
+    .expect("PYTHIA_TEST_POSTGRES");
+    assert!(results[8].is_err(), "the duplicates fail it: {results:?}");
+    assert!(
+        results.iter().enumerate().all(|(i, r)| i == 8 || r.is_ok()),
+        "{results:?}"
+    );
+    open_scan(&mut h, None);
+    save(&mut h, "maintenance-scan-postgres");
+    let found = scan_findings(&mut h, "public.pythia_ms_");
+    assert!(
+        found.contains(&("public.pythia_ms_dead".into(), "Dead rows".into(), true)),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&(
+            "public.pythia_ms_inv_ux".into(),
+            "Invalid index".into(),
+            true
+        )),
+        "{found:?}"
+    );
+
+    let (text, ok, statuses) = run_scan(&mut h, "public.pythia_ms_", |_| true);
+    assert!(ok, "{text}: {statuses:?}");
+    let found = scan_findings(&mut h, "public.pythia_ms_");
+    assert!(found.is_empty(), "{found:?}");
+    crate::test_db::execute_on(
+        "PYTHIA_TEST_POSTGRES",
+        DbKind::Postgres,
+        &["drop table pythia_ms_dead", "drop table pythia_ms_inv"],
+    );
+}
+
+/// The maintenance scan of a MySQL database (#145), with the reclaimable
+/// space's line lowered to every table: OPTIMIZE TABLE runs as a batch.
+/// Without access to `mysql`, the statistics' age can't be read; with it
+/// (`PYTHIA_TEST_MYSQL_DBA`), statistics older than the table's last change
+/// by a day are found.
+#[test]
+fn maintenance_scan_mysql() {
+    use pythia_config::DbKind;
+    let connection = "pythia@mysql";
+    let Some(mut h) = connect_to("PYTHIA_TEST_MYSQL", connection, DbKind::MySql) else {
+        return;
+    };
+    run_script(
+        &mut h,
+        connection,
+        "drop table if exists pythia_ms_t;
+create table pythia_ms_t (id int primary key, note varchar(40));
+insert into pythia_ms_t values (1, 'one'), (2, 'two'), (3, 'three');
+commit;",
+    );
+    let everything = crate::maintenance::Limits {
+        free_bytes: 0.0,
+        free_share: -1.0,
+        ..Default::default()
+    };
+    open_scan(&mut h, Some(everything));
+    save(&mut h, "maintenance-scan-mysql");
+    let found = scan_findings(&mut h, "pythia.pythia_ms_t");
+    assert_eq!(
+        found,
+        [(
+            "pythia.pythia_ms_t".into(),
+            "Reclaimable space".into(),
+            true
+        )]
+    );
+    let (text, ok, statuses) = run_scan(&mut h, "pythia.pythia_ms_t", |_| true);
+    assert!(ok, "{text}: {statuses:?}");
+    assert_eq!(statuses, [(0, "done")]);
+    if std::env::var("PYTHIA_TEST_MYSQL_DBA").is_err() {
+        assert!(scan_note(&mut h, "Statistics").is_some());
+    }
+
+    // Statistics a few days older than the table's last change.
+    let found = crate::test_db::run_on("PYTHIA_TEST_MYSQL_DBA", DbKind::MySql, |c| {
+        let database = c.query("select database()", &[]).unwrap()[0][0]
+            .clone()
+            .unwrap_or_default();
+        c.execute("analyze table pythia_ms_t").unwrap();
+        c.execute(
+            "update mysql.innodb_table_stats set last_update = now() - interval 3 day \
+              where database_name = database() and table_name = 'pythia_ms_t'",
+        )
+        .unwrap();
+        c.execute("insert into pythia_ms_t values (4, 'four')")
+            .unwrap();
+        let scan =
+            crate::maintenance::scan(c, &database, &crate::maintenance::Limits::default()).unwrap();
+        scan.findings
+            .into_iter()
+            .filter(|f| f.name.ends_with(".pythia_ms_t"))
+            .map(|f| (f.problem, f.statements))
+            .collect::<Vec<_>>()
+    });
+    if let Some(found) = found {
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, "Statistics behind");
+        assert!(found[0].1[0].starts_with("analyze table "), "{found:?}");
+    }
+    run_script(&mut h, connection, "drop table pythia_ms_t;");
+}
+
+/// The maintenance scan of a SQL Server database (#145): an index on
+/// random GUIDs is fragmented (with the pages' line lowered for a small
+/// table); the batch rebuilds it, and the scan after doesn't find it. The
+/// last good DBCC CHECKDB is a note.
+#[test]
+fn maintenance_scan_sqlserver() {
+    use pythia_config::DbKind;
+    let connection = "pythia@sqlserver";
+    let Some(mut h) = connect_to("PYTHIA_TEST_MSSQL", connection, DbKind::SqlServer) else {
+        return;
+    };
+    // Row by row: one INSERT … SELECT would be sorted by the key first.
+    let results = crate::test_db::execute_on(
+        "PYTHIA_TEST_MSSQL",
+        DbKind::SqlServer,
+        &[
+            "drop table if exists pythia_ms_frag",
+            "create table pythia_ms_frag (
+               id uniqueidentifier not null default newid()
+                  constraint pythia_ms_frag_pk primary key,
+               pad char(800) not null default 'x')",
+            "declare @i int = 0
+             begin transaction
+             while @i < 3000
+             begin
+               insert into pythia_ms_frag default values
+               set @i = @i + 1
+             end
+             commit",
+        ],
+    )
+    .expect("PYTHIA_TEST_MSSQL");
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    let small = crate::maintenance::Limits {
+        pages: 10,
+        ..Default::default()
+    };
+    open_scan(&mut h, Some(small));
+    save(&mut h, "maintenance-scan-sqlserver");
+    let found = scan_findings(&mut h, "dbo.pythia_ms_frag");
+    assert_eq!(
+        found,
+        [(
+            "dbo.pythia_ms_frag (pythia_ms_frag_pk)".into(),
+            "Fragmented index".into(),
+            true
+        )],
+    );
+    assert!(scan_note(&mut h, "Last good CHECKDB").is_some());
+    let (text, ok, statuses) = run_scan(&mut h, "dbo.pythia_ms_frag", |f| {
+        f.problem == "Fragmented index"
+    });
+    assert!(ok, "{text}: {statuses:?}");
+    let found = scan_findings(&mut h, "dbo.pythia_ms_frag");
+    assert!(
+        found
+            .iter()
+            .all(|(_, problem, _)| problem != "Fragmented index"),
+        "{found:?}"
+    );
+    run_script(&mut h, connection, "drop table pythia_ms_frag;");
 }

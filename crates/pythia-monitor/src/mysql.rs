@@ -13,7 +13,7 @@ use pythia_db::{Cell, Client, DbError};
 
 use crate::cells::{all_counts, int, num, opt, plural, text, top_counts};
 use crate::connections::{Connection, ConnectionList};
-use crate::insights::{Insight, Severity};
+use crate::insights::{Fix, FixTask, Insight, Severity};
 use crate::queries::SectionError;
 use crate::ui::style::{bytes, duration};
 
@@ -214,6 +214,18 @@ pub struct TableSize {
 pub struct Storage {
     pub schemas: Vec<SchemaSize>,
     pub tables: Vec<TableSize>,
+    /// The table with the most space OPTIMIZE TABLE would give back, when
+    /// that's a fair share of it (#145).
+    pub reclaimable: Option<Reclaimable>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Reclaimable {
+    pub schema: String,
+    pub name: String,
+    pub free_bytes: f64,
+    /// Data and indexes.
+    pub used_bytes: f64,
 }
 
 /// A normalized statement and what its executions cost since the server
@@ -625,6 +637,19 @@ fn storage_stats(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbErro
         ),
         &[],
     )?;
+    // InnoDB keeps a few free extents anyway: 32 MB and a fifth of the
+    // table, as the maintenance window's line.
+    let reclaimable = c.query(
+        &format!(
+            "select table_schema, table_name, data_free, data_length + index_length \
+               from information_schema.tables \
+              where table_type = 'BASE TABLE' and table_schema not in {SYSTEM_SCHEMAS} \
+                and data_free >= 33554432 and data_free > 0.2 * (data_length + index_length) \
+              order by data_free desc \
+              limit 1"
+        ),
+        &[],
+    )?;
     s.storage = Some(Storage {
         schemas: schemas
             .iter()
@@ -647,6 +672,12 @@ fn storage_stats(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbErro
                 index_bytes: num(r, 5),
             })
             .collect(),
+        reclaimable: reclaimable.first().map(|r| Reclaimable {
+            schema: text(r, 0),
+            name: text(r, 1),
+            free_bytes: num(r, 2),
+            used_bytes: num(r, 3),
+        }),
     });
     Ok(())
 }
@@ -1203,6 +1234,7 @@ pub fn insights(snap: &MySqlSnapshot, rates: Option<&Counters>) -> Vec<Insight> 
             text,
             target: None,
             session: None,
+            fix: None,
         })
     };
 
@@ -1398,8 +1430,29 @@ pub fn insights(snap: &MySqlSnapshot, rates: Option<&Counters>) -> Vec<Insight> 
             ),
         );
     }
-    if snap.server.as_ref().is_some_and(|s| s.read_only) {
+    let read_only = snap.server.as_ref().is_some_and(|s| s.read_only);
+    if read_only {
         add(Severity::Info, "The server is read-only".into());
+    }
+    if let Some(t) = snap.storage.as_ref().and_then(|s| s.reclaimable.as_ref()) {
+        out.push(Insight {
+            severity: Severity::Info,
+            text: format!(
+                "Table {}.{} has {} reclaimable beside {} of data and indexes: OPTIMIZE \
+                 TABLE gives it back",
+                t.schema,
+                t.name,
+                bytes(t.free_bytes),
+                bytes(t.used_bytes)
+            ),
+            target: None,
+            session: None,
+            fix: (!read_only).then(|| Fix::Table {
+                schema: t.schema.clone(),
+                table: t.name.clone(),
+                task: FixTask::Optimize,
+            }),
+        });
     }
     out.sort_by_key(|i| std::cmp::Reverse(i.severity));
     out
@@ -1516,5 +1569,46 @@ mod tests {
             ]
         );
         assert!(insights(&MySqlSnapshot::default(), None).is_empty());
+    }
+
+    /// The table with the most reclaimable space offers OPTIMIZE TABLE
+    /// (#145), unless the server is read-only.
+    #[test]
+    fn reclaimable_space_offers_optimize() {
+        let snap = |read_only: bool| MySqlSnapshot {
+            server: Some(ServerInfo {
+                read_only,
+                ..Default::default()
+            }),
+            storage: Some(Storage {
+                reclaimable: Some(Reclaimable {
+                    schema: "shop".into(),
+                    name: "orders".into(),
+                    free_bytes: 300.0 * 1024.0 * 1024.0,
+                    used_bytes: 500.0 * 1024.0 * 1024.0,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let found = insights(&snap(false), None);
+        let i = found
+            .iter()
+            .find(|i| i.text.contains("reclaimable"))
+            .expect("the finding");
+        assert_eq!(
+            i.text,
+            "Table shop.orders has 300.0 MB reclaimable beside 500.0 MB of data and indexes: \
+             OPTIMIZE TABLE gives it back"
+        );
+        assert_eq!(
+            i.fix,
+            Some(Fix::Table {
+                schema: "shop".into(),
+                table: "orders".into(),
+                task: FixTask::Optimize,
+            })
+        );
+        assert!(insights(&snap(true), None).iter().all(|i| i.fix.is_none()));
     }
 }

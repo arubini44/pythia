@@ -59,7 +59,8 @@ impl eframe::App for App {
                     // No assistant and no IDE here.
                     MonitorAction::Analyze(_)
                     | MonitorAction::OpenObject { .. }
-                    | MonitorAction::OpenSql(_) => {}
+                    | MonitorAction::OpenSql(_)
+                    | MonitorAction::Maintain(_) => {}
                 }
             }
         });

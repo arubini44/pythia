@@ -2,27 +2,28 @@
 //! evidence, the database's maintenance tasks with their options and what
 //! they cost, the statements, and running them one by one on the window's
 //! own session (which autocommits, so it never commits another window's
-//! work, and VACUUM isn't in a transaction block).
+//! work, and VACUUM isn't in a transaction block). The scan (#145) does
+//! that for what a whole schema needs.
 
 mod facts;
+mod runner;
+mod scan;
 mod tasks;
 
-use std::time::{Duration, Instant};
-
-use egui::{Color32, RichText, Ui};
+use egui::{RichText, Ui};
 use pythia_db::oracle::Connection;
 use pythia_db::{DbEvent, DbKind, DbRequest, Dialect, ObjectType};
 use pythia_ui::icons::Icon;
 use serde::{Deserialize, Serialize};
 
 pub use facts::Facts;
+pub use scan::ScanWindow;
+#[cfg(test)]
+pub use scan::{Finding, Limits, scan};
 pub use tasks::{Options, Task, has_tasks};
 
 use crate::documents::{DocContext, Effects, ObjectRef, OpenRequest, Target, request_id};
-
-/// Rows of a statement's answer kept (MySQL's ANALYZE TABLE and friends
-/// answer with a few).
-const MAX_ROWS: usize = 200;
+use runner::{Planned, Runner};
 
 #[derive(Serialize, Deserialize)]
 pub struct MaintenanceWindow {
@@ -41,44 +42,9 @@ struct State {
     loading: Option<u64>,
     facts: Option<Facts>,
     load_error: Option<String>,
-    run: Option<Run>,
-    /// The statements of the last run, with what came back.
-    steps: Vec<Step>,
-    /// The step that ended last, which trailing messages belong to.
-    ended: Option<usize>,
-    /// How the last run ended, and whether it went well.
-    outcome: Option<(String, bool)>,
+    runner: Runner,
     /// Asking before a run on a production connection.
     confirm: bool,
-}
-
-/// A run in progress.
-struct Run {
-    /// The task's name, for the outcome.
-    label: &'static str,
-    /// The step running, and its request.
-    step: usize,
-    id: u64,
-    columns: Vec<String>,
-    started: Instant,
-    began: Instant,
-    cancelled: bool,
-}
-
-struct Step {
-    sql: String,
-    status: Status,
-    /// Notices, output and result rows.
-    messages: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Status {
-    Waiting,
-    Running,
-    Done(Duration),
-    Failed(Duration, String),
-    Skipped,
 }
 
 impl MaintenanceWindow {
@@ -95,8 +61,15 @@ impl MaintenanceWindow {
         format!("{} maintenance", self.object.name.to_lowercase())
     }
 
+    /// Opens on `task` with `options`, e.g. for a dashboard's finding.
+    pub fn with_task(mut self, task: Task, options: Options) -> Self {
+        self.task = Some(task);
+        self.options = options;
+        self
+    }
+
     pub fn is_busy(&self) -> bool {
-        self.state.loading.is_some() || self.state.run.is_some()
+        self.state.loading.is_some() || self.state.runner.is_running()
     }
 
     /// The task picked, if the database has it, else its first.
@@ -140,93 +113,22 @@ impl MaintenanceWindow {
 
     /// Starts running the statements, the first one now.
     fn start(&mut self, task: Task, dialect: Dialect, statements: Vec<String>) -> Effects {
-        let mut effects = Effects::default();
-        if statements.is_empty() || self.state.run.is_some() {
-            return effects;
-        }
-        self.state.outcome = None;
-        self.state.ended = None;
-        self.state.steps = statements
+        let target = Some(self.object.clone());
+        let steps = statements
             .into_iter()
-            .map(|sql| Step {
+            .map(|sql| Planned {
+                group: 0,
                 sql,
-                status: Status::Waiting,
-                messages: Vec::new(),
+                target: target.clone(),
             })
             .collect();
-        let now = Instant::now();
-        self.state.run = Some(Run {
-            label: task.label(dialect),
-            step: 0,
-            id: 0,
-            columns: Vec::new(),
-            started: now,
-            began: now,
-            cancelled: false,
-        });
-        self.send_step(0, &mut effects);
-        effects
-    }
-
-    fn send_step(&mut self, step: usize, effects: &mut Effects) {
-        let (Some(run), Some(s)) = (self.state.run.as_mut(), self.state.steps.get_mut(step)) else {
-            return;
-        };
-        let id = request_id();
-        run.step = step;
-        run.id = id;
-        run.columns.clear();
-        run.started = Instant::now();
-        s.status = Status::Running;
-        effects.request(
-            Target::Own,
-            DbRequest::Execute {
-                id,
-                sql: s.sql.clone(),
-                max_rows: MAX_ROWS,
-                binds: Vec::new(),
-            },
-        );
-    }
-
-    /// The running step ended; the next one starts, or the run is over.
-    fn step_ended(&mut self, failed: Option<String>, effects: &mut Effects) {
-        let Some(run) = self.state.run.as_ref() else {
-            return;
-        };
-        let (step, elapsed, cancelled) = (run.step, run.started.elapsed(), run.cancelled);
-        self.state.ended = Some(step);
-        if let Some(s) = self.state.steps.get_mut(step) {
-            match &failed {
-                Some(e) => s.status = Status::Failed(elapsed, e.clone()),
-                None => {
-                    s.status = Status::Done(elapsed);
-                    effects.executed.push(s.sql.clone());
-                }
-            }
-        }
-        if failed.is_none() && !cancelled && step + 1 < self.state.steps.len() {
-            self.send_step(step + 1, effects);
-            return;
-        }
-        let Some(run) = self.state.run.take() else {
-            return;
-        };
-        for s in &mut self.state.steps[step + 1..] {
-            s.status = Status::Skipped;
-        }
-        let (label, secs) = (run.label, run.began.elapsed().as_secs_f64());
-        self.state.outcome = Some(match (failed, cancelled) {
-            (_, true) => (format!("{label}: cancelled after {secs:.1} s"), false),
-            (Some(e), _) => (format!("{label}: failed after {secs:.1} s: {e}"), false),
-            (None, _) => (format!("{label}: done in {secs:.1} s"), true),
-        });
+        self.state
+            .runner
+            .start(task.label(dialect).to_owned(), Vec::new(), steps)
     }
 
     pub fn on_event(&mut self, event: DbEvent, dialect: Dialect) -> Effects {
         let mut effects = Effects::default();
-        let running = self.state.run.as_ref().map(|r| r.id);
-        let running_step = self.state.run.as_ref().map(|r| r.step);
         match event {
             DbEvent::TaskDone { id, result } if self.state.loading == Some(id) => {
                 self.state.loading = None;
@@ -239,63 +141,14 @@ impl MaintenanceWindow {
                     Err(e) => self.state.load_error = Some(e.to_string()),
                 }
             }
-            DbEvent::QueryStarted { id, columns } if running == Some(id) => {
-                if let Some(run) = self.state.run.as_mut() {
-                    run.columns = columns.into_iter().map(|c| c.name).collect();
-                }
-            }
-            DbEvent::Rows { id, rows, .. } if running == Some(id) => {
-                // A query's answer ends with its rows (no more are fetched).
-                let columns = self
-                    .state
-                    .run
-                    .as_ref()
-                    .map(|r| r.columns.clone())
-                    .unwrap_or_default();
-                let (lines, error) = answer(&columns, &rows);
-                if let Some(step) = running_step {
-                    self.add_messages(step, lines);
-                }
-                self.step_ended(error, &mut effects);
-                if self.state.run.is_none() {
+            event => {
+                // The state reads again once a run is over.
+                if self.state.runner.on_event(event, dialect, &mut effects) {
                     effects.extend(self.load(dialect));
                 }
             }
-            DbEvent::Executed { id, .. } if running == Some(id) => {
-                self.step_ended(None, &mut effects);
-                if self.state.run.is_none() {
-                    effects.extend(self.load(dialect));
-                }
-            }
-            DbEvent::Failed { id, error, .. } if running == Some(id) => {
-                self.step_ended(Some(error.to_string()), &mut effects);
-                effects.extend(self.load(dialect));
-            }
-            DbEvent::Error(error) | DbEvent::ConnectFailed(error) if running.is_some() => {
-                self.step_ended(Some(error.to_string()), &mut effects);
-            }
-            DbEvent::Notice(text) => self.message(dialect, running_step, vec![text]),
-            DbEvent::Output(lines) => self.message(dialect, running_step, lines),
-            _ => {}
         }
         effects
-    }
-
-    /// Notices and output go with their statement. PostgreSQL's notices and
-    /// MySQL's warnings come after the event that ends it (when the next
-    /// statement may run already); Oracle's output and SQL Server's
-    /// messages before.
-    fn message(&mut self, dialect: Dialect, running: Option<usize>, lines: Vec<String>) {
-        let trailing = matches!(dialect.kind(), DbKind::Postgres | DbKind::MySql);
-        if let Some(step) = if trailing { self.state.ended } else { running } {
-            self.add_messages(step, lines);
-        }
-    }
-
-    fn add_messages(&mut self, step: usize, lines: Vec<String>) {
-        if let Some(s) = self.state.steps.get_mut(step) {
-            s.messages.extend(lines);
-        }
     }
 
     pub fn ui(&mut self, ui: &mut Ui, cx: &DocContext) -> Effects {
@@ -310,7 +163,7 @@ impl MaintenanceWindow {
         }
         let task = self.task(dialect);
         let statements = self.statements(dialect);
-        let running = self.state.run.is_some();
+        let running = self.state.runner.is_running();
         let ready = matches!(&statements, Ok(s) if !s.is_empty());
 
         // Header: the object, and running.
@@ -325,16 +178,14 @@ impl MaintenanceWindow {
             ui.weak(t.dictionary_name().to_lowercase());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if running {
-                    let cancelling = self.state.run.as_ref().is_some_and(|r| r.cancelled);
+                    let cancelling = self.state.runner.cancelling();
                     let stop = egui::Button::image_and_text(Icon::Stop.image(ui), "Break");
                     if ui
                         .add_enabled(!cancelling, stop)
                         .on_hover_text("Cancel the statement running; the rest don't run")
                         .clicked()
                     {
-                        if let Some(run) = self.state.run.as_mut() {
-                            run.cancelled = true;
-                        }
+                        self.state.runner.cancel();
                         effects.cancel = true;
                     }
                 } else {
@@ -404,10 +255,8 @@ impl MaintenanceWindow {
             }
             Ok(s) => code(ui, cx, &script(dialect, s)),
         }
-        self.run_ui(ui);
-        if running {
-            ui.ctx().request_repaint_after(Duration::from_millis(100));
-        }
+        self.state.runner.ui(ui);
+        effects.extend(self.state.runner.poll(dialect));
         self.confirm_ui(ui.ctx(), cx, &statements, &mut effects);
         effects
     }
@@ -442,7 +291,7 @@ impl MaintenanceWindow {
     fn task_ui(&mut self, ui: &mut Ui, dialect: Dialect, task: Task) {
         ui.label(RichText::new("Task").strong());
         ui.add_space(2.0);
-        let running = self.state.run.is_some();
+        let running = self.state.runner.is_running();
         ui.add_enabled_ui(!running, |ui| {
             for &t in tasks::tasks(dialect, self.object.object_type) {
                 if ui
@@ -470,74 +319,6 @@ impl MaintenanceWindow {
             ui.visuals().text_color()
         };
         ui.label(RichText::new(cost).color(color));
-    }
-
-    fn run_ui(&self, ui: &mut Ui) {
-        if self.state.steps.is_empty() {
-            return;
-        }
-        ui.add_space(6.0);
-        let green = Color32::from_rgb(0x2f, 0xa0, 0x4c);
-        if let Some((text, ok)) = &self.state.outcome {
-            let color = if *ok {
-                green
-            } else {
-                ui.visuals().error_fg_color
-            };
-            ui.label(RichText::new(text).color(color));
-        }
-        egui::ScrollArea::vertical()
-            .id_salt("maintenance-run")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                for step in &self.state.steps {
-                    ui.horizontal(|ui| {
-                        let (mark, color, time) = match &step.status {
-                            Status::Waiting => ("·", ui.visuals().weak_text_color(), None),
-                            Status::Running => ("…", ui.visuals().text_color(), None),
-                            Status::Done(d) => ("✔", green, Some(*d)),
-                            Status::Failed(d, _) => ("✖", ui.visuals().error_fg_color, Some(*d)),
-                            Status::Skipped => ("–", ui.visuals().weak_text_color(), None),
-                        };
-                        ui.label(RichText::new(mark).color(color));
-                        let first = step.sql.lines().find(|l| {
-                            let l = l.trim();
-                            !l.is_empty() && l != "begin"
-                        });
-                        ui.label(RichText::new(first.unwrap_or_default().trim()).monospace());
-                        match (&step.status, time) {
-                            (Status::Running, _) => {
-                                if let Some(run) = &self.state.run {
-                                    ui.weak(format!(
-                                        "{:.1} s",
-                                        run.started.elapsed().as_secs_f64()
-                                    ));
-                                }
-                                ui.spinner();
-                            }
-                            (_, Some(d)) => {
-                                ui.weak(format!("{:.1} s", d.as_secs_f64()));
-                            }
-                            (Status::Skipped, _) => {
-                                ui.weak("not run");
-                            }
-                            _ => {}
-                        }
-                    });
-                    if let Status::Failed(_, e) = &step.status {
-                        ui.indent(("failed", &step.sql), |ui| {
-                            ui.colored_label(ui.visuals().error_fg_color, e);
-                        });
-                    }
-                    if !step.messages.is_empty() {
-                        ui.indent(("messages", &step.sql), |ui| {
-                            for m in &step.messages {
-                                ui.label(RichText::new(m).small());
-                            }
-                        });
-                    }
-                }
-            });
     }
 
     fn confirm_ui(
@@ -604,12 +385,8 @@ impl MaintenanceWindow {
     #[cfg(test)]
     pub fn outcome_for_test(&self) -> (Option<(String, bool)>, Vec<Vec<String>>) {
         (
-            self.state.outcome.clone(),
-            self.state
-                .steps
-                .iter()
-                .map(|s| s.messages.clone())
-                .collect(),
+            self.state.runner.outcome().cloned(),
+            self.state.runner.messages(),
         )
     }
 }
@@ -734,39 +511,8 @@ fn force_ui(ui: &mut Ui, o: &mut Options, facts: &Facts) {
     }
 }
 
-/// What came back as rows: MySQL's `Msg_type: Msg_text` lines (an error
-/// among them fails the statement), other answers cell by cell.
-fn answer(columns: &[String], rows: &[Vec<pythia_db::Cell>]) -> (Vec<String>, Option<String>) {
-    let at = |name: &str| columns.iter().position(|c| c.eq_ignore_ascii_case(name));
-    let mut lines = Vec::new();
-    let mut error = None;
-    match (at("Msg_type"), at("Msg_text")) {
-        (Some(kind), Some(text)) => {
-            for row in rows {
-                let cell = |i: usize| row.get(i).cloned().flatten().unwrap_or_default();
-                let (kind, text) = (cell(kind), cell(text));
-                if kind.eq_ignore_ascii_case("error") && error.is_none() {
-                    error = Some(text.clone());
-                }
-                lines.push(format!("{kind}: {text}"));
-            }
-        }
-        _ => {
-            for row in rows {
-                lines.push(
-                    row.iter()
-                        .map(|c| c.as_deref().unwrap_or("NULL"))
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                );
-            }
-        }
-    }
-    (lines, error)
-}
-
 /// The statements as a script the database's SQL window runs.
-fn script(dialect: Dialect, statements: &[String]) -> String {
+pub(crate) fn script(dialect: Dialect, statements: &[String]) -> String {
     statements
         .iter()
         .map(|s| {
@@ -782,7 +528,7 @@ fn script(dialect: Dialect, statements: &[String]) -> String {
 }
 
 /// The statements, highlighted, in a frame like the object forms' preview.
-fn code(ui: &mut Ui, cx: &DocContext, text: &str) {
+pub(crate) fn code(ui: &mut Ui, cx: &DocContext, text: &str) {
     let theme = pythia_ui::SyntaxTheme::for_visuals(ui.visuals());
     let font = egui::FontId::monospace(cx.settings.editor.font_size.min(14.0));
     egui::Frame::new()
@@ -804,42 +550,6 @@ fn code(ui: &mut Ui, cx: &DocContext, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mysql_answers_are_messages_and_errors() {
-        let columns: Vec<String> = ["Table", "Op", "Msg_type", "Msg_text"]
-            .map(String::from)
-            .to_vec();
-        let row = |kind: &str, text: &str| {
-            vec![
-                Some("shop.orders".to_owned()),
-                Some("optimize".to_owned()),
-                Some(kind.to_owned()),
-                Some(text.to_owned()),
-            ]
-        };
-        let (lines, error) = answer(
-            &columns,
-            &[
-                row(
-                    "note",
-                    "Table does not support optimize, doing recreate + analyze instead",
-                ),
-                row("status", "OK"),
-            ],
-        );
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[1], "status: OK");
-        assert_eq!(error, None);
-        let (_, error) = answer(
-            &columns,
-            &[
-                row("Error", "Table 'shop.nope' doesn't exist"),
-                row("status", "Operation failed"),
-            ],
-        );
-        assert_eq!(error.as_deref(), Some("Table 'shop.nope' doesn't exist"));
-    }
 
     #[test]
     fn scripts_end_statements_the_database_way() {

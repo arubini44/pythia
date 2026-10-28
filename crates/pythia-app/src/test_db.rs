@@ -139,3 +139,74 @@ pub fn as_dba(statements: &[&str]) {
         }
     }
 }
+
+/// Runs `f` with the client of a session of its own to the database of
+/// `env` (`user/password@connect string`); none when `env` isn't set.
+pub fn run_on<T: Send + 'static>(
+    env: &str,
+    kind: pythia_config::DbKind,
+    f: impl FnOnce(&mut dyn pythia_db::Client) -> T + Send + 'static,
+) -> Option<T> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use pythia_db::{ConnectParams, DbEvent, DbRequest, Session};
+
+    let spec = std::env::var(env).ok()?;
+    let (credentials, connect_string) = spec.rsplit_once('@')?;
+    let (username, password) = credentials.split_once('/')?;
+    let (tx, wake) = mpsc::channel();
+    let session = Session::connect(
+        ConnectParams {
+            kind,
+            username: username.into(),
+            password: password.into(),
+            connect_string: connect_string.into(),
+            privilege: Default::default(),
+            init_sql: Vec::new(),
+            ssh: None,
+        },
+        move || {
+            let _ = tx.send(());
+        },
+    );
+    let next = || loop {
+        if let Some(event) = session.try_recv() {
+            return event;
+        }
+        wake.recv_timeout(Duration::from_secs(60))
+            .expect("timed out");
+    };
+    match next() {
+        DbEvent::Connected(_) => {}
+        DbEvent::ConnectFailed(e) => panic!("{env}: {e}"),
+        _ => panic!("{env}: not connected"),
+    }
+    session.send(DbRequest::Run {
+        id: 1,
+        task: Box::new(move |client| Ok(Box::new(f(client)) as Box<dyn std::any::Any + Send>)),
+    });
+    loop {
+        if let DbEvent::TaskDone { result, .. } = next() {
+            let any = result.expect("the task ran");
+            return Some(*any.downcast::<T>().expect("its result"));
+        }
+    }
+}
+
+/// Runs `statements` on a session of their own to the database of `env`,
+/// each on its own outside a transaction (as PostgreSQL's CREATE INDEX
+/// CONCURRENTLY wants): their errors, or none when `env` isn't set.
+pub fn execute_on(
+    env: &str,
+    kind: pythia_config::DbKind,
+    statements: &[&str],
+) -> Option<Vec<Result<(), String>>> {
+    let owned: Vec<String> = statements.iter().map(|s| (*s).to_owned()).collect();
+    run_on(env, kind, move |client| {
+        owned
+            .iter()
+            .map(|sql| client.execute(sql).map_err(|e| e.to_string()))
+            .collect()
+    })
+}

@@ -1241,6 +1241,7 @@ pub fn insights(snap: &MsSnapshot, rates: Option<&Counters>) -> Vec<Insight> {
             text,
             target: None,
             session: None,
+            fix: None,
         })
     };
 

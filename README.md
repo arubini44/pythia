@@ -183,6 +183,13 @@ for Linux, Windows and macOS.
   reorganize indexes. The statements run one by one on the window's own
   session, which commits each, with Break; production connections ask
   first.
+- **Maintenance scan** of a schema or database (*Tools → Maintenance
+  Scan*, or right-click the Tables folder): what the tables need, with the
+  evidence and the fix for each, run as a batch object by object. Stale or
+  missing statistics and unusable indexes (Oracle), dead rows, wraparound
+  and invalid indexes (PostgreSQL), reclaimable space and old statistics
+  (MySQL), fragmented indexes, statistics with many changes and the last
+  CHECKDB (SQL Server). The dashboards' findings open the fix too.
 
 **Reports**
 - Built-in reports (invalid objects, unindexed foreign keys, largest

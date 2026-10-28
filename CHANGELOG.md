@@ -49,6 +49,37 @@ All notable changes to Pythia are documented here. The format follows
   session with Break; it commits each, so it never commits another
   window's changes. On a production connection it asks first, on a
   read-only one it doesn't run.
+- A **maintenance scan** of a schema (Oracle, MySQL) or database
+  (PostgreSQL, SQL Server) lists what its tables need, each finding with
+  its evidence and the statements that fix it, and runs the picked ones as
+  a batch (#145). *Tools → Maintenance Scan*, or *Maintenance scan…* on the
+  Tables folder's right-click menu.
+  - Oracle: missing and stale statistics (locked ones too, not picked:
+    gathering them takes force), unusable indexes and index
+    (sub)partitions, rebuilt first; for who may read the DBA views,
+    whether the automatic statistics task is enabled and how its last runs
+    went.
+  - PostgreSQL: dead rows, tables never vacuumed or analyzed, statistics
+    behind, transaction ID age past `autovacuum_freeze_max_age` (VACUUM
+    FREEZE), and indexes a failed `CREATE INDEX CONCURRENTLY` left invalid
+    (`REINDEX INDEX CONCURRENTLY`).
+  - MySQL: reclaimable space (`OPTIMIZE TABLE`), statistics older than the
+    table's last change (`ANALYZE TABLE`; reading their age takes `SELECT`
+    on `mysql.innodb_table_stats`).
+  - SQL Server: fragmented indexes of 1,000 pages or more, reorganized
+    (5–30 %) or rebuilt (over 30 %, online on Enterprise); statistics with
+    many changes; the last good `DBCC CHECKDB` (offered, not picked).
+
+  The batch goes object by object on the window's own session: a failing
+  statement skips the rest of its object's, Break stops it all, and the
+  scan runs again afterwards. While a statement runs, both maintenance
+  windows show the progress the database reports (Oracle's long
+  operations, PostgreSQL's `pg_stat_progress_*`, SQL Server's percent
+  complete).
+- The dashboards' findings offer their fix (#145): PostgreSQL's table with
+  many dead rows opens its maintenance on VACUUM (ANALYZE), and transaction
+  ID wraparound in the connected database opens the scan. MySQL's dashboard
+  names the table with the most reclaimable space, with OPTIMIZE TABLE.
 
 ### Fixed
 - On SQL Server, `UPDATE STATISTICS` in a SQL window without auto-commit

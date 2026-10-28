@@ -728,11 +728,41 @@ impl PythiaApp {
                     );
                 }
             }
-            OpenRequest::Maintenance { connection, object } => {
-                let existing = self.docs.iter().find_map(|(id, d)| match &d.kind {
+            OpenRequest::Maintenance {
+                connection,
+                object,
+                task,
+            } => {
+                let existing = self.docs.iter_mut().find_map(|(id, d)| match &mut d.kind {
                     DocKind::Maintenance(w)
                         if d.connection.as_deref() == Some(connection.as_str())
                             && w.object == object =>
+                    {
+                        // A finding's fix picks its task there too.
+                        if let Some((task, options)) = task.clone() {
+                            w.task = Some(task);
+                            w.options = options;
+                        }
+                        Some(*id)
+                    }
+                    _ => None,
+                });
+                match existing {
+                    Some(id) => self.open_tab(Tab::Doc(id)),
+                    None => {
+                        let mut window = crate::maintenance::MaintenanceWindow::new(object);
+                        if let Some((task, options)) = task {
+                            window = window.with_task(task, options);
+                        }
+                        self.add_doc(Some(connection), DocKind::Maintenance(window));
+                    }
+                }
+            }
+            OpenRequest::MaintenanceScan { connection, schema } => {
+                let existing = self.docs.iter().find_map(|(id, d)| match &d.kind {
+                    DocKind::MaintenanceScan(w)
+                        if d.connection.as_deref() == Some(connection.as_str())
+                            && w.schema == schema =>
                     {
                         Some(*id)
                     }
@@ -743,9 +773,7 @@ impl PythiaApp {
                     None => {
                         self.add_doc(
                             Some(connection),
-                            DocKind::Maintenance(crate::maintenance::MaintenanceWindow::new(
-                                object,
-                            )),
+                            DocKind::MaintenanceScan(crate::maintenance::ScanWindow::new(schema)),
                         );
                     }
                 }
@@ -2147,6 +2175,22 @@ impl PythiaApp {
 
     /// Opens the form (or table builder) for a new object in the schema the
     /// object browser shows, else the connection's current one.
+    /// What a maintenance scan on `connection` covers: the schema (Oracle)
+    /// or database (MySQL) the object browser shows, else the connection's;
+    /// PostgreSQL and SQL Server scan the database (none).
+    fn scan_schema(&self, connection: &str) -> String {
+        match self.dialect_of(Some(connection)).kind() {
+            pythia_db::DbKind::Oracle | pythia_db::DbKind::MySql => self
+                .browser
+                .schema()
+                .filter(|_| self.browser.connection.as_deref() == Some(connection))
+                .map(str::to_owned)
+                .or_else(|| self.conns.get(connection).map(|c| c.current_schema()))
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
     fn new_object(&mut self, object_type: pythia_db::ObjectType) {
         use pythia_db::ObjectType;
         let Some(connection) = self.current_connection() else {
@@ -2494,6 +2538,13 @@ impl PythiaApp {
                     self.connect_dialog.show(self.last_profile.as_ref());
                 }
             }
+            Command::MaintenanceScan => match self.current_connection() {
+                Some(connection) => {
+                    let schema = self.scan_schema(&connection);
+                    self.open(OpenRequest::MaintenanceScan { connection, schema });
+                }
+                None => self.connect_dialog.show(self.last_profile.as_ref()),
+            },
             Command::NavigateBack => self.navigate_history(true),
             Command::NavigateForward => self.navigate_history(false),
             Command::RenameSymbol => {
@@ -2798,7 +2849,7 @@ impl PythiaApp {
             Some(DocKind::Sql(_)) => self.settings.autocommit && !conn.profile.production,
             // Its statements commit each (DDL and DBMS_STATS do anyway);
             // VACUUM and REINDEX CONCURRENTLY refuse a transaction block.
-            Some(DocKind::Maintenance(_)) => true,
+            Some(DocKind::Maintenance(_) | DocKind::MaintenanceScan(_)) => true,
             _ => false,
         }
     }
@@ -3328,7 +3379,11 @@ impl PythiaApp {
                             Command::FindInSource,
                             Command::SearchData,
                         ],
-                        &[Command::SchedulerJobs, Command::InvalidObjects],
+                        &[
+                            Command::SchedulerJobs,
+                            Command::InvalidObjects,
+                            Command::MaintenanceScan,
+                        ],
                         &[Command::ImportData, Command::ExportTables],
                         &[Command::CompareSchemas, Command::CompareData],
                     ],
@@ -4773,6 +4828,14 @@ impl PythiaApp {
         match self.docs.get_mut(&self.focused?).map(|d| &mut d.kind) {
             Some(DocKind::Program(w)) => w.active_editor(),
             _ => None,
+        }
+    }
+
+    pub fn test_scan_window(&mut self) -> &mut crate::maintenance::ScanWindow {
+        let id = self.focused.expect("focused document");
+        match self.docs.get_mut(&id).map(|d| &mut d.kind) {
+            Some(DocKind::MaintenanceScan(m)) => m,
+            _ => panic!("not a maintenance scan"),
         }
     }
 

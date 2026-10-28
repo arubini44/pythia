@@ -410,7 +410,7 @@ fn literal(s: &str) -> String {
 }
 
 /// Rebuilds an index segment: the index, or one of its (sub)partitions.
-fn rebuild(dialect: Dialect, segment: &IndexSegment, online: bool) -> String {
+pub(super) fn rebuild(dialect: Dialect, segment: &IndexSegment, online: bool) -> String {
     let index = dialect.qualified(&segment.owner, &segment.index);
     let part = match &segment.part {
         Part::Whole => String::new(),

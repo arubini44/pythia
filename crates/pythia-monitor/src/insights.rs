@@ -24,6 +24,55 @@ pub struct Insight {
     pub target: Option<Target>,
     /// The session it is about, for a "Details" link next to the target.
     pub session: Option<(i64, i64)>,
+    /// The maintenance that fixes it, offered as a button (#145).
+    pub fix: Option<Fix>,
+}
+
+/// Maintenance that fixes a finding: the host opens its window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fix {
+    /// A table's maintenance window, on this task.
+    Table {
+        schema: String,
+        table: String,
+        task: FixTask,
+    },
+    /// The maintenance scan of the database.
+    Scan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixTask {
+    /// PostgreSQL's `VACUUM (ANALYZE)`.
+    VacuumAnalyze,
+    /// MySQL's `OPTIMIZE TABLE`.
+    Optimize,
+}
+
+impl Fix {
+    /// The button's label and what it does.
+    pub fn button(&self) -> (&'static str, &'static str) {
+        match self {
+            Fix::Table {
+                task: FixTask::VacuumAnalyze,
+                ..
+            } => (
+                "VACUUM…",
+                "Open the table's maintenance on VACUUM (ANALYZE)",
+            ),
+            Fix::Table {
+                task: FixTask::Optimize,
+                ..
+            } => (
+                "OPTIMIZE…",
+                "Open the table's maintenance on OPTIMIZE TABLE",
+            ),
+            Fix::Scan => (
+                "Scan…",
+                "Scan the database for what its tables need, and fix it",
+            ),
+        }
+    }
 }
 
 fn secs(s: f64) -> String {
@@ -55,6 +104,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
             ),
             target: Some(Target::BlockingTree),
             session: Some((b.sid, b.serial)),
+            fix: None,
         });
     }
     // Without the CPU count (V$OSSTAT not granted, #90) the load can't be
@@ -76,6 +126,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                 ),
                 target: Some(Target::Sessions),
                 session: None,
+                fix: None,
             });
         } else if let Some(cpus) = cpus
             && r.aas >= cpus * 0.7
@@ -88,6 +139,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                 ),
                 target: Some(Target::Sessions),
                 session: None,
+                fix: None,
             });
         }
         if let Some(cpu) = r.host_cpu_pct {
@@ -97,6 +149,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                     text: format!("Host CPU at {cpu:.0} %"),
                     target: None,
                     session: None,
+                    fix: None,
                 });
             } else if cpu >= 75.0 {
                 out.push(Insight {
@@ -104,6 +157,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                     text: format!("Host CPU at {cpu:.0} %"),
                     target: None,
                     session: None,
+                    fix: None,
                 });
             }
         }
@@ -121,6 +175,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
             text: format!("Tablespace {} is {:.0} % full", t.name, t.used_pct),
             target: None,
             session: None,
+            fix: None,
         });
     }
     if let Some(limit) = snap.open_cursors_limit.filter(|l| *l > 0) {
@@ -139,6 +194,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
                         serial: c.serial,
                     }),
                     session: None,
+                    fix: None,
                 });
             }
         }
@@ -153,6 +209,7 @@ pub fn insights(snap: &DashboardSnapshot, rates: Option<&Rates>) -> Vec<Insight>
             ),
             target: None,
             session: None,
+            fix: None,
         });
     }
     out.sort_by_key(|i| std::cmp::Reverse(i.severity));
