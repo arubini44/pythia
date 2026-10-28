@@ -4,7 +4,9 @@
 //! see pythia-db's MySQL tests). With `PYTHIA_TEST_MYSQL_DBA` (e.g.
 //! `root/mysql@localhost:3306/pythia` for the docker-compose service) it
 //! also checks what needs privileges: transactions, lock waits, top
-//! statements.
+//! statements. `PYTHIA_TEST_MYSQL_REPLICA` names an account on a replica
+//! that may read its replication status (e.g. root), for the replication
+//! channels.
 
 use std::sync::{Mutex, mpsc};
 use std::time::Duration;
@@ -440,6 +442,27 @@ fn running_statement_plan() {
         }
     }
     setup.ok("drop table pythia_mon_plan");
+}
+
+/// A replica's channels on the dashboard; MariaDB's from `SHOW ALL SLAVES
+/// STATUS` (#148).
+#[test]
+fn replication_channels() {
+    let Some(replica) = params("PYTHIA_TEST_MYSQL_REPLICA") else {
+        return;
+    };
+    let s = Harness::connect(replica).snapshot(false);
+    assert!(
+        s.errors
+            .iter()
+            .all(|(section, _)| *section != "Replication"),
+        "{:?}",
+        s.errors
+    );
+    let r = s.replicas.first().expect("a replication channel");
+    assert!(r.io_running && r.sql_running, "{r:?}");
+    assert!(r.source.ends_with(":3306"), "{r:?}");
+    assert!(r.lag_secs.is_some() && r.last_error.is_none(), "{r:?}");
 }
 
 /// The session list (#131): idle sessions too, an open transaction, who

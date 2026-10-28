@@ -558,7 +558,16 @@ fn replication(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError>
            left join performance_schema.replication_connection_configuration f \
              on f.channel_name = c.channel_name",
         &[],
-    )?;
+    );
+    let rows = match rows {
+        // MariaDB has only some of these tables.
+        Err(e) if e.code == Some(1146) => {
+            let rows = c.query("show all slaves status", &[])?;
+            s.replicas = rows.iter().map(|r| mariadb_replica(r)).collect();
+            return Ok(());
+        }
+        rows => rows?,
+    };
     s.replicas = rows
         .iter()
         .map(|r| Replica {
@@ -572,6 +581,22 @@ fn replication(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError>
         })
         .collect();
     Ok(())
+}
+
+/// A connection of a MariaDB replica: a row of `SHOW ALL SLAVES STATUS`,
+/// by position (the columns up to `Last_SQL_Error` are the same in every
+/// version; later ones differ).
+fn mariadb_replica(r: &[Cell]) -> Replica {
+    let error = |i| opt(r, i).filter(|e| !e.is_empty());
+    Replica {
+        channel: text(r, 0),
+        source: format!("{}:{}", text(r, 3), text(r, 5)),
+        io_running: text(r, 12) == "Yes",
+        sql_running: text(r, 13) == "Yes",
+        // Seconds_Behind_Master: NULL while it doesn't apply.
+        lag_secs: opt(r, 34).map(|_| int(r, 34)),
+        last_error: error(37).or_else(|| error(39)),
+    }
 }
 
 /// The schemas of the server itself, left out of the storage lists.

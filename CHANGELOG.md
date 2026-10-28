@@ -77,6 +77,11 @@ All notable changes to Pythia are documented here. The format follows
   section failed with *Table 'performance_schema.data_locks' doesn't
   exist*. On MariaDB and MySQL 5.7, the details now read them from
   information_schema, which lists the locks involved in lock waits.
+- The MySQL dashboard showed *Table
+  'performance_schema.replication_connection_status' doesn't exist* on
+  MariaDB, and never showed a MariaDB replica's connections (#148). They
+  now come from `SHOW ALL SLAVES STATUS`: each connection's source, its
+  IO and SQL threads, lag and last error.
 
 ## [0.7.0] - 2026-10-28
 
