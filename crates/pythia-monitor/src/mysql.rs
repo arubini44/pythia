@@ -675,7 +675,8 @@ pub struct ThreadDetail {
     pub statement: Option<ThreadStatement>,
     /// The statements before, newest first.
     pub history: Vec<ThreadStatement>,
-    /// `EXPLAIN FOR CONNECTION` of the running statement.
+    /// `EXPLAIN FOR CONNECTION` (MariaDB: `SHOW EXPLAIN`) of the running
+    /// statement.
     pub plan: Option<String>,
     pub transaction: Option<ThreadTransaction>,
     pub locks: Vec<DataLock>,
@@ -923,39 +924,18 @@ pub fn thread_detail(c: &mut dyn Client, id: i64) -> ThreadDetail {
         })(),
     );
     if thread.command == "Query" && thread.query.is_some() {
-        // The id is a number: safe in the statement. TREE (8.0.16+) reads
-        // best; older servers have the table.
-        let plan = c
-            .query(&format!("explain format=tree for connection {id}"), &[])
-            .map(|rows| {
-                rows.iter()
-                    .map(|r| text(r, 0))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            // The tree only covers what the iterator executor runs (not an
-            // UPDATE, for one): the table then.
-            .and_then(|tree| {
-                if tree.contains("not executable by iterator executor") {
-                    Err(DbError::new(tree))
-                } else {
-                    Ok(tree)
-                }
-            })
-            .or_else(|_| {
-                c.query(&format!("explain for connection {id}"), &[])
-                    .map(|rows| {
-                        rows.iter()
-                            .map(|r| {
-                                r.iter()
-                                    .map(|c| c.as_deref().unwrap_or("NULL"))
-                                    .collect::<Vec<_>>()
-                                    .join("  ")
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-            });
+        let mariadb = c
+            .query("select version()", &[])
+            .is_ok_and(|rows| rows.first().is_some_and(|r| text(r, 0).contains("MariaDB")));
+        let plan = if mariadb {
+            let lock_wait = d
+                .transaction
+                .as_ref()
+                .is_some_and(|t| t.state == "LOCK WAIT");
+            mariadb_plan(c, id, lock_wait)
+        } else {
+            mysql_plan(c, id)
+        };
         match plan {
             Ok(plan) if !plan.is_empty() => d.plan = Some(plan),
             Ok(_) => {}
@@ -965,6 +945,69 @@ pub fn thread_detail(c: &mut dyn Client, id: i64) -> ThreadDetail {
     }
     d.errors = errors;
     d
+}
+
+/// `EXPLAIN FOR CONNECTION` of a thread's running statement. The id is a
+/// number: safe in the statement. TREE (8.0.16+) reads best; older servers
+/// have the table.
+fn mysql_plan(c: &mut dyn Client, id: i64) -> Result<String, DbError> {
+    c.query(&format!("explain format=tree for connection {id}"), &[])
+        .map(|rows| {
+            rows.iter()
+                .map(|r| text(r, 0))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        // The tree only covers what the iterator executor runs (not an
+        // UPDATE, for one): the table then.
+        .and_then(|tree| {
+            if tree.contains("not executable by iterator executor") {
+                Err(DbError::new(tree))
+            } else {
+                Ok(tree)
+            }
+        })
+        .or_else(|_| {
+            c.query(&format!("explain for connection {id}"), &[])
+                .map(|rows| plan_table(&rows))
+        })
+}
+
+/// MariaDB's `SHOW EXPLAIN` (10.0+; `EXPLAIN FOR CONNECTION` only from
+/// 10.9). The thread hands over its plan itself, between rows: not while it
+/// waits for a row lock, where the server would give up only after 30 s.
+fn mariadb_plan(c: &mut dyn Client, id: i64, lock_wait: bool) -> Result<String, DbError> {
+    if lock_wait {
+        return Err(DbError::new(
+            "Not available while the thread waits for a row lock: on MariaDB, the thread \
+             hands over its plan itself, between rows.",
+        ));
+    }
+    c.query(
+        &format!("set statement max_statement_time = 2 for show explain for {id}"),
+        &[],
+    )
+    .map(|rows| plan_table(&rows))
+    .map_err(|e| {
+        if e.code == Some(1969) {
+            DbError::new("The thread didn't hand over its plan within 2 seconds.")
+        } else {
+            e
+        }
+    })
+}
+
+/// The classic `EXPLAIN` table, a line per row.
+fn plan_table(rows: &[Vec<Cell>]) -> String {
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .map(|c| c.as_deref().unwrap_or("NULL"))
+                .collect::<Vec<_>>()
+                .join("  ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Every thread, for the Sessions tab: idle ones too, the server's own only

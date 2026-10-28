@@ -279,7 +279,8 @@ fn lock_waits_and_top_statements() {
 
 /// A thread's details (#87): the statement it runs and its plan, the lock
 /// it waits for and whose; the transaction of the one it waits for; then
-/// killing the query, and the connection.
+/// killing the query, and the connection. On MariaDB (#146): no plan while
+/// it waits for a row lock.
 #[test]
 fn thread_details_and_kill() {
     let (Some(app), Some(dba)) = (params("PYTHIA_TEST_MYSQL"), params("PYTHIA_TEST_MYSQL_DBA"))
@@ -288,6 +289,7 @@ fn thread_details_and_kill() {
     };
     let _serial = LOCK_WAITS.lock().unwrap_or_else(|e| e.into_inner());
     let mut setup = Harness::connect(app.clone());
+    let mariadb = setup.scalar("select version()").contains("MariaDB");
     setup.ok("create table if not exists pythia_mon_threads (id int primary key, v int)");
     setup.ok("delete from pythia_mon_threads");
     setup.ok("insert into pythia_mon_threads values (1, 0)");
@@ -314,15 +316,24 @@ fn thread_details_and_kill() {
             .unwrap();
     }
     eprintln!("{d:#?}");
-    assert!(d.errors.is_empty(), "{:?}", d.errors);
+    if mariadb {
+        assert!(
+            matches!(d.errors.as_slice(), [("Plan", e)] if e.contains("row lock")),
+            "{:?}",
+            d.errors
+        );
+        assert_eq!(d.plan, None);
+    } else {
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        let plan = d.plan.as_deref().expect("EXPLAIN FOR CONNECTION");
+        assert!(plan.contains("pythia_mon_threads"), "{plan}");
+    }
     assert_eq!(d.thread.as_ref().unwrap().command, "Query");
     let statement = d.statement.as_ref().expect("its statement");
     assert!(
         statement.running && statement.text.contains("set v = 2"),
         "{statement:?}"
     );
-    let plan = d.plan.as_deref().expect("EXPLAIN FOR CONNECTION");
-    assert!(plan.contains("pythia_mon_threads"), "{plan}");
     assert_eq!(d.waits_for, Some(a_id));
     assert!(
         d.locks.iter().any(|l| l.status == "WAITING"),
@@ -363,6 +374,59 @@ fn thread_details_and_kill() {
     assert!(gone.thread.is_none() || gone.thread.unwrap().command == "Killed");
     b.session.send(DbRequest::Rollback);
     setup.ok("drop table pythia_mon_threads");
+}
+
+/// The plan of a running statement: on MariaDB from `SHOW EXPLAIN`, which
+/// before 10.9 is all it has (#146).
+#[test]
+fn running_statement_plan() {
+    let (Some(app), Some(dba)) = (params("PYTHIA_TEST_MYSQL"), params("PYTHIA_TEST_MYSQL_DBA"))
+    else {
+        return;
+    };
+    let mut setup = Harness::connect(app.clone());
+    setup.ok("drop table if exists pythia_mon_plan");
+    setup.ok("create table pythia_mon_plan (n int)");
+    setup.ok("insert into pythia_mon_plan values (1)");
+    // 1024 rows: their cross join runs until it is killed.
+    for _ in 0..10 {
+        setup.ok("insert into pythia_mon_plan select n from pythia_mon_plan");
+    }
+    setup.ok("commit");
+
+    let mut b = Harness::connect(app);
+    let b_id: i64 = b.scalar("select connection_id()").parse().unwrap();
+    b.send(
+        "select sum(plan_a.n + plan_d.n) from pythia_mon_plan plan_a, pythia_mon_plan plan_b, \
+                pythia_mon_plan plan_c, pythia_mon_plan plan_d",
+    );
+    let mut monitor = Harness::connect(dba);
+    let mut d = monitor
+        .run(move |c| Ok(mysql::thread_detail(c, b_id)))
+        .unwrap();
+    for _ in 0..50 {
+        if d.plan.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        d = monitor
+            .run(move |c| Ok(mysql::thread_detail(c, b_id)))
+            .unwrap();
+    }
+    eprintln!("{d:#?}");
+    let plan = d.plan.as_deref().expect("the plan");
+    assert!(plan.contains("plan_d"), "{plan}");
+    assert!(d.errors.is_empty(), "{:?}", d.errors);
+
+    monitor.run(move |c| mysql::kill(c, b_id, true)).unwrap();
+    loop {
+        match b.next() {
+            DbEvent::Failed { .. } => break,
+            DbEvent::Transaction { .. } => panic!("the cross join ended by itself"),
+            _ => {}
+        }
+    }
+    setup.ok("drop table pythia_mon_plan");
 }
 
 /// The session list (#131): idle sessions too, an open transaction, who

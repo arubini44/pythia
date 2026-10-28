@@ -67,6 +67,11 @@ All notable changes to Pythia are documented here. The format follows
   menu has *Edit cell*, *Edit in dialog…* and *Set NULL*. Changed, new
   and deleted values are tinted as in the grid. An inline edit open when
   you switch views or records is kept.
+- A MariaDB session's details failed on the plan (#146). Before 10.9 it
+  was a syntax error: MariaDB only has `SHOW EXPLAIN`, which is used now.
+  From 10.9 on, a session waiting for a row lock held up the monitor for
+  30 s before failing. MariaDB can't explain a statement while it waits
+  for a row lock, so the details now say so right away.
 
 ## [0.7.0] - 2026-10-28
 
