@@ -665,7 +665,16 @@ impl<'a> ResultGrid<'a> {
             selection_summary: None,
         };
 
-        let focus_id = id.with("focus");
+        // Unique where the grid is placed: the compare window's grids have
+        // fixed ids.
+        let focus_id = ui.make_persistent_id(id.with("focus"));
+        // egui takes the focus from an id no widget uses in a pass: the
+        // keys would only reach the grid in the frame after a click.
+        ui.interact(
+            ui.available_rect_before_wrap(),
+            focus_id,
+            Sense::focusable_noninteractive(),
+        );
         if ui.memory(|m| m.has_focus(focus_id)) {
             handle_keys(ui, state, columns, rows);
         }
@@ -2398,5 +2407,105 @@ mod tests {
             "{} vs {header_only}",
             state.widths[&0]
         );
+    }
+
+    /// Runs a frame of the grid with `events`: the texts drawn, with their
+    /// centers.
+    fn frame(
+        ctx: &egui::Context,
+        columns: &[Column],
+        rows: &[Vec<Cell>],
+        state: &mut GridState,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, egui::Pos2)> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            ResultGrid::new(columns, rows, state, "grid").show(ui);
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some((
+                    t.galley.text().to_owned(),
+                    t.pos + t.galley.rect.center().to_vec2(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn texts(drawn: &[(String, egui::Pos2)]) -> Vec<&str> {
+        drawn.iter().map(|(t, _)| t.as_str()).collect()
+    }
+
+    /// Clicks (twice: double click) the text drawn last frame.
+    fn click(
+        ctx: &egui::Context,
+        columns: &[Column],
+        rows: &[Vec<Cell>],
+        state: &mut GridState,
+        text: &str,
+        times: usize,
+    ) {
+        let drawn = frame(ctx, columns, rows, state, vec![]);
+        let pos = drawn
+            .iter()
+            .find(|(t, _)| t == text)
+            .unwrap_or_else(|| panic!("{text} not in {:?}", texts(&drawn)))
+            .1;
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            ctx,
+            columns,
+            rows,
+            state,
+            vec![egui::Event::PointerMoved(pos)],
+        );
+        for _ in 0..times {
+            frame(ctx, columns, rows, state, vec![button(true)]);
+            frame(ctx, columns, rows, state, vec![button(false)]);
+        }
+    }
+
+    fn key(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// The keys keep reaching the grid after the click that focused it
+    /// (#143).
+    #[test]
+    fn keys_reach_the_grid_after_a_click() {
+        let (c, r) = (cols(), rows());
+        let ctx = egui::Context::default();
+        let mut state = GridState::default();
+        click(&ctx, &c, &r, &mut state, "x", 1);
+        assert_eq!(state.cursor, Some((0, 1)));
+        for _ in 0..3 {
+            frame(&ctx, &c, &r, &mut state, vec![]);
+        }
+        frame(&ctx, &c, &r, &mut state, vec![key(Key::ArrowDown)]);
+        assert_eq!(state.cursor, Some((1, 1)));
+        frame(&ctx, &c, &r, &mut state, vec![key(Key::ArrowDown)]);
+        assert_eq!(state.cursor, Some((2, 1)));
     }
 }

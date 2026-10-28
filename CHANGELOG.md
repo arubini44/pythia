@@ -6,6 +6,12 @@ All notable changes to Pythia are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Result grids lost the keys one frame after a click (#143): the arrows,
+  Enter/F2, typing, Delete and Ctrl+C/V did nothing unless pressed right
+  away, and moving the mouse was enough to lose them. The grid keeps them
+  now until something else is clicked.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added
