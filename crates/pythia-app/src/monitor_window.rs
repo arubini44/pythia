@@ -119,6 +119,11 @@ impl MonitorWindow {
                         });
                     }
                 }
+                MonitorAction::Maintain(fix) => {
+                    if let Some(connection) = cx.connection.clone() {
+                        effects.open.push(maintain(connection, fix));
+                    }
+                }
                 MonitorAction::OpenObject {
                     owner,
                     name,
@@ -138,6 +143,44 @@ impl MonitorWindow {
             }
         }
         effects
+    }
+}
+
+/// The maintenance that fixes a dashboard finding (#145): the table's
+/// window on the task, or the database's scan.
+fn maintain(connection: String, fix: pythia_monitor::insights::Fix) -> OpenRequest {
+    use crate::maintenance::{Options, Task};
+    use pythia_monitor::insights::{Fix, FixTask};
+    match fix {
+        Fix::Table {
+            schema,
+            table,
+            task,
+        } => {
+            let task = match task {
+                FixTask::VacuumAnalyze => (
+                    Task::Vacuum,
+                    Options {
+                        analyze: true,
+                        ..Options::default()
+                    },
+                ),
+                FixTask::Optimize => (Task::Optimize, Options::default()),
+            };
+            OpenRequest::Maintenance {
+                connection,
+                object: ObjectRef {
+                    owner: schema,
+                    name: table,
+                    object_type: pythia_db::ObjectType::Table,
+                },
+                task: Some(task),
+            }
+        }
+        Fix::Scan => OpenRequest::MaintenanceScan {
+            connection,
+            schema: String::new(),
+        },
     }
 }
 

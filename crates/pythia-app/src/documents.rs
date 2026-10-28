@@ -234,11 +234,15 @@ pub enum OpenRequest {
         /// Select this parameter of the member (named notation).
         parameter: Option<String>,
     },
-    /// The maintenance window of a table, materialized view or index.
+    /// The maintenance window of a table, materialized view or index, on
+    /// a task (a dashboard finding's fix) or the first one.
     Maintenance {
         connection: String,
         object: ObjectRef,
+        task: Option<(crate::maintenance::Task, crate::maintenance::Options)>,
     },
+    /// The maintenance scan of a schema (Oracle, MySQL) or the database.
+    MaintenanceScan { connection: String, schema: String },
     /// The invalid objects window of a schema (or all user schemas),
     /// recompiling everything right away if asked.
     InvalidObjects {
@@ -280,6 +284,7 @@ pub enum DocKind {
     ObjectEditor(crate::object_editor::ObjectEditor),
     Invalid(crate::invalid_window::InvalidObjectsWindow),
     Maintenance(crate::maintenance::MaintenanceWindow),
+    MaintenanceScan(crate::maintenance::ScanWindow),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -337,6 +342,7 @@ impl Document {
             DocKind::ObjectEditor(e) => e.title(),
             DocKind::Invalid(i) => i.title(),
             DocKind::Maintenance(m) => m.title(),
+            DocKind::MaintenanceScan(m) => m.title(),
         }
     }
 
@@ -370,6 +376,7 @@ impl Document {
             DocKind::ObjectEditor(e) => e.is_busy(),
             DocKind::Invalid(i) => i.is_busy(),
             DocKind::Maintenance(m) => m.is_busy(),
+            DocKind::MaintenanceScan(m) => m.is_busy(),
         }
     }
 
@@ -444,6 +451,7 @@ impl Document {
             DocKind::ObjectEditor(e) => e.on_event(event),
             DocKind::Invalid(i) => i.on_event(event),
             DocKind::Maintenance(m) => m.on_event(event, cx.dialect),
+            DocKind::MaintenanceScan(m) => m.on_event(event, cx.dialect),
         }
     }
 
@@ -464,6 +472,7 @@ impl Document {
             DocKind::ObjectEditor(e) => e.ui(ui, cx),
             DocKind::Invalid(i) => i.ui(ui, cx),
             DocKind::Maintenance(m) => m.ui(ui, cx),
+            DocKind::MaintenanceScan(m) => m.ui(ui, cx),
         }
     }
 

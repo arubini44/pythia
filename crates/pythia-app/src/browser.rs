@@ -1227,16 +1227,36 @@ impl Browser {
                     if toggle || label.clicked() {
                         toggles.push(Node::Folder((*owner).to_owned(), *object_type));
                     }
-                    if can_create(*object_type) && self.dialect.supports(Feature::ObjectEditors) {
+                    let create =
+                        can_create(*object_type) && self.dialect.supports(Feature::ObjectEditors);
+                    // What the schema's tables need (#145).
+                    let scan = *object_type == ObjectType::Table
+                        && crate::maintenance::has_tasks(self.dialect, ObjectType::Table);
+                    if create || scan {
                         label.context_menu(|ui| {
-                            let kind = object_type.dictionary_name().to_lowercase();
-                            let label = if *owner == "PUBLIC" {
-                                format!("New public {kind}…")
-                            } else {
-                                format!("New {kind}…")
-                            };
-                            if ui.button(label).clicked() {
-                                actions.push(ObjectAction::New((*owner).to_owned(), *object_type));
+                            if create {
+                                let kind = object_type.dictionary_name().to_lowercase();
+                                let label = if *owner == "PUBLIC" {
+                                    format!("New public {kind}…")
+                                } else {
+                                    format!("New {kind}…")
+                                };
+                                if ui.button(label).clicked() {
+                                    actions
+                                        .push(ObjectAction::New((*owner).to_owned(), *object_type));
+                                    ui.close();
+                                }
+                            }
+                            if scan
+                                && ui
+                                    .button("Maintenance scan…")
+                                    .on_hover_text(
+                                        "What the tables need: statistics, unusable or \
+                                         fragmented indexes, dead rows, space",
+                                    )
+                                    .clicked()
+                            {
+                                actions.push(ObjectAction::MaintenanceScan((*owner).to_owned()));
                                 ui.close();
                             }
                         });
@@ -1738,9 +1758,21 @@ impl Browser {
                 self.pending.insert(id, Pending::TestLink(object));
                 effects.request(Target::Meta, DbRequest::Meta { id, query });
             }
-            ObjectAction::Maintenance(object) => effects
-                .open
-                .push(OpenRequest::Maintenance { connection, object }),
+            ObjectAction::Maintenance(object) => effects.open.push(OpenRequest::Maintenance {
+                connection,
+                object,
+                task: None,
+            }),
+            ObjectAction::MaintenanceScan(schema) => {
+                // PostgreSQL and SQL Server scan the database.
+                let schema = match self.dialect.kind() {
+                    pythia_db::DbKind::Oracle | pythia_db::DbKind::MySql => schema,
+                    _ => String::new(),
+                };
+                effects
+                    .open
+                    .push(OpenRequest::MaintenanceScan { connection, schema });
+            }
             ObjectAction::Test(object, member) => self.request_test(object, member, false, effects),
             ObjectAction::Debug(object, member) => self.request_test(object, member, true, effects),
         }
@@ -2249,6 +2281,8 @@ pub enum ObjectAction {
     TestLink(ObjectRef),
     /// Statistics, rebuilds, vacuum and the like of a table or index.
     Maintenance(ObjectRef),
+    /// What a schema's tables need (#145).
+    MaintenanceScan(String),
 }
 
 /// Statements generated from a table's columns.

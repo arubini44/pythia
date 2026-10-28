@@ -13,7 +13,7 @@ use pythia_db::{Cell, Client, DbError};
 
 use crate::cells::{all_counts, int, num, opt, plural, text, top_counts};
 use crate::connections::{Connection, ConnectionList};
-use crate::insights::{Insight, Severity};
+use crate::insights::{Fix, FixTask, Insight, Severity};
 use crate::queries::SectionError;
 use crate::ui::style::{bytes, compact, duration};
 
@@ -1047,12 +1047,18 @@ pub fn insights(snap: &PgSnapshot, rates: Option<&Counters>) -> Vec<Insight> {
             text,
             target: None,
             session: None,
+            fix: None,
         })
     };
     let who = |pid: i64, user: &Option<String>| match user {
         Some(u) => format!("Session {pid} ({u})"),
         None => format!("Session {pid}"),
     };
+    // Findings that maintenance fixes (#145), by their text: not on a
+    // standby, which is read-only.
+    let mut fixes: Vec<(String, Fix)> = Vec::new();
+    let standby = snap.server.as_ref().is_some_and(|s| s.standby);
+    let current = snap.server.as_ref().map(|s| s.database.as_str());
 
     // Lock waits by blocking session.
     let mut blockers: Vec<(&LockWait, i64, f64)> = Vec::new();
@@ -1174,17 +1180,22 @@ pub fn insights(snap: &PgSnapshot, rates: Option<&Counters>) -> Vec<Insight> {
     if let Some((database, age)) = &snap.oldest_xid {
         let used = *age as f64 / WRAPAROUND;
         if used >= 0.45 {
+            let text = format!(
+                "Database {database} is {:.0} % of the way to transaction ID wraparound: \
+                 VACUUM (FREEZE) it, and check what holds autovacuum back",
+                used * 100.0
+            );
+            // The scan finds the tables to freeze, in this database.
+            if !standby && current == Some(database.as_str()) {
+                fixes.push((text.clone(), Fix::Scan));
+            }
             add(
                 if used >= 0.7 {
                     Severity::Critical
                 } else {
                     Severity::Warning
                 },
-                format!(
-                    "Database {database} is {:.0} % of the way to transaction ID \
-                     wraparound: VACUUM (FREEZE) it, and check what holds autovacuum back",
-                    used * 100.0
-                ),
+                text,
             );
         }
     }
@@ -1273,22 +1284,35 @@ pub fn insights(snap: &PgSnapshot, rates: Option<&Counters>) -> Vec<Insight> {
         let vacuumed = t.vacuumed_secs_ago.map_or("never vacuumed".into(), |s| {
             format!("last vacuumed {} ago", duration(s))
         });
-        add(
-            Severity::Info,
-            format!(
-                "Table {}.{} has {} dead rows ({:.0} %), {vacuumed}",
-                t.schema,
-                t.name,
-                compact(t.dead_rows as f64),
-                t.dead_pct()
-            ),
+        let text = format!(
+            "Table {}.{} has {} dead rows ({:.0} %), {vacuumed}",
+            t.schema,
+            t.name,
+            compact(t.dead_rows as f64),
+            t.dead_pct()
         );
+        if !standby {
+            fixes.push((
+                text.clone(),
+                Fix::Table {
+                    schema: t.schema.clone(),
+                    table: t.name.clone(),
+                    task: FixTask::VacuumAnalyze,
+                },
+            ));
+        }
+        add(Severity::Info, text);
     }
-    if snap.server.as_ref().is_some_and(|s| s.standby) {
+    if standby {
         add(
             Severity::Info,
             "This server is a standby (read-only)".into(),
         );
+    }
+    for (text, fix) in fixes {
+        if let Some(i) = out.iter_mut().find(|i| i.text == text) {
+            i.fix = Some(fix);
+        }
     }
     out.sort_by_key(|i| std::cmp::Reverse(i.severity));
     out
@@ -1449,5 +1473,50 @@ mod tests {
                 "This server is a standby (read-only)"
             ]
         );
+    }
+
+    /// Dead rows and wraparound offer their fix (#145): VACUUM for the
+    /// table, the scan for this database; none on a standby or for
+    /// another database.
+    #[test]
+    fn findings_offer_maintenance() {
+        let snap = |standby: bool, database: &str| PgSnapshot {
+            server: Some(ServerInfo {
+                database: database.into(),
+                standby,
+                ..Default::default()
+            }),
+            oldest_xid: Some(("shop".into(), 1_100_000_000)),
+            storage: Some(Storage {
+                dead_rows: vec![TableSize {
+                    schema: "app".into(),
+                    name: "orders".into(),
+                    live_rows: 1000,
+                    dead_rows: 4000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let fixes = |snap: &PgSnapshot| -> Vec<Fix> {
+            insights(snap, None)
+                .into_iter()
+                .filter_map(|i| i.fix)
+                .collect()
+        };
+        assert_eq!(
+            fixes(&snap(false, "shop")),
+            [
+                Fix::Scan,
+                Fix::Table {
+                    schema: "app".into(),
+                    table: "orders".into(),
+                    task: FixTask::VacuumAnalyze,
+                }
+            ]
+        );
+        assert_eq!(fixes(&snap(false, "other")).len(), 1, "only the table's");
+        assert!(fixes(&snap(true, "shop")).is_empty());
     }
 }

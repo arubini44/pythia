@@ -8,7 +8,7 @@ use egui_plot::{HLine, Legend, Line, Plot, PlotPoints};
 use pythia_db::DbError;
 
 use super::style::{self, Kpi, Palette, bytes, compact, duration, section};
-use super::{Analysis, DetailTab, FieldFilter, Want, Wants, refresh_selector};
+use super::{Analysis, DetailTab, FieldFilter, MonitorAction, Want, Wants, refresh_selector};
 use crate::insights::{Insight, Severity, Target, insights};
 use crate::queries::{
     Counters, DashboardSnapshot, EventRate, PgaUser, Rates, SystemEvent, TablespaceDetail, TopSql,
@@ -1091,6 +1091,12 @@ pub(super) fn insights_strip(ui: &mut Ui, found: &[Insight], have_rates: bool, w
                         serial,
                         tab: None,
                     });
+                }
+                if let Some(fix) = &i.fix {
+                    let (label, hover) = fix.button();
+                    if ui.small_button(label).on_hover_text(hover).clicked() {
+                        wants.push(Want::Act(MonitorAction::Maintain(fix.clone())));
+                    }
                 }
             });
         }
