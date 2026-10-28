@@ -22,14 +22,101 @@ fn out_dir() -> Option<PathBuf> {
     std::env::var_os("PYTHIA_SCREENSHOT_DIR").map(PathBuf::from)
 }
 
-/// One app harness at a time: many wgpu renderers and OCI sessions in one
-/// test process crash intermittently (SIGSEGV) when they run in parallel.
-static UI_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// How many UI tests run side by side. Each holds a few database sessions,
+/// and Oracle Free has 200 processes (ORA-12516 beyond).
+const UI_SLOTS: usize = 4;
 
-/// A harness holding the UI lock for the test's duration.
+/// UI tests run side by side, [`UI_SLOTS`] at a time (#139). A test on
+/// state the others see (the debug scenario, the schema's invalid objects)
+/// runs alone, and so does every test that renders or uses OCI sessions
+/// (the thick driver): many wgpu renderers and OCI sessions in one test
+/// process crash intermittently (SIGSEGV) when they run in parallel.
+static UI_LOCK: UiLock = UiLock {
+    state: std::sync::Mutex::new(UiState {
+        shared: 0,
+        alone: false,
+        waiting_alone: 0,
+    }),
+    changed: std::sync::Condvar::new(),
+};
+
+struct UiLock {
+    state: std::sync::Mutex<UiState>,
+    changed: std::sync::Condvar,
+}
+
+struct UiState {
+    /// Tests running side by side.
+    shared: usize,
+    /// A test running alone.
+    alone: bool,
+    /// Tests waiting to run alone: no new ones start beside the others
+    /// meanwhile.
+    waiting_alone: usize,
+}
+
+impl UiLock {
+    fn state(&self) -> std::sync::MutexGuard<'_, UiState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn wait_while(&self, busy: impl Fn(&UiState) -> bool) -> std::sync::MutexGuard<'_, UiState> {
+        let mut state = self.state();
+        while busy(&state) {
+            state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        state
+    }
+
+    fn shared(&'static self) -> UiGuard {
+        let mut state = self.wait_while(|s| s.alone || s.waiting_alone > 0 || s.shared >= UI_SLOTS);
+        state.shared += 1;
+        UiGuard { alone: false }
+    }
+
+    fn alone(&'static self) -> UiGuard {
+        self.state().waiting_alone += 1;
+        let mut state = self.wait_while(|s| s.alone || s.shared > 0);
+        state.waiting_alone -= 1;
+        state.alone = true;
+        UiGuard { alone: true }
+    }
+}
+
+/// A test's place in [`UI_LOCK`], given back when the test ends (also when
+/// it fails).
+struct UiGuard {
+    alone: bool,
+}
+
+impl Drop for UiGuard {
+    fn drop(&mut self) {
+        let mut state = UI_LOCK.state();
+        if self.alone {
+            state.alone = false;
+        } else {
+            state.shared -= 1;
+        }
+        UI_LOCK.changed.notify_all();
+    }
+}
+
+/// A harness holding its place in the UI lock for the test's duration.
 struct Ui {
     harness: Harness<'static, PythiaApp>,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    lock: Option<UiGuard>,
+}
+
+impl Ui {
+    /// Runs the rest of the test with no other UI test beside it: for
+    /// tests on state the others see or change.
+    fn alone(mut self) -> Self {
+        if !self.lock.as_ref().is_some_and(|l| l.alone) {
+            self.lock = None;
+            self.lock = Some(UI_LOCK.alone());
+        }
+        self
+    }
 }
 
 impl std::ops::Deref for Ui {
@@ -67,11 +154,14 @@ fn sized_harness(size: egui::Vec2) -> Ui {
 }
 
 fn locked_sized(dark: bool, render: bool, size: egui::Vec2) -> Ui {
-    // A failed test poisons the lock; the next one can still run.
-    let lock = UI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let lock = if render || pythia_db::THICK {
+        UI_LOCK.alone()
+    } else {
+        UI_LOCK.shared()
+    };
     Ui {
         harness: new_harness(dark, render, size),
-        _lock: lock,
+        lock: Some(lock),
     }
 }
 
@@ -860,7 +950,7 @@ fn debugger_setup_fixes_the_acl() {
         username: "pythia_dbg_setup".into(),
         ..profile
     };
-    let mut h = harness(true);
+    let mut h = harness(true).alone();
     h.state_mut().test_connect(user, "pythia".into());
     wait_until(&mut h, "connection", |app| app.test_connected());
     h.state_mut().test_open(OpenRequest::Sql {
@@ -956,7 +1046,7 @@ fn debugger_session() {
     let setup = pythia_debugger::target::setup_statements(&profile.username, &host);
     crate::test_db::as_dba(&setup.iter().map(String::as_str).collect::<Vec<_>>());
     use pythia_debugger::{Unit, UnitType};
-    let mut h = harness(true);
+    let mut h = harness(true).alone();
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
     let unit = Unit::new("PYTHIA", "DEMO_PKG", UnitType::PackageBody);
@@ -1111,7 +1201,7 @@ fn debug_environment() -> Option<(ConnectionProfile, String, String, String)> {
 /// Lets the test user debug (with the database connecting back to `host`)
 /// and installs [`DEBUG_SCENARIO`], compiled without debug information.
 /// Returns a connection of the test user. The tests share the scenario:
-/// create the harness first, which holds the UI lock.
+/// create the harness first, [alone](Ui::alone).
 fn install_debug_scenario(host: &str, dba: &str) -> pythia_db::oracle::Connection {
     let connect = |spec: &str| {
         let (cred, db) = spec.rsplit_once('@').unwrap();
@@ -1170,7 +1260,7 @@ fn debugger_follows_execution() {
     let Some((profile, password, host, dba)) = debug_environment() else {
         return;
     };
-    let mut h = harness(true);
+    let mut h = harness(true).alone();
     // Install the scenario, with debug information everywhere.
     let conn = install_debug_scenario(&host, &dba);
     let unit = |name: &str, t| Unit::new("PYTHIA", name, t);
@@ -1287,7 +1377,7 @@ fn debugger_steps_into_unit_compiled_in_program_window() {
     let Some((profile, password, host, dba)) = debug_environment() else {
         return;
     };
-    let mut h = harness(true);
+    let mut h = harness(true).alone();
     let conn = install_debug_scenario(&host, &dba);
     let api = Unit::new("PYTHIA", "DBGX_ORDERS_API", UnitType::PackageBody);
     let pricing = Unit::new("PYTHIA", "DBGX_PRICING", UnitType::PackageBody);
@@ -3972,7 +4062,7 @@ fn invalid_objects_indicator_and_recompile() {
     };
     assert!(invalid_now() >= 4, "set up invalid objects");
     // Other tests' leftovers count too; ours make a difference of at least 4.
-    let mut h = harness(true);
+    let mut h = harness(true).alone();
     h.state_mut().test_settings_mut().invalid.parallelism = 2;
     h.state_mut().test_connect(profile, password);
     wait_until(&mut h, "connection", |app| app.test_connected());
@@ -4077,7 +4167,7 @@ fn program_compile_refreshes_invalid_count() {
         .unwrap()
     };
     assert_eq!(ours(), 2, "spec and body invalid");
-    let mut h = harness(true);
+    let mut h = harness(true).alone();
     // Only compiles refresh the count.
     h.state_mut().test_settings_mut().invalid.refresh_minutes = 0;
     h.state_mut().test_connect(profile, password);
