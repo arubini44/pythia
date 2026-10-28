@@ -67,6 +67,24 @@ All notable changes to Pythia are documented here. The format follows
   menu has *Edit cell*, *Edit in dialog…* and *Set NULL*. Changed, new
   and deleted values are tinted as in the grid. An inline edit open when
   you switch views or records is kept.
+- A MariaDB session's details failed on the plan (#146). Before 10.9 it
+  was a syntax error: MariaDB only has `SHOW EXPLAIN`, which is used now.
+  From 10.9 on, a session waiting for a row lock held up the monitor for
+  30 s before failing. MariaDB can't explain a statement while it waits
+  for a row lock, so the details now say so right away.
+- A MariaDB session's details never showed which session it waits for,
+  and listed no row locks (#147). With performance_schema on, the Locks
+  section failed with *Table 'performance_schema.data_locks' doesn't
+  exist*. On MariaDB and MySQL 5.7, the details now read them from
+  information_schema, which lists the locks involved in lock waits.
+- The MySQL dashboard showed *Table
+  'performance_schema.replication_connection_status' doesn't exist* on
+  MariaDB, and never showed a MariaDB replica's connections (#148). They
+  now come from `SHOW ALL SLAVES STATUS`: each connection's source, its
+  IO and SQL threads, lag and last error.
+- The MySQL dashboard's lock waits named the table as
+  `` `schema`.`table` `` on MariaDB and MySQL 5.7 (#149). They show
+  `schema.table` now, as on MySQL 8.
 
 ## [0.7.0] - 2026-10-28
 

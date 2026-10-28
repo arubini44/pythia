@@ -512,7 +512,7 @@ fn lock_waits(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError> 
         // MySQL 5.7 and MariaDB have them in information_schema.
         Err(e) if e.code == Some(1146) => c.query(
             &format!(
-                "select {COLUMNS}, l.lock_table \
+                "select {COLUMNS}, replace(l.lock_table, '`', '') \
                    from information_schema.innodb_lock_waits w \
                    join information_schema.innodb_trx r on r.trx_id = w.requesting_trx_id \
                    join information_schema.innodb_trx b on b.trx_id = w.blocking_trx_id \
@@ -558,7 +558,16 @@ fn replication(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError>
            left join performance_schema.replication_connection_configuration f \
              on f.channel_name = c.channel_name",
         &[],
-    )?;
+    );
+    let rows = match rows {
+        // MariaDB has only some of these tables.
+        Err(e) if e.code == Some(1146) => {
+            let rows = c.query("show all slaves status", &[])?;
+            s.replicas = rows.iter().map(|r| mariadb_replica(r)).collect();
+            return Ok(());
+        }
+        rows => rows?,
+    };
     s.replicas = rows
         .iter()
         .map(|r| Replica {
@@ -572,6 +581,22 @@ fn replication(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError>
         })
         .collect();
     Ok(())
+}
+
+/// A connection of a MariaDB replica: a row of `SHOW ALL SLAVES STATUS`,
+/// by position (the columns up to `Last_SQL_Error` are the same in every
+/// version; later ones differ).
+fn mariadb_replica(r: &[Cell]) -> Replica {
+    let error = |i| opt(r, i).filter(|e| !e.is_empty());
+    Replica {
+        channel: text(r, 0),
+        source: format!("{}:{}", text(r, 3), text(r, 5)),
+        io_running: text(r, 12) == "Yes",
+        sql_running: text(r, 13) == "Yes",
+        // Seconds_Behind_Master: NULL while it doesn't apply.
+        lag_secs: opt(r, 34).map(|_| int(r, 34)),
+        last_error: error(37).or_else(|| error(39)),
+    }
 }
 
 /// The schemas of the server itself, left out of the storage lists.
@@ -675,7 +700,8 @@ pub struct ThreadDetail {
     pub statement: Option<ThreadStatement>,
     /// The statements before, newest first.
     pub history: Vec<ThreadStatement>,
-    /// `EXPLAIN FOR CONNECTION` of the running statement.
+    /// `EXPLAIN FOR CONNECTION` (MariaDB: `SHOW EXPLAIN`) of the running
+    /// statement.
     pub plan: Option<String>,
     pub transaction: Option<ThreadTransaction>,
     pub locks: Vec<DataLock>,
@@ -715,7 +741,8 @@ pub struct ThreadTransaction {
     pub tables_locked: i64,
 }
 
-/// A data lock a thread holds or waits for (`performance_schema.data_locks`).
+/// A data lock a thread holds or waits for (`performance_schema.data_locks`;
+/// MySQL 5.7 and MariaDB: `information_schema.innodb_locks`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DataLock {
     pub object: String,
@@ -863,43 +890,19 @@ pub fn thread_detail(c: &mut dyn Client, id: i64) -> ThreadDetail {
                 Ok(())
             })(),
         );
-        section(
-            "Locks",
-            "SELECT on performance_schema",
-            (|| {
-                let rows = c.query(
-                    "select concat(object_schema, '.', object_name), index_name, lock_type, lock_mode, \
-                            lock_status, lock_data \
-                       from performance_schema.data_locks where thread_id = ? \
-                      order by lock_status desc, object_name limit 50",
-                    &[ps],
-                )?;
-                d.locks = rows
-                    .iter()
-                    .map(|r| DataLock {
-                        object: text(r, 0),
-                        index: opt(r, 1),
-                        lock_type: text(r, 2),
-                        mode: text(r, 3),
-                        status: text(r, 4),
-                        data: opt(r, 5),
-                    })
-                    .collect();
-                let rows = c.query(
-                    "select b.trx_mysql_thread_id \
-                       from performance_schema.data_lock_waits w \
-                       join information_schema.innodb_trx r \
-                         on r.trx_id = w.requesting_engine_transaction_id \
-                       join information_schema.innodb_trx b \
-                         on b.trx_id = w.blocking_engine_transaction_id \
-                      where r.trx_mysql_thread_id = ? limit 1",
-                    &[&id_text],
-                )?;
-                d.waits_for = rows.first().map(|r| int(r, 0));
-                Ok(())
-            })(),
-        );
     }
+    section(
+        "Locks",
+        if ps_thread.is_some() {
+            "SELECT on performance_schema"
+        } else {
+            "the PROCESS privilege"
+        },
+        thread_locks(c, &id_text, ps_thread.as_deref()).map(|(locks, waits_for)| {
+            d.locks = locks;
+            d.waits_for = waits_for;
+        }),
+    );
     section(
         "Transaction",
         "the PROCESS privilege",
@@ -923,39 +926,18 @@ pub fn thread_detail(c: &mut dyn Client, id: i64) -> ThreadDetail {
         })(),
     );
     if thread.command == "Query" && thread.query.is_some() {
-        // The id is a number: safe in the statement. TREE (8.0.16+) reads
-        // best; older servers have the table.
-        let plan = c
-            .query(&format!("explain format=tree for connection {id}"), &[])
-            .map(|rows| {
-                rows.iter()
-                    .map(|r| text(r, 0))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            // The tree only covers what the iterator executor runs (not an
-            // UPDATE, for one): the table then.
-            .and_then(|tree| {
-                if tree.contains("not executable by iterator executor") {
-                    Err(DbError::new(tree))
-                } else {
-                    Ok(tree)
-                }
-            })
-            .or_else(|_| {
-                c.query(&format!("explain for connection {id}"), &[])
-                    .map(|rows| {
-                        rows.iter()
-                            .map(|r| {
-                                r.iter()
-                                    .map(|c| c.as_deref().unwrap_or("NULL"))
-                                    .collect::<Vec<_>>()
-                                    .join("  ")
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-            });
+        let mariadb = c
+            .query("select version()", &[])
+            .is_ok_and(|rows| rows.first().is_some_and(|r| text(r, 0).contains("MariaDB")));
+        let plan = if mariadb {
+            let lock_wait = d
+                .transaction
+                .as_ref()
+                .is_some_and(|t| t.state == "LOCK WAIT");
+            mariadb_plan(c, id, lock_wait)
+        } else {
+            mysql_plan(c, id)
+        };
         match plan {
             Ok(plan) if !plan.is_empty() => d.plan = Some(plan),
             Ok(_) => {}
@@ -965,6 +947,143 @@ pub fn thread_detail(c: &mut dyn Client, id: i64) -> ThreadDetail {
     }
     d.errors = errors;
     d
+}
+
+/// A thread's row locks, and the thread whose lock it waits for: from
+/// performance_schema on MySQL 8.0+, by its `THREAD_ID` there; from
+/// information_schema on MySQL 5.7 and MariaDB, which lists only the locks
+/// of lock waits.
+fn thread_locks(
+    c: &mut dyn Client,
+    id: &str,
+    ps_thread: Option<&str>,
+) -> Result<(Vec<DataLock>, Option<i64>), DbError> {
+    let lock = |r: &Vec<Cell>| DataLock {
+        object: text(r, 0),
+        index: opt(r, 1),
+        lock_type: text(r, 2),
+        mode: text(r, 3),
+        status: text(r, 4),
+        data: opt(r, 5),
+    };
+    if let Some(ps) = ps_thread {
+        let rows = c.query(
+            "select concat(object_schema, '.', object_name), index_name, lock_type, lock_mode, \
+                    lock_status, lock_data \
+               from performance_schema.data_locks where thread_id = ? \
+              order by lock_status desc, object_name limit 50",
+            &[ps],
+        );
+        match rows {
+            Ok(rows) => {
+                let blocker = c.query(
+                    "select b.trx_mysql_thread_id \
+                       from performance_schema.data_lock_waits w \
+                       join information_schema.innodb_trx r \
+                         on r.trx_id = w.requesting_engine_transaction_id \
+                       join information_schema.innodb_trx b \
+                         on b.trx_id = w.blocking_engine_transaction_id \
+                      where r.trx_mysql_thread_id = ? limit 1",
+                    &[id],
+                )?;
+                return Ok((
+                    rows.iter().map(lock).collect(),
+                    blocker.first().map(|r| int(r, 0)),
+                ));
+            }
+            Err(e) if e.code == Some(1146) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let rows = c.query(
+        "select replace(l.lock_table, '`', ''), l.lock_index, l.lock_type, l.lock_mode, \
+                if(l.lock_id = t.trx_requested_lock_id, 'WAITING', 'GRANTED'), l.lock_data \
+           from information_schema.innodb_locks l \
+           join information_schema.innodb_trx t on t.trx_id = l.lock_trx_id \
+          where t.trx_mysql_thread_id = ? \
+          order by 5 desc, 1 limit 50",
+        &[id],
+    );
+    let rows = match rows {
+        // MySQL 8.0+ without performance_schema: neither.
+        Err(e) if e.code == Some(1109) => return Ok((Vec::new(), None)),
+        rows => rows?,
+    };
+    let blocker = c.query(
+        "select b.trx_mysql_thread_id \
+           from information_schema.innodb_lock_waits w \
+           join information_schema.innodb_trx r on r.trx_id = w.requesting_trx_id \
+           join information_schema.innodb_trx b on b.trx_id = w.blocking_trx_id \
+          where r.trx_mysql_thread_id = ? limit 1",
+        &[id],
+    )?;
+    Ok((
+        rows.iter().map(lock).collect(),
+        blocker.first().map(|r| int(r, 0)),
+    ))
+}
+
+/// `EXPLAIN FOR CONNECTION` of a thread's running statement. The id is a
+/// number: safe in the statement. TREE (8.0.16+) reads best; older servers
+/// have the table.
+fn mysql_plan(c: &mut dyn Client, id: i64) -> Result<String, DbError> {
+    c.query(&format!("explain format=tree for connection {id}"), &[])
+        .map(|rows| {
+            rows.iter()
+                .map(|r| text(r, 0))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        // The tree only covers what the iterator executor runs (not an
+        // UPDATE, for one): the table then.
+        .and_then(|tree| {
+            if tree.contains("not executable by iterator executor") {
+                Err(DbError::new(tree))
+            } else {
+                Ok(tree)
+            }
+        })
+        .or_else(|_| {
+            c.query(&format!("explain for connection {id}"), &[])
+                .map(|rows| plan_table(&rows))
+        })
+}
+
+/// MariaDB's `SHOW EXPLAIN` (10.0+; `EXPLAIN FOR CONNECTION` only from
+/// 10.9). The thread hands over its plan itself, between rows: not while it
+/// waits for a row lock, where the server would give up only after 30 s.
+fn mariadb_plan(c: &mut dyn Client, id: i64, lock_wait: bool) -> Result<String, DbError> {
+    if lock_wait {
+        return Err(DbError::new(
+            "Not available while the thread waits for a row lock: on MariaDB, the thread \
+             hands over its plan itself, between rows.",
+        ));
+    }
+    c.query(
+        &format!("set statement max_statement_time = 2 for show explain for {id}"),
+        &[],
+    )
+    .map(|rows| plan_table(&rows))
+    .map_err(|e| {
+        if e.code == Some(1969) {
+            DbError::new("The thread didn't hand over its plan within 2 seconds.")
+        } else {
+            e
+        }
+    })
+}
+
+/// The classic `EXPLAIN` table, a line per row.
+fn plan_table(rows: &[Vec<Cell>]) -> String {
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .map(|c| c.as_deref().unwrap_or("NULL"))
+                .collect::<Vec<_>>()
+                .join("  ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Every thread, for the Sessions tab: idle ones too, the server's own only

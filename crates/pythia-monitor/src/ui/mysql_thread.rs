@@ -251,7 +251,7 @@ fn details(ui: &mut Ui, d: &ThreadDetail, wants: &mut Wants) {
     });
     if let Some(plan) = &d.plan {
         ui.add_space(6.0);
-        section(ui, "Plan (EXPLAIN FOR CONNECTION)", |ui| {
+        section(ui, "Plan", |ui| {
             egui::ScrollArea::horizontal()
                 .id_salt("thread-plan")
                 .show(ui, |ui| {

@@ -4,7 +4,9 @@
 //! see pythia-db's MySQL tests). With `PYTHIA_TEST_MYSQL_DBA` (e.g.
 //! `root/mysql@localhost:3306/pythia` for the docker-compose service) it
 //! also checks what needs privileges: transactions, lock waits, top
-//! statements.
+//! statements. `PYTHIA_TEST_MYSQL_REPLICA` names an account on a replica
+//! that may read its replication status (e.g. root), for the replication
+//! channels.
 
 use std::sync::{Mutex, mpsc};
 use std::time::Duration;
@@ -258,28 +260,32 @@ fn lock_waits_and_top_statements() {
     b.session.send(DbRequest::Rollback);
 
     // The application's statements, most time first, without the
-    // dashboard's own.
+    // dashboard's own: from performance_schema, which MariaDB leaves off.
     let s = monitor.snapshot(false);
-    let top = &s.top_statements;
-    assert!(!top.is_empty());
-    assert!(
-        top.windows(2).all(|w| w[0].total_secs >= w[1].total_secs),
-        "{top:?}"
-    );
-    assert!(top.iter().all(|t| t.executions > 0 && !t.digest.is_empty()));
-    assert!(
-        s.top_statements
-            .iter()
-            .all(|t| !t.text.to_lowercase().contains("information_schema")),
-        "{:?}",
-        s.top_statements
-    );
+    if s.server.as_ref().is_some_and(|i| i.performance_schema) {
+        let top = &s.top_statements;
+        assert!(!top.is_empty());
+        assert!(
+            top.windows(2).all(|w| w[0].total_secs >= w[1].total_secs),
+            "{top:?}"
+        );
+        assert!(top.iter().all(|t| t.executions > 0 && !t.digest.is_empty()));
+        assert!(
+            s.top_statements
+                .iter()
+                .all(|t| !t.text.to_lowercase().contains("information_schema")),
+            "{:?}",
+            s.top_statements
+        );
+    }
     setup.ok("drop table pythia_mon_locks");
 }
 
 /// A thread's details (#87): the statement it runs and its plan, the lock
 /// it waits for and whose; the transaction of the one it waits for; then
-/// killing the query, and the connection.
+/// killing the query, and the connection. On MariaDB (#146, #147): no plan
+/// while it waits for a row lock, and the locks from information_schema;
+/// its performance_schema is off by default, and keeps no statements when on.
 #[test]
 fn thread_details_and_kill() {
     let (Some(app), Some(dba)) = (params("PYTHIA_TEST_MYSQL"), params("PYTHIA_TEST_MYSQL_DBA"))
@@ -288,6 +294,8 @@ fn thread_details_and_kill() {
     };
     let _serial = LOCK_WAITS.lock().unwrap_or_else(|e| e.into_inner());
     let mut setup = Harness::connect(app.clone());
+    let mariadb = setup.scalar("select version()").contains("MariaDB");
+    let performance_schema = setup.scalar("select @@performance_schema") == "1";
     setup.ok("create table if not exists pythia_mon_threads (id int primary key, v int)");
     setup.ok("delete from pythia_mon_threads");
     setup.ok("insert into pythia_mon_threads values (1, 0)");
@@ -301,6 +309,11 @@ fn thread_details_and_kill() {
     b.send("update pythia_mon_threads set v = 2 where id = 1");
 
     let mut monitor = Harness::connect(dba);
+    let statements = monitor.scalar(
+        "select count(*) from performance_schema.setup_consumers \
+          where name in ('events_statements_current', 'events_statements_history') \
+            and enabled = 'YES'",
+    ) == "2";
     let mut d = monitor
         .run(move |c| Ok(mysql::thread_detail(c, b_id)))
         .unwrap();
@@ -314,22 +327,35 @@ fn thread_details_and_kill() {
             .unwrap();
     }
     eprintln!("{d:#?}");
-    assert!(d.errors.is_empty(), "{:?}", d.errors);
+    if mariadb {
+        assert!(
+            matches!(d.errors.as_slice(), [("Plan", e)] if e.contains("row lock")),
+            "{:?}",
+            d.errors
+        );
+        assert_eq!(d.plan, None);
+    } else {
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
+        let plan = d.plan.as_deref().expect("EXPLAIN FOR CONNECTION");
+        assert!(plan.contains("pythia_mon_threads"), "{plan}");
+    }
     assert_eq!(d.thread.as_ref().unwrap().command, "Query");
-    let statement = d.statement.as_ref().expect("its statement");
-    assert!(
-        statement.running && statement.text.contains("set v = 2"),
-        "{statement:?}"
-    );
-    let plan = d.plan.as_deref().expect("EXPLAIN FOR CONNECTION");
-    assert!(plan.contains("pythia_mon_threads"), "{plan}");
+    if performance_schema {
+        assert!(!d.connection.is_empty());
+    }
+    if statements {
+        let statement = d.statement.as_ref().expect("its statement");
+        assert!(
+            statement.running && statement.text.contains("set v = 2"),
+            "{statement:?}"
+        );
+    }
     assert_eq!(d.waits_for, Some(a_id));
     assert!(
         d.locks.iter().any(|l| l.status == "WAITING"),
         "{:?}",
         d.locks
     );
-    assert!(!d.connection.is_empty());
 
     let held = monitor
         .run(move |c| Ok(mysql::thread_detail(c, a_id)))
@@ -337,11 +363,13 @@ fn thread_details_and_kill() {
     let t = held.transaction.as_ref().expect("A's transaction");
     assert!(t.rows_locked >= 1 && t.rows_modified == 1, "{t:?}");
     assert!(held.locks.iter().any(|l| l.status == "GRANTED"));
-    assert!(
-        held.history.iter().any(|s| s.text.contains("set v = 1")),
-        "{:?}",
-        held.history
-    );
+    if statements {
+        assert!(
+            held.history.iter().any(|s| s.text.contains("set v = 1")),
+            "{:?}",
+            held.history
+        );
+    }
 
     // Kill B's query: its update ends with "Query execution was
     // interrupted"; then A's connection.
@@ -363,6 +391,80 @@ fn thread_details_and_kill() {
     assert!(gone.thread.is_none() || gone.thread.unwrap().command == "Killed");
     b.session.send(DbRequest::Rollback);
     setup.ok("drop table pythia_mon_threads");
+}
+
+/// The plan of a running statement: on MariaDB from `SHOW EXPLAIN`, which
+/// before 10.9 is all it has (#146).
+#[test]
+fn running_statement_plan() {
+    let (Some(app), Some(dba)) = (params("PYTHIA_TEST_MYSQL"), params("PYTHIA_TEST_MYSQL_DBA"))
+    else {
+        return;
+    };
+    let mut setup = Harness::connect(app.clone());
+    setup.ok("drop table if exists pythia_mon_plan");
+    setup.ok("create table pythia_mon_plan (n int)");
+    setup.ok("insert into pythia_mon_plan values (1)");
+    // 1024 rows: their cross join runs until it is killed.
+    for _ in 0..10 {
+        setup.ok("insert into pythia_mon_plan select n from pythia_mon_plan");
+    }
+    setup.ok("commit");
+
+    let mut b = Harness::connect(app);
+    let b_id: i64 = b.scalar("select connection_id()").parse().unwrap();
+    b.send(
+        "select sum(plan_a.n + plan_d.n) from pythia_mon_plan plan_a, pythia_mon_plan plan_b, \
+                pythia_mon_plan plan_c, pythia_mon_plan plan_d",
+    );
+    let mut monitor = Harness::connect(dba);
+    let mut d = monitor
+        .run(move |c| Ok(mysql::thread_detail(c, b_id)))
+        .unwrap();
+    for _ in 0..50 {
+        if d.plan.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        d = monitor
+            .run(move |c| Ok(mysql::thread_detail(c, b_id)))
+            .unwrap();
+    }
+    eprintln!("{d:#?}");
+    let plan = d.plan.as_deref().expect("the plan");
+    assert!(plan.contains("plan_d"), "{plan}");
+    assert!(d.errors.is_empty(), "{:?}", d.errors);
+
+    monitor.run(move |c| mysql::kill(c, b_id, true)).unwrap();
+    loop {
+        match b.next() {
+            DbEvent::Failed { .. } => break,
+            DbEvent::Transaction { .. } => panic!("the cross join ended by itself"),
+            _ => {}
+        }
+    }
+    setup.ok("drop table pythia_mon_plan");
+}
+
+/// A replica's channels on the dashboard; MariaDB's from `SHOW ALL SLAVES
+/// STATUS` (#148).
+#[test]
+fn replication_channels() {
+    let Some(replica) = params("PYTHIA_TEST_MYSQL_REPLICA") else {
+        return;
+    };
+    let s = Harness::connect(replica).snapshot(false);
+    assert!(
+        s.errors
+            .iter()
+            .all(|(section, _)| *section != "Replication"),
+        "{:?}",
+        s.errors
+    );
+    let r = s.replicas.first().expect("a replication channel");
+    assert!(r.io_running && r.sql_running, "{r:?}");
+    assert!(r.source.ends_with(":3306"), "{r:?}");
+    assert!(r.lag_secs.is_some() && r.last_error.is_none(), "{r:?}");
 }
 
 /// The session list (#131): idle sessions too, an open transaction, who
