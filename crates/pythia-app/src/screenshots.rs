@@ -5201,8 +5201,15 @@ fn mysql_dashboard() {
 fn sessions(h: &mut Harness<'_, PythiaApp>, tag: &str) {
     use crate::commands::Command;
     h.state_mut().test_command(Command::MonitorSessions);
+    // The header counts sessions before the list is in: wait for the
+    // table (#137).
     let start = Instant::now();
-    while h.query_by_label_contains(" sessions · ").is_none() {
+    while h.query_by_label("Statement").is_none() {
+        assert!(
+            h.query_by_label_contains("Sessions are not available")
+                .is_none(),
+            "the list loads"
+        );
         assert!(
             start.elapsed() < Duration::from_secs(60),
             "timed out waiting for the sessions"
@@ -5212,13 +5219,8 @@ fn sessions(h: &mut Harness<'_, PythiaApp>, tag: &str) {
     }
     h.run_steps(3);
     assert_eq!(h.state().test_focused_title().as_deref(), Some("Sessions"));
+    assert!(h.query_by_label_contains(" sessions · ").is_some());
     assert!(h.query_by_label("Blocking tree").is_some());
-    assert!(h.query_by_label("Statement").is_some());
-    assert!(
-        h.query_by_label_contains("Sessions are not available")
-            .is_none(),
-        "the list loads"
-    );
     save(h, &format!("{tag}-sessions"));
 }
 
