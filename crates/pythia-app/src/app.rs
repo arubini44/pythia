@@ -258,6 +258,9 @@ impl PythiaApp {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         theme::install(&cc.egui_ctx);
         app.apply_settings(&cc.egui_ctx);
+        // Nothing is connected yet, and there's little to do without a
+        // connection (#132).
+        app.connect_dialog.show(app.last_profile.as_ref());
         app.log("Pythia started");
         app
     }
@@ -5491,6 +5494,28 @@ mod workspace_tests {
         let app = start(&storage);
         assert_eq!(app.browser.marks.recent.get("hr@db"), Some(&vec![object]));
         assert_eq!(app.docs.len(), 1, "a new SQL window");
+    }
+
+    /// Pythia starts with the connect dialog, on the profile used last
+    /// (#132).
+    #[test]
+    fn starts_with_connect_dialog() {
+        let mut storage = Memory::default();
+        let mut app = start(&storage);
+        assert!(app.connect_dialog.open, "first start");
+        assert_eq!(app.connect_dialog.test_editing(), None);
+
+        app.last_profile = Some(ConnectionProfile {
+            name: "Acme test".into(),
+            username: "hr".into(),
+            connect_string: "acme:1521/test".into(),
+            ..Default::default()
+        });
+        eframe::App::save(&mut app, &mut storage);
+
+        let app = start(&storage);
+        assert!(app.connect_dialog.open);
+        assert_eq!(app.connect_dialog.test_editing(), Some("Acme test"));
     }
 
     /// Breakpoints, their conditions, watches and Break on exceptions are

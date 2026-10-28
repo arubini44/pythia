@@ -80,7 +80,9 @@ fn new_harness(dark: bool, render: bool, size: egui::Vec2) -> Harness<'static, P
         .with_size(size)
         .with_pixels_per_point(1.5);
     let builder = if render { builder.wgpu() } else { builder };
-    let harness = builder.build_eframe(|cc| PythiaApp::new(cc, None));
+    let mut harness = builder.build_eframe(|cc| PythiaApp::new(cc, None));
+    // Scenes start without the connect dialog Pythia opens on start.
+    harness.state_mut().test_close_connect();
     harness.ctx.set_theme(if dark {
         egui::Theme::Dark
     } else {

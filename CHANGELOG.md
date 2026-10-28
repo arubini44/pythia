@@ -84,6 +84,10 @@ All notable changes to Pythia are documented here. The format follows
   the one in the database (#112).
 
 ### Changed
+- Pythia opens the connect dialog when it starts (#132), on the profile
+  used last with its saved password, so connecting again is one Enter.
+  On a first start it opens empty, for a new connection. *Cancel* leaves
+  Pythia without a connection as before.
 - SQL windows show their bind and substitution variables in a Variables
   panel next to the editor instead of asking in a dialog before each run
   (#110). The values (or NULL) stay visible and can be changed at any

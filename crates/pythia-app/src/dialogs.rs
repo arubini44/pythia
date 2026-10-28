@@ -733,6 +733,12 @@ impl ConnectDialog {
         self.error.as_deref()
     }
 
+    /// The saved profile the form shows, if any.
+    #[cfg(test)]
+    pub fn test_editing(&self) -> Option<&str> {
+        self.editing.as_deref()
+    }
+
     /// Called once the connection is established.
     pub fn connected(&mut self) {
         self.open = false;
