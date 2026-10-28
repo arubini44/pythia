@@ -11,6 +11,13 @@ All notable changes to Pythia are documented here. The format follows
   Enter/F2, typing, Delete and Ctrl+C/V did nothing unless pressed right
   away, and moving the mouse was enough to lose them. The grid keeps them
   now until something else is clicked.
+- The single record view couldn't edit (#141). It showed the fetched
+  values instead of the pending edits, couldn't reach inserted rows, and
+  stepped past the row filter. Its fields now edit like the grid's cells:
+  click one and type, press Enter or F2, or double-click; the context
+  menu has *Edit cell*, *Edit in dialog…* and *Set NULL*. Changed, new
+  and deleted values are tinted as in the grid. An inline edit open when
+  you switch views or records is kept.
 
 ## [0.7.0] - 2026-10-28
 
