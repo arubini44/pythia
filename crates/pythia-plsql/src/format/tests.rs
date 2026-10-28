@@ -121,18 +121,30 @@ fn snapshots() {
 #[test]
 fn prefixes_never_break() {
     // Every third prefix of every corpus file: no panic, lossless, idempotent.
+    // Dealt out to every core in turn: on one thread it took 7.5 s (#138).
     let o = FormatOptions::default();
-    for (name, src) in corpus() {
-        let cuts: Vec<usize> = src
-            .char_indices()
-            .map(|(i, _)| i)
-            .step_by(3)
-            .chain([src.len()])
-            .collect();
-        for cut in cuts {
-            check(&src[..cut], &o, &format!("{name}[..{cut}]"));
+    let corpus = corpus();
+    let cuts: Vec<(&str, &str, usize)> = corpus
+        .iter()
+        .flat_map(|(name, src)| {
+            src.char_indices()
+                .map(|(i, _)| i)
+                .step_by(3)
+                .chain([src.len()])
+                .map(move |cut| (name.as_str(), src.as_str(), cut))
+        })
+        .collect();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    std::thread::scope(|s| {
+        for first in 0..threads {
+            let (cuts, o) = (&cuts, &o);
+            s.spawn(move || {
+                for (name, src, cut) in cuts.iter().skip(first).step_by(threads) {
+                    check(&src[..*cut], o, &format!("{name}[..{cut}]"));
+                }
+            });
         }
-    }
+    });
 }
 
 /// Tiny deterministic PRNG for the token soups.
