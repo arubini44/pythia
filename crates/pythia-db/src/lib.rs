@@ -90,6 +90,10 @@ pub use ::oracle;
 #[path = "thin.rs"]
 pub mod oracle;
 
+/// Built with the `thick` feature: Oracle through ODPI-C and the Oracle
+/// Client.
+pub const THICK: bool = cfg!(feature = "thick");
+
 /// How this build reaches Oracle, for the About dialog. With the `thick`
 /// feature the first call loads the Oracle Client to ask for its version.
 pub fn oracle_driver() -> &'static str {
