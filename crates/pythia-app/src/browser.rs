@@ -281,9 +281,15 @@ impl Browser {
         self.load_schemas()
     }
 
+    /// Stops showing the connection; favorites and recent objects stay
+    /// (#136).
     pub fn detach(&mut self, connection: &str) {
         if self.connection.as_deref() == Some(connection) {
-            *self = Self::default();
+            let marks = std::mem::take(&mut self.marks);
+            *self = Self {
+                marks,
+                ..Self::default()
+            };
         }
     }
 
@@ -2631,5 +2637,19 @@ mod marks_tests {
         assert_eq!(marks.favorites["db"][0].name, "A");
         marks.toggle_favorite("db", object("A"));
         assert!(!marks.is_favorite("db", &object("A")));
+    }
+
+    /// Disconnecting the connection the browser shows keeps every
+    /// connection's favorites and recent objects (#136).
+    #[test]
+    fn kept_when_disconnecting() {
+        let mut browser = Browser::default();
+        browser.attach("db".into(), "HR".into(), Dialect::ORACLE);
+        browser.marks.toggle_favorite("db", object("A"));
+        browser.marks.touch("other", object("B"));
+        browser.detach("db");
+        assert_eq!(browser.connection, None);
+        assert!(browser.marks.is_favorite("db", &object("A")));
+        assert_eq!(browser.marks.recent["other"], [object("B")]);
     }
 }

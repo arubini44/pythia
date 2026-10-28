@@ -95,6 +95,10 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- Disconnecting the connection the object browser showed, or connecting
+  its profile again, cleared the favorites and recent objects of every
+  connection, and the next workspace save made it permanent (#136). They
+  stay now.
 - Explain plan failed on MariaDB with *Unknown EXPLAIN format name:
   'tree'* (#128). MariaDB has no tree format; it gets the classic plan
   table, as MySQL before 8.0.16 does.
