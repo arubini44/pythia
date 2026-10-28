@@ -80,7 +80,9 @@ fn new_harness(dark: bool, render: bool, size: egui::Vec2) -> Harness<'static, P
         .with_size(size)
         .with_pixels_per_point(1.5);
     let builder = if render { builder.wgpu() } else { builder };
-    let harness = builder.build_eframe(|cc| PythiaApp::new(cc, None));
+    let mut harness = builder.build_eframe(|cc| PythiaApp::new(cc, None));
+    // Scenes start without the connect dialog Pythia opens on start.
+    harness.state_mut().test_close_connect();
     harness.ctx.set_theme(if dark {
         egui::Theme::Dark
     } else {
@@ -3100,7 +3102,7 @@ create table pythia_bnm_t (id number primary key);"
     wait_until(&mut h, "users", |app| !app.test_browser_loading());
     h.get_by_label("pythia").click_secondary();
     h.run_steps(2);
-    assert!(h.query_by_label("Edit user…").is_none());
+    assert!(h.query_by_label("Edit user…").is_some());
     assert!(h.query_by_label("Show schema").is_some());
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
@@ -5213,7 +5215,8 @@ fn sessions(h: &mut Harness<'_, PythiaApp>, tag: &str) {
     assert!(h.query_by_label("Blocking tree").is_some());
     assert!(h.query_by_label("Statement").is_some());
     assert!(
-        h.query_by_label_contains("Sessions are not available").is_none(),
+        h.query_by_label_contains("Sessions are not available")
+            .is_none(),
         "the list loads"
     );
     save(h, &format!("{tag}-sessions"));

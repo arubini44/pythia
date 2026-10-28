@@ -84,6 +84,10 @@ All notable changes to Pythia are documented here. The format follows
   the one in the database (#112).
 
 ### Changed
+- Pythia opens the connect dialog when it starts (#132), on the profile
+  used last with its saved password, so connecting again is one Enter.
+  On a first start it opens empty, for a new connection. *Cancel* leaves
+  Pythia without a connection as before.
 - SQL windows show their bind and substitution variables in a Variables
   panel next to the editor instead of asking in a dialog before each run
   (#110). The values (or NULL) stay visible and can be changed at any
@@ -95,6 +99,9 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- The connect dialog didn't connect on Enter when the profile's password
+  is saved (#134): nothing had the focus. *Connect* has it now whenever
+  user and password are filled in and no field has it.
 - Explain plan failed on MariaDB with *Unknown EXPLAIN format name:
   'tree'* (#128). MariaDB has no tree format; it gets the classic plan
   table, as MySQL before 8.0.16 does.
