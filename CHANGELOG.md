@@ -27,8 +27,32 @@ All notable changes to Pythia are documented here. The format follows
   Without the rights to read everything (on MySQL, `SELECT` on the
   `mysql` database), the form says so, grants what you add, and revokes
   nothing it couldn't read.
+- Maintenance of a table, materialized view or index (#144): *Maintenance…*
+  on its right-click menu opens a window with its state first, as evidence
+  for what it needs: when its statistics were gathered, whether they are
+  stale or locked, and unusable indexes and partitions (Oracle); dead rows,
+  the last (auto)vacuum and analyze, changes since, transaction ID age and
+  invalid indexes (PostgreSQL); reclaimable space (MySQL); statistics age
+  and index fragmentation (SQL Server). Then the database's tasks, each
+  with its options and what it locks or commits:
+  - Oracle: gather, delete, lock or unlock statistics; rebuild unusable
+    indexes and (sub)partitions, or an index; shrink space (row movement
+    only for as long as it takes); move, online from 12.2, with the
+    indexes rebuilt after an offline move.
+  - PostgreSQL: `VACUUM` (analyze, freeze, full, verbose), `ANALYZE`,
+    `REINDEX` (concurrently from 12).
+  - MySQL: `ANALYZE`, `OPTIMIZE` and `CHECK TABLE`, with their answers.
+  - SQL Server: `UPDATE STATISTICS` (sampled or full scan), rebuild
+    (online on Enterprise) or reorganize the indexes.
+
+  The statements show before they run, one by one, on the window's own
+  session with Break; it commits each, so it never commits another
+  window's changes. On a production connection it asks first, on a
+  read-only one it doesn't run.
 
 ### Fixed
+- On SQL Server, `UPDATE STATISTICS` in a SQL window without auto-commit
+  left a transaction open, holding its locks until Commit (#150).
 - On MySQL/MariaDB, PostgreSQL and SQL Server, *New user…* on the Users
   section opened a form that only said "This tool isn't available for
   MySQL connections" (#142).
