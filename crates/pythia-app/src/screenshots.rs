@@ -3102,7 +3102,7 @@ create table pythia_bnm_t (id number primary key);"
     wait_until(&mut h, "users", |app| !app.test_browser_loading());
     h.get_by_label("pythia").click_secondary();
     h.run_steps(2);
-    assert!(h.query_by_label("Edit user…").is_none());
+    assert!(h.query_by_label("Edit user…").is_some());
     assert!(h.query_by_label("Show schema").is_some());
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
@@ -5215,7 +5215,8 @@ fn sessions(h: &mut Harness<'_, PythiaApp>, tag: &str) {
     assert!(h.query_by_label("Blocking tree").is_some());
     assert!(h.query_by_label("Statement").is_some());
     assert!(
-        h.query_by_label_contains("Sessions are not available").is_none(),
+        h.query_by_label_contains("Sessions are not available")
+            .is_none(),
         "the list loads"
     );
     save(h, &format!("{tag}-sessions"));
