@@ -95,6 +95,9 @@ All notable changes to Pythia are documented here. The format follows
   the window like `&&var`, instead of being asked for every run.
 
 ### Fixed
+- The connect dialog didn't connect on Enter when the profile's password
+  is saved (#134): nothing had the focus. *Connect* has it now whenever
+  user and password are filled in and no field has it.
 - Explain plan failed on MariaDB with *Unknown EXPLAIN format name:
   'tree'* (#128). MariaDB has no tree format; it gets the classic plan
   table, as MySQL before 8.0.16 does.

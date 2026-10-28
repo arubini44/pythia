@@ -552,6 +552,15 @@ impl ConnectDialog {
                     valid && !self.connecting,
                     egui::Button::new(RichText::new("Connect").strong()),
                 );
+                // A profile with its saved password: nothing to type, Enter
+                // connects.
+                if connect.enabled()
+                    && !self.form.username.is_empty()
+                    && !self.password.is_empty()
+                    && ui.memory(|m| m.focused().is_none())
+                {
+                    connect.request_focus();
+                }
                 if connect.clicked() || (submit && valid && !self.connecting) {
                     *action = self.connect_request();
                 }
@@ -1543,6 +1552,50 @@ mod tests {
         };
         assert!(!request.profile.ssh.enabled);
         assert!(request.passwords.ssh.is_empty());
+    }
+
+    /// Opened on a profile with its saved password, Connect has the focus:
+    /// Enter connects (#134). Without the password, Enter in its field does.
+    #[test]
+    fn enter_connects() {
+        for saved_password in [true, false] {
+            let mut dialog = ConnectDialog {
+                open: true,
+                form: ConnectionProfile {
+                    username: "hr".into(),
+                    connect_string: "localhost/xe".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            if saved_password {
+                dialog.password = "hr".into();
+            }
+            let saved = SavedConnections::default();
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(900.0, 900.0))
+                .build_ui_state(
+                    move |ui, (dialog, action): &mut (ConnectDialog, Option<ConnectAction>)| {
+                        if let Some(a) = dialog.ui(ui.ctx(), &saved) {
+                            *action = Some(a);
+                        }
+                    },
+                    (dialog, None),
+                );
+            h.run();
+            if !saved_password {
+                h.get_by_role(egui::accesskit::Role::PasswordInput)
+                    .type_text("hr");
+                h.run();
+            }
+            h.key_press(egui::Key::Enter);
+            // Connecting… spins: no run() to a still frame.
+            h.step();
+            let Some(ConnectAction::Connect(request)) = &h.state().1 else {
+                panic!("Enter didn't connect (saved password: {saved_password})");
+            };
+            assert_eq!(request.passwords.database, "hr");
+        }
     }
 
     #[test]
