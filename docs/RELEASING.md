@@ -19,9 +19,29 @@
    creates a **draft** GitHub release with all packages, plain archives and
    `SHA256SUMS.txt`. Review the
    notes and publish it.
+6. Publishing the release updates the website's downloads (see below).
 
 The workflow can also be started by hand (*Actions → Release → Run
 workflow*); without a tag it only uploads the packages as workflow artifacts.
+
+## Website
+
+The website (<https://ortic.github.io/pythia/>) is built from `site/` by
+`site/build.py` and published on GitHub Pages by
+`.github/workflows/pages.yml`, when the site changes on master and when a
+release is published, edited or deleted. The build writes the newest
+release's packages, their sizes, the version and the bullets under
+`## Highlights` in its notes into the page, so the download links follow the
+releases without anyone touching the site. A release that is still a draft,
+or marked as a pre-release, isn't offered.
+
+`KINDS` in `site/build.py` maps the release's file names to the page's
+links. When the release workflow renames a package or drops one, the build
+fails and the site stays as it was; a new kind of file is reported as a
+warning until `KINDS` lists it.
+
+Locally: `python3 site/build.py` builds into `target/site`, and
+`python3 -m http.server -d target/site` serves it.
 
 ## Packages
 

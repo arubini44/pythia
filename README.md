@@ -352,6 +352,7 @@ for Linux, Windows and macOS.
 
 ## Installing
 
+Download Pythia from [its website](https://ortic.github.io/pythia/#download).
 Packages for Linux (`.deb`, AppImage), Windows (MSI, setup `.exe`) and
 macOS (`.dmg`) are attached to each [GitHub
 release](https://github.com/ortic/pythia/releases), in two flavors:

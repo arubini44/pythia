@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pythia — Fast, Native Oracle PL/SQL IDE for Windows, macOS &amp; Linux</title>
+<meta name="description" content="Pythia is a free, open-source Oracle SQL and PL/SQL IDE written in Rust: completion from your schema, a debugger that sets itself up, result editing without locks, monitoring and AI with your own model. No Oracle client needed.">
+<link rel="canonical" href="{{ base_url }}">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#2463b8">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Pythia — a fast, native Oracle PL/SQL IDE">
+<meta property="og:description" content="Free and open source, for Windows, macOS and Linux. No Oracle client needed.">
+<meta property="og:url" content="{{ base_url }}">
+<meta property="og:image" content="{{ base_url }}screenshots/sql-window.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="icons/pythia.svg" type="image/svg+xml">
+<link rel="icon" href="icons/pythia-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="icons/pythia-256.png">
+<link rel="stylesheet" href="style.css">
+<script src="site.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Pythia",
+  "description": "A fast, native Oracle SQL and PL/SQL IDE written in Rust.",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Windows, macOS, Linux",
+  "softwareVersion": "{{ version }}",
+  "datePublished": "{{ date_iso }}",
+  "downloadUrl": "{{ release_url }}",
+  "image": "{{ base_url }}screenshots/sql-window.png",
+  "license": "https://github.com/ortic/pythia/blob/master/LICENSE-MIT",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="wrap top-inner">
+    <a class="brand" href="#" aria-label="Pythia home">
+      <img src="icons/pythia.svg" alt="" width="28" height="28">
+      <span>Pythia</span>
+    </a>
+    <nav aria-label="Main">
+      <a href="#features">Features</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/ortic/pythia">GitHub</a>
+      <a class="btn btn-primary btn-small" href="#download">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero">
+  <div class="wrap hero-text">
+    <p class="eyebrow">Free &amp; open source · Oracle SQL and PL/SQL IDE</p>
+    <h1>Oracle development, <span class="accent">at native speed.</span></h1>
+    <p class="lead">Pythia covers the daily work of an Oracle developer — writing and running SQL, editing and compiling PL/SQL, debugging, editing data, comparing schemas and watching what the database is doing — in one responsive, keyboard-first app for Windows, macOS and Linux.</p>
+    <div class="actions">
+      <a class="btn btn-primary btn-large" id="hero-download" href="#download"
+         data-windows="{{ main_windows_x64_std }}" data-windows-size="{{ size_windows_x64 }}"
+         data-mac-arm64="{{ main_mac_arm64_std }}" data-mac-arm64-size="{{ size_mac_arm64 }}"
+         data-mac-x64="{{ main_mac_x64_std }}" data-mac-x64-size="{{ size_mac_x64 }}"
+         data-linux="{{ main_linux_x64_std }}" data-linux-size="{{ size_linux_x64 }}">Download Pythia</a>
+      <a class="btn btn-secondary btn-large" href="#download">All platforms</a>
+    </div>
+    <p class="hero-note" id="hero-note" data-version="{{ version }}">Version {{ version }} · {{ date }} · Windows, macOS and Linux · no sign-up</p>
+    <ul class="chips" aria-label="At a glance">
+      <li><a href="https://github.com/ortic/pythia">Open source on GitHub</a></li>
+      <li>No Oracle client needed</li>
+      <li>No Java, no Electron</li>
+      <li>No telemetry</li>
+    </ul>
+  </div>
+  <div class="wrap">
+    <figure class="hero-shot">
+      <img src="screenshots/sql-window.png" width="2160" height="1350"
+           alt="Pythia's SQL window: the object browser with tables and packages on the left, a query with syntax highlighting, and its result grid below">
+    </figure>
+  </div>
+</section>
+
+<section class="databases" aria-labelledby="db-title">
+  <div class="wrap">
+    <h2 id="db-title" class="small-title">Connects to</h2>
+    <ul class="pills">
+      <li><strong>Oracle</strong> 11.2 to 23ai</li>
+      <li>MySQL</li>
+      <li>MariaDB</li>
+      <li>PostgreSQL</li>
+      <li>SQL Server</li>
+    </ul>
+    <p class="pills-note">MySQL, MariaDB, PostgreSQL and SQL Server are experimental: SQL windows, the object browser, users and roles, monitoring and maintenance, also through an SSH tunnel. The PL/SQL tools are Oracle's.</p>
+  </div>
+</section>
+
+<section id="features" class="section">
+  <div class="wrap">
+    <h2>Everything an Oracle developer does all day</h2>
+    <p class="section-lead">From the first query to the deployment script, with the shortcuts you'd expect: Ctrl+Enter, F8, F5, F12, Ctrl+Space.</p>
+    <div class="grid cards">
+      <article class="card">
+        <h3>An editor that knows your schema</h3>
+        <p>Completion with the real columns after <code>alias.</code>, package members with their signatures, <code>%ROWTYPE</code> and cursor records. Go to definition — also into the database — references, rename, live diagnostics, multi-cursor and code folding.</p>
+      </article>
+      <article class="card">
+        <h3>SQL windows that keep up</h3>
+        <p>Run the statement under the cursor, the selection or the whole script. A virtualized grid sorts, filters, charts and exports to CSV, Excel, JSON or INSERTs, and follows foreign keys to parent and child rows.</p>
+      </article>
+      <article class="card">
+        <h3>Edit data without locking it</h3>
+        <p>Change query results in place, with no <code>FOR UPDATE</code>: changes are checked against the values you fetched, so someone else's update is reported instead of overwritten. <em>Show SQL</em> previews the DML.</p>
+      </article>
+      <article class="card">
+        <h3>PL/SQL from spec to body</h3>
+        <p>Program windows with spec and body, compile errors you can click, an outline and a formatter your team can share. <em>Test…</em> writes a ready-to-run block for any procedure or function — records, collections and ref cursors included.</p>
+      </article>
+      <article class="card">
+        <h3>A debugger that sets itself up</h3>
+        <p>Conditional breakpoints, step into, watches, Run to Cursor, and values you change while stopped. When the database can't connect back, <em>Debugger Setup</em> finds out why — grants, ACL, host name, firewall — and fixes it. A profiler too.</p>
+      </article>
+      <article class="card">
+        <h3>See what the database is doing</h3>
+        <p>A dashboard that says it plainly — “session 175 blocks 2 sessions, likely an uncommitted transaction” — the blocking tree, sessions and SQL with their plans and binds, ASH, AWR and SQL Monitor reports, tkprof for traces.</p>
+      </article>
+      <article class="card">
+        <h3>AI with the model you choose</h3>
+        <p>Anthropic, any OpenAI-compatible API, a local model (Ollama, llama.cpp, LM Studio) or a command line tool. Generate SQL from your real tables, fix errors, explain plans. Each answer shows what was sent.</p>
+      </article>
+      <article class="card">
+        <h3>Compare, import, maintain</h3>
+        <p>Schema compare with ordered sync scripts, data compare by key, CSV and Excel import with type inference, table export, and a maintenance scan for stale statistics, unusable indexes and dead rows.</p>
+      </article>
+      <article class="card">
+        <h3>Your code under version control</h3>
+        <p>Open a folder as a project with its git status, compare a file with its object in the database, export a schema as one file per object, and deploy what changed in dependency order.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section section-tight" aria-label="Screenshots">
+  <div class="wrap grid shots">
+    <figure>
+      <a href="screenshots/debugger.png"><img src="screenshots/debugger.png" width="2160" height="1350" loading="lazy"
+         alt="The debugger stopped at a breakpoint in a package body, with the call stack, variables and watches"></a>
+      <figcaption><strong>Debugger.</strong> Stopped at a breakpoint, with the call stack, variables and watches.</figcaption>
+    </figure>
+    <figure>
+      <a href="screenshots/monitor-dashboard.png"><img src="screenshots/monitor-dashboard.png" width="1440" height="960" loading="lazy"
+         alt="The monitoring dashboard: findings at the top, KPIs and live charts below"></a>
+      <figcaption><strong>Monitoring.</strong> Findings first, then the numbers behind them.</figcaption>
+    </figure>
+    <figure>
+      <a href="screenshots/grid-editing.png"><img src="screenshots/grid-editing.png" width="2160" height="1350" loading="lazy"
+         alt="Editing rows of a query result in the grid, with changed cells marked"></a>
+      <figcaption><strong>Editing results.</strong> In place, checked against what you fetched.</figcaption>
+    </figure>
+    <figure>
+      <a href="screenshots/completion.png"><img src="screenshots/completion.png" width="2160" height="1350" loading="lazy"
+         alt="Completion offering the columns of a table after its alias, with their types"></a>
+      <figcaption><strong>Completion.</strong> Live from the data dictionary.</figcaption>
+    </figure>
+    <figure>
+      <a href="screenshots/project-compare-db.png"><img src="screenshots/project-compare-db.png" width="2160" height="1350" loading="lazy"
+         alt="A project file compared side by side with its object in the database"></a>
+      <figcaption><strong>Projects.</strong> A file next to its object in the database.</figcaption>
+    </figure>
+    <figure>
+      <a href="screenshots/scheduler-jobs.png"><img src="screenshots/scheduler-jobs.png" width="2160" height="1350" loading="lazy"
+         alt="The scheduler jobs window listing jobs with their state, schedule, last and next run"></a>
+      <figcaption><strong>Scheduler jobs.</strong> State, schedule and recent runs.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="section section-soft" aria-labelledby="safe-title">
+  <div class="wrap">
+    <h2 id="safe-title">Safe on production</h2>
+    <p class="section-lead">Built for databases where mistakes are expensive.</p>
+    <ul class="checks">
+      <li><strong>A session per window.</strong> Every window has its own session and transaction, and the status bar always shows what's pending.</li>
+      <li><strong>Production in red.</strong> Production connections are marked red and ask before a commit. Connections can be read-only.</li>
+      <li><strong>Passwords in your keychain.</strong> Database passwords and API keys live in the system's keychain, never in Pythia's files.</li>
+      <li><strong>No locks behind your back.</strong> Editing a result doesn't hold rows locked while you type; maintenance tasks ask first on production.</li>
+      <li><strong>AI sees what you allow.</strong> Table definitions and plans go with a request; result rows and bind values only if you turn it on.</li>
+      <li><strong>Nothing phones home.</strong> No telemetry, no account, no update checks — and no analytics on this site.</li>
+      <li><strong>No Oracle client to install.</strong> A built-in driver written in Rust: Easy Connect, <code>tnsnames.ora</code> and proxy users work as they are.</li>
+      <li><strong>Open source.</strong> Every line is on GitHub, under MIT or Apache-2.0.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- highlights -->
+<section class="section" aria-labelledby="new-title">
+  <div class="wrap narrow">
+    <h2 id="new-title">New in {{ version }}</h2>
+    <ul class="highlights">
+{{ highlights }}
+    </ul>
+    <p><a href="{{ release_url }}">Release notes for {{ version }}</a> · <a href="https://github.com/ortic/pythia/blob/master/CHANGELOG.md">All changes, version by version</a></p>
+  </div>
+</section>
+<!-- /highlights -->
+
+<section id="download" class="section section-soft">
+  <div class="wrap">
+    <h2>Download Pythia</h2>
+    <p class="section-lead">Free for everyone. Version {{ version }}, released {{ date }}.</p>
+
+    <input type="radio" name="flavor" id="flavor-std" class="flavor-radio" checked>
+    <input type="radio" name="flavor" id="flavor-ic" class="flavor-radio">
+    <div class="flavor-switch" role="group" aria-label="Oracle driver">
+      <label for="flavor-std">Built-in driver</label>
+      <label for="flavor-ic">Oracle Instant Client</label>
+    </div>
+    <p class="flavor-note flavor-std">Connects to Oracle on its own — <strong>take this one</strong> unless you need the Instant Client.</p>
+    <p class="flavor-note flavor-ic">For Oracle 11.2, servers that require Native Network Encryption, and OS or wallet logins. Needs Oracle's <a href="https://www.oracle.com/database/technologies/instant-client/downloads.html">Instant Client</a> installed (see the <a href="#faq-flavor">FAQ</a>).</p>
+
+    <div class="grid platforms">
+      <article class="platform" data-os="windows">
+        <h3>Windows</h3>
+        <p class="platform-req">Windows 10 and 11 · x64</p>
+        <ul class="files flavor-std">
+{{ links_windows_std }}
+        </ul>
+        <ul class="files flavor-ic">
+{{ links_windows_ic }}
+        </ul>
+      </article>
+      <article class="platform" data-os="mac">
+        <h3>macOS</h3>
+        <p class="platform-req">macOS 11 or later · Apple silicon and Intel</p>
+        <ul class="files flavor-std">
+{{ links_mac_std }}
+        </ul>
+        <ul class="files flavor-ic">
+{{ links_mac_ic }}
+        </ul>
+      </article>
+      <article class="platform" data-os="linux">
+        <h3>Linux</h3>
+        <p class="platform-req">x86_64 · glibc 2.35 or newer (Ubuntu 22.04, Debian 12, …)</p>
+        <ul class="files flavor-std">
+{{ links_linux_std }}
+        </ul>
+        <ul class="files flavor-ic">
+{{ links_linux_ic }}
+        </ul>
+      </article>
+    </div>
+
+    <p class="download-foot">Every file's SHA-256 is in <a href="{{ checksums_url }}">SHA256SUMS.txt</a>. Older versions are on the <a href="https://github.com/ortic/pythia/releases">releases page</a>. Prefer to build it yourself? <code>cargo build --release</code></p>
+
+    <details class="first-launch">
+      <summary>First launch: “Windows protected your PC” or “Pythia can't be opened”?</summary>
+      <div>
+        <p>The packages aren't code-signed yet, so Windows and macOS ask once before they run Pythia.</p>
+        <ul>
+          <li><strong>Windows:</strong> click <em>More info</em>, then <em>Run anyway</em>.</li>
+          <li><strong>macOS:</strong> open Pythia once and close the message, then go to <em>System Settings → Privacy &amp; Security</em> and click <em>Open Anyway</em> next to Pythia. If macOS says the app is damaged, run <code>xattr -dr com.apple.quarantine /Applications/Pythia.app</code> in Terminal.</li>
+          <li><strong>Linux:</strong> make the AppImage executable first: <code>chmod +x pythia_*.AppImage</code>.</li>
+        </ul>
+      </div>
+    </details>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap callout">
+    <div>
+      <h2>Help make it better</h2>
+      <p>Pythia is young and moves fast. Found a bug, or missing something from the tool you used before? Tell us — every report is read.</p>
+    </div>
+    <div class="callout-actions">
+      <a class="btn btn-primary" href="https://github.com/ortic/pythia/issues/new">Report a problem</a>
+      <a class="btn btn-secondary" href="https://github.com/ortic/pythia/issues">See what's planned</a>
+    </div>
+  </div>
+</section>
+
+<section id="faq" class="section">
+  <div class="wrap narrow">
+    <h2>Questions</h2>
+    <details>
+      <summary>Is Pythia free?</summary>
+      <p>Yes, for personal and commercial use. It's open source under the MIT or Apache-2.0 license, with no account, license key or paid edition.</p>
+    </details>
+    <details>
+      <summary>Do I need an Oracle client?</summary>
+      <p>No. Pythia talks to Oracle with a built-in driver written in Rust. Easy Connect strings (<code>host:port/service</code>) work as they are; for net service names, point <code>TNS_ADMIN</code> at the folder with your <code>tnsnames.ora</code>, and the one of an Oracle Client that's already installed is found the way Oracle finds it.</p>
+    </details>
+    <details id="faq-flavor">
+      <summary>Which download should I take?</summary>
+      <p>The one with the built-in driver, unless you connect to Oracle 11.2, to a server that <em>requires</em> Native Network Encryption (connecting fails with “Native Network Encryption and Data Integrity”), or with OS or wallet logins (<code>/@alias</code>). For those, take the Instant Client download and install Oracle's <a href="https://www.oracle.com/database/technologies/instant-client/downloads.html">Instant Client</a> (Basic or Basic Light) on the library path. Installing one replaces the other; your settings and connections stay.</p>
+    </details>
+    <details>
+      <summary>Which Oracle versions does it work with?</summary>
+      <p>Pythia is developed against Oracle 23ai and tested against 18c and 21c; Oracle 11.2 works with the Instant Client download. A few features need a newer release: the profiler needs 18c, reading trace files through the database 12.2.</p>
+    </details>
+    <details>
+      <summary>What about MySQL, MariaDB, PostgreSQL and SQL Server?</summary>
+      <p>They're experimental: SQL windows with results, explain plan and completion, the object browser, users and roles, sessions, monitoring dashboards and maintenance, also through an SSH tunnel. Their drivers are built in too. The tools that rest on PL/SQL and Oracle's dictionary — debugger, profiler, schema compare and others — stay on Oracle.</p>
+    </details>
+    <details>
+      <summary>Does Pythia send my data anywhere?</summary>
+      <p>Only to your databases, and to the AI model you set up when you use the assistant. Requests carry table definitions, statistics, plans and source; result rows and bind values only if you allow it in <em>Settings → AI</em>, and each answer shows what was sent. There's no telemetry and no account.</p>
+    </details>
+    <details>
+      <summary>Does it run under WSL?</summary>
+      <p>Yes, under WSLg. Pythia opens its window through X11 there; on a scaled display, size it with <em>Settings → UI scale</em> or Ctrl&nbsp;+ and Ctrl&nbsp;−.</p>
+    </details>
+  </div>
+</section>
+
+<section class="section">
+  <div class="wrap final">
+    <h2>Try it on your own schema.</h2>
+    <p>Free, open source, and ready in a minute — on Windows, macOS and Linux.</p>
+    <div class="actions">
+      <a class="btn btn-light" href="#download">Download Pythia</a>
+      <a class="btn btn-ghost" href="https://github.com/ortic/pythia">Star it on GitHub</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot-top">
+      <a class="brand" href="#">
+        <img src="icons/pythia.svg" alt="" width="24" height="24">
+        <span>Pythia</span>
+      </a>
+      <nav aria-label="Footer">
+        <a href="https://github.com/ortic/pythia">Source code</a>
+        <a href="https://github.com/ortic/pythia/releases">Releases</a>
+        <a href="https://github.com/ortic/pythia/blob/master/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ortic/pythia/issues">Issues</a>
+      </nav>
+    </div>
+    <p>Free and open source (MIT or Apache-2.0). Made by <a href="https://github.com/ortic">Ortic</a> and the Pythia contributors.</p>
+    <p class="legal">Oracle, Java and MySQL are registered trademarks of Oracle and/or its affiliates. Other names may be trademarks of their respective owners. Pythia is an independent open-source project, not affiliated with or endorsed by Oracle or any other database vendor.</p>
+  </div>
+</footer>
+</body>
+</html>
