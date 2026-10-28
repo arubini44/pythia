@@ -260,22 +260,24 @@ fn lock_waits_and_top_statements() {
     b.session.send(DbRequest::Rollback);
 
     // The application's statements, most time first, without the
-    // dashboard's own.
+    // dashboard's own: from performance_schema, which MariaDB leaves off.
     let s = monitor.snapshot(false);
-    let top = &s.top_statements;
-    assert!(!top.is_empty());
-    assert!(
-        top.windows(2).all(|w| w[0].total_secs >= w[1].total_secs),
-        "{top:?}"
-    );
-    assert!(top.iter().all(|t| t.executions > 0 && !t.digest.is_empty()));
-    assert!(
-        s.top_statements
-            .iter()
-            .all(|t| !t.text.to_lowercase().contains("information_schema")),
-        "{:?}",
-        s.top_statements
-    );
+    if s.server.as_ref().is_some_and(|i| i.performance_schema) {
+        let top = &s.top_statements;
+        assert!(!top.is_empty());
+        assert!(
+            top.windows(2).all(|w| w[0].total_secs >= w[1].total_secs),
+            "{top:?}"
+        );
+        assert!(top.iter().all(|t| t.executions > 0 && !t.digest.is_empty()));
+        assert!(
+            s.top_statements
+                .iter()
+                .all(|t| !t.text.to_lowercase().contains("information_schema")),
+            "{:?}",
+            s.top_statements
+        );
+    }
     setup.ok("drop table pythia_mon_locks");
 }
 

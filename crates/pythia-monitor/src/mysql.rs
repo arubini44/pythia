@@ -512,7 +512,7 @@ fn lock_waits(c: &mut dyn Client, s: &mut MySqlSnapshot) -> Result<(), DbError> 
         // MySQL 5.7 and MariaDB have them in information_schema.
         Err(e) if e.code == Some(1146) => c.query(
             &format!(
-                "select {COLUMNS}, l.lock_table \
+                "select {COLUMNS}, replace(l.lock_table, '`', '') \
                    from information_schema.innodb_lock_waits w \
                    join information_schema.innodb_trx r on r.trx_id = w.requesting_trx_id \
                    join information_schema.innodb_trx b on b.trx_id = w.blocking_trx_id \
