@@ -1,0 +1,75 @@
+name: Website
+
+# Builds the website in site/ with the newest release's downloads
+# (site/build.py) and publishes it on GitHub Pages: when the site changes on
+# master, and when a release is published, edited or deleted, so the
+# download links always point to the newest packages.
+#
+# Once: Settings → Pages → Source: GitHub Actions.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "site/**"
+      - "docs/screenshots/**"
+      - "assets/icon/**"
+      - ".github/workflows/pages.yml"
+  release:
+    types: [published, edited, unpublished, deleted]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # A release event runs on the release's tag, and the github-pages
+  # environment only deploys from master: start this workflow again there.
+  # (workflow_dispatch is the one event GITHUB_TOKEN may trigger.)
+  on-release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+
+  build:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      # Fails when the newest release lacks a package the page links to,
+      # which leaves the site as it was.
+      - name: Build
+        run: python3 site/build.py --out _site --base-url "${{ steps.pages.outputs.base_url }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
