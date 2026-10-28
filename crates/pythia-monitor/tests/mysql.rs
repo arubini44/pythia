@@ -279,8 +279,9 @@ fn lock_waits_and_top_statements() {
 
 /// A thread's details (#87): the statement it runs and its plan, the lock
 /// it waits for and whose; the transaction of the one it waits for; then
-/// killing the query, and the connection. On MariaDB (#146): no plan while
-/// it waits for a row lock.
+/// killing the query, and the connection. On MariaDB (#146, #147): no plan
+/// while it waits for a row lock, and the locks from information_schema;
+/// its performance_schema is off by default, and keeps no statements when on.
 #[test]
 fn thread_details_and_kill() {
     let (Some(app), Some(dba)) = (params("PYTHIA_TEST_MYSQL"), params("PYTHIA_TEST_MYSQL_DBA"))
@@ -290,6 +291,7 @@ fn thread_details_and_kill() {
     let _serial = LOCK_WAITS.lock().unwrap_or_else(|e| e.into_inner());
     let mut setup = Harness::connect(app.clone());
     let mariadb = setup.scalar("select version()").contains("MariaDB");
+    let performance_schema = setup.scalar("select @@performance_schema") == "1";
     setup.ok("create table if not exists pythia_mon_threads (id int primary key, v int)");
     setup.ok("delete from pythia_mon_threads");
     setup.ok("insert into pythia_mon_threads values (1, 0)");
@@ -303,6 +305,11 @@ fn thread_details_and_kill() {
     b.send("update pythia_mon_threads set v = 2 where id = 1");
 
     let mut monitor = Harness::connect(dba);
+    let statements = monitor.scalar(
+        "select count(*) from performance_schema.setup_consumers \
+          where name in ('events_statements_current', 'events_statements_history') \
+            and enabled = 'YES'",
+    ) == "2";
     let mut d = monitor
         .run(move |c| Ok(mysql::thread_detail(c, b_id)))
         .unwrap();
@@ -329,18 +336,22 @@ fn thread_details_and_kill() {
         assert!(plan.contains("pythia_mon_threads"), "{plan}");
     }
     assert_eq!(d.thread.as_ref().unwrap().command, "Query");
-    let statement = d.statement.as_ref().expect("its statement");
-    assert!(
-        statement.running && statement.text.contains("set v = 2"),
-        "{statement:?}"
-    );
+    if performance_schema {
+        assert!(!d.connection.is_empty());
+    }
+    if statements {
+        let statement = d.statement.as_ref().expect("its statement");
+        assert!(
+            statement.running && statement.text.contains("set v = 2"),
+            "{statement:?}"
+        );
+    }
     assert_eq!(d.waits_for, Some(a_id));
     assert!(
         d.locks.iter().any(|l| l.status == "WAITING"),
         "{:?}",
         d.locks
     );
-    assert!(!d.connection.is_empty());
 
     let held = monitor
         .run(move |c| Ok(mysql::thread_detail(c, a_id)))
@@ -348,11 +359,13 @@ fn thread_details_and_kill() {
     let t = held.transaction.as_ref().expect("A's transaction");
     assert!(t.rows_locked >= 1 && t.rows_modified == 1, "{t:?}");
     assert!(held.locks.iter().any(|l| l.status == "GRANTED"));
-    assert!(
-        held.history.iter().any(|s| s.text.contains("set v = 1")),
-        "{:?}",
-        held.history
-    );
+    if statements {
+        assert!(
+            held.history.iter().any(|s| s.text.contains("set v = 1")),
+            "{:?}",
+            held.history
+        );
+    }
 
     // Kill B's query: its update ends with "Query execution was
     // interrupted"; then A's connection.

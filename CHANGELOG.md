@@ -72,6 +72,11 @@ All notable changes to Pythia are documented here. The format follows
   From 10.9 on, a session waiting for a row lock held up the monitor for
   30 s before failing. MariaDB can't explain a statement while it waits
   for a row lock, so the details now say so right away.
+- A MariaDB session's details never showed which session it waits for,
+  and listed no row locks (#147). With performance_schema on, the Locks
+  section failed with *Table 'performance_schema.data_locks' doesn't
+  exist*. On MariaDB and MySQL 5.7, the details now read them from
+  information_schema, which lists the locks involved in lock waits.
 
 ## [0.7.0] - 2026-10-28
 
